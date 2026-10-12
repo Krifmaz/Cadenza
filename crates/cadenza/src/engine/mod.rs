@@ -33,7 +33,7 @@ pub struct Track {
     pub album: String,
     /// Encore album id.
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub album_id: Option<i64>,
+    pub album_id: Option<String>,
     /// Duration in seconds, if known before decoding.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub duration: Option<f64>,
@@ -113,6 +113,8 @@ pub struct Status {
     pub output: String,
     /// The open output format.
     pub output_format: Option<OutputFormat>,
+    /// Sample rates the current output device accepts (at the configured depth).
+    pub output_rates: Vec<u32>,
     /// Frames the output has accepted since it was opened (diagnostics).
     pub output_frames: u64,
     /// How many times playback has come to a stop (queue finished, or `Stop`). Sample it

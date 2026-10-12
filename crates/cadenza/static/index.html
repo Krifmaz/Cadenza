@@ -1,0 +1,203 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Cadenza</title>
+<style>
+  :root { color-scheme: dark; --bg: #0c0c11; --panel: #16161f; --panel2: #1e1e2a; --line: #2a2a38; --text: #ececf3; --muted: #9a9aae; --accent: #7c8cff; --ok: #46c98b; --warn: #e8b04a; }
+  * { box-sizing: border-box; }
+  body { margin: 0; background: var(--bg); color: var(--text); font: 15px/1.5 system-ui, -apple-system, "Segoe UI", sans-serif; }
+  main { max-width: 1100px; margin: 0 auto; padding: 20px 16px 60px; display: grid; gap: 16px; grid-template-columns: minmax(0, 1fr) minmax(0, 1fr); }
+  @media (max-width: 820px) { main { grid-template-columns: 1fr; } }
+  header { grid-column: 1 / -1; display: flex; align-items: baseline; gap: 12px; }
+  h1 { margin: 0; font-size: 22px; letter-spacing: .5px; }
+  h2 { margin: 0 0 10px; font-size: 15px; text-transform: uppercase; letter-spacing: 1px; color: var(--muted); }
+  .card { background: var(--panel); border: 1px solid var(--line); border-radius: 14px; padding: 16px; min-width: 0; }
+  .muted { color: var(--muted); } .small { font-size: 13px; }
+  .np-title { font-size: 20px; font-weight: 650; }
+  .row { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; }
+  button, select, input[type=text], input[type=number] { background: var(--panel2); color: var(--text); border: 1px solid var(--line); border-radius: 9px; padding: 8px 12px; font: inherit; }
+  button { cursor: pointer; } button:hover { border-color: var(--accent); }
+  button.primary { background: var(--accent); border-color: var(--accent); color: #0c0c11; font-weight: 650; }
+  input[type=range] { width: 100%; accent-color: var(--accent); }
+  .seek { display: flex; align-items: center; gap: 10px; font-variant-numeric: tabular-nums; font-size: 13px; color: var(--muted); }
+  .chain { display: flex; flex-direction: column; gap: 6px; }
+  .stage { background: var(--panel2); border: 1px solid var(--line); border-radius: 10px; padding: 8px 12px; }
+  .stage.off { opacity: .45; }
+  .stage b { display: block; }
+  .arrow { text-align: center; color: var(--muted); line-height: 1; }
+  .badge { display: inline-block; padding: 2px 8px; border-radius: 99px; font-size: 12px; font-weight: 650; border: 1px solid var(--line); }
+  .badge.ok { color: var(--ok); border-color: var(--ok); } .badge.warn { color: var(--warn); border-color: var(--warn); }
+  label.field { display: grid; gap: 4px; margin-bottom: 10px; } label.field span { font-size: 13px; color: var(--muted); }
+  .switch { display: flex; gap: 8px; align-items: center; margin-bottom: 10px; }
+  table { width: 100%; border-collapse: collapse; font-size: 13px; } td, th { padding: 4px; text-align: left; } td input, td select { width: 100%; padding: 4px 6px; }
+  .queue div { padding: 6px 8px; border-radius: 8px; cursor: pointer; } .queue div:hover { background: var(--panel2); } .queue .cur { color: var(--accent); font-weight: 650; }
+  .err { color: #ff7b7b; }
+  .wide { grid-column: 1 / -1; }
+</style>
+</head>
+<body>
+<main>
+  <header><h1>Cadenza</h1><span class="muted small" id="output"></span></header>
+
+  <section class="card">
+    <h2>Now playing</h2>
+    <div class="np-title" id="title">Nothing playing</div>
+    <div class="muted" id="sub"></div>
+    <div class="small muted" id="fmt"></div>
+    <div class="seek" style="margin-top:12px"><span id="pos">0:00</span><input type="range" id="seek" min="0" max="1000" value="0"><span id="dur">0:00</span></div>
+    <div class="row" style="margin-top:10px">
+      <button data-a="prev" title="Previous">⏮</button>
+      <button class="primary" data-a="toggle" id="toggle">▶</button>
+      <button data-a="next" title="Next">⏭</button>
+      <button data-a="stop" title="Stop">⏹</button>
+      <span class="muted small" style="margin-left:auto">Volume</span>
+      <input type="range" id="vol" min="0" max="1" step="0.01" style="width:140px">
+    </div>
+    <div class="err small" id="error"></div>
+    <h2 style="margin-top:18px">Queue</h2>
+    <div class="queue small" id="queue"><span class="muted">Empty. Play files with <code>cadenza play</code>, or send music from Encore.</span></div>
+  </section>
+
+  <section class="card">
+    <h2>Signal path <span id="bp" class="badge"></span></h2>
+    <div class="chain" id="chain"><span class="muted">Stopped.</span></div>
+  </section>
+
+  <section class="card">
+    <h2>Output</h2>
+    <label class="field"><span>Device</span><select id="device"></select></label>
+    <div class="row">
+      <label class="field" style="flex:1"><span>Rate</span><select id="rate"></select></label>
+      <label class="field" style="flex:1"><span>Bits</span><select id="bits"><option>16</option><option>24</option><option>32</option></select></label>
+    </div>
+    <label class="switch"><input type="checkbox" id="bitperfect"> <b>Bit-perfect</b> <span class="muted small">send the file untouched – no upsampling, dither, EQ or volume</span></label>
+  </section>
+
+  <section class="card">
+    <h2>DSP</h2>
+    <label class="field"><span>Upsampling filter</span><select id="filter"></select></label>
+    <label class="field"><span>Dither / noise shaping</span><select id="dither"></select></label>
+    <label class="field"><span>Convolution (impulse response file, WAV or text; empty = off)</span><input type="text" id="convolution" placeholder="/path/to/room.wav"></label>
+  </section>
+
+  <section class="card wide">
+    <h2>Parametric EQ <label class="small" style="text-transform:none;letter-spacing:0;margin-left:8px"><input type="checkbox" id="eq_enabled"> on</label></h2>
+    <table><thead><tr><th>Type</th><th>Frequency (Hz)</th><th>Gain (dB)</th><th>Q</th><th></th></tr></thead><tbody id="eq"></tbody></table>
+    <div class="row" style="margin-top:8px"><button id="eq-add">Add band</button><button class="primary" id="eq-save">Apply EQ</button></div>
+  </section>
+</main>
+<script>
+const $ = (id) => document.getElementById(id);
+const esc = (s) => String(s ?? '').replace(/[&<>"']/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
+const dur = (s) => { s = Math.max(0, Math.round(s || 0)); return `${Math.floor(s / 60)}:${String(s % 60).padStart(2, '0')}`; };
+const api = async (method, path, body) => {
+  const r = await fetch(path, { method, headers: body ? { 'Content-Type': 'application/json' } : {}, body: body ? JSON.stringify(body) : undefined });
+  const j = await r.json().catch(() => ({}));
+  if (!r.ok) throw new Error(j.error || r.statusText);
+  return j;
+};
+let status = null, dragging = false, eqBands = [], loaded = false;
+const EQ_TYPES = ['peaking', 'low-shelf', 'high-shelf', 'low-pass', 'high-pass', 'notch'];
+
+function paint(s) {
+  status = s;
+  const t = s.track;
+  $('title').textContent = t ? (t.title || 'Untitled') : 'Nothing playing';
+  $('sub').textContent = t ? [t.artist, t.album].filter(Boolean).join(' · ') : '';
+  $('fmt').textContent = s.source_format || '';
+  $('output').textContent = s.output ? `${s.output}${s.output_format ? ' · ' + (s.output_format.rate / 1000) + ' kHz / ' + s.output_format.bits + '-bit' : ''}` : '';
+  $('toggle').textContent = s.state === 'playing' ? '⏸' : '▶';
+  if (!dragging) {
+    $('seek').value = s.duration ? (s.position / s.duration) * 1000 : 0;
+    $('pos').textContent = dur(s.position);
+  }
+  $('dur').textContent = dur(s.duration);
+  if (document.activeElement !== $('vol')) $('vol').value = s.volume_linear ?? 1;
+  $('error').textContent = s.error || '';
+  $('queue').innerHTML = s.queue?.length ? s.queue.map((q, i) => `<div data-i="${i}" class="${i === s.index ? 'cur' : ''}">${i + 1}. ${esc(q.title)}${q.artist ? ' – ' + esc(q.artist) : ''}</div>`).join('') : '<span class="muted">Empty. Play files with <code>cadenza play</code>, or send music from Encore.</span>';
+  const p = s.signal_path;
+  $('bp').className = 'badge ' + (p ? (p.bit_perfect ? 'ok' : 'warn') : '');
+  $('bp').textContent = p ? (p.bit_perfect ? 'bit-perfect' : 'processed') : '';
+  if (p) {
+    const ep = (e, name) => `<div class="stage"><b>${name}</b><span class="small muted">${esc(e.label || [e.format, e.rate ? (e.rate / 1000) + ' kHz' : '', e.bits ? e.bits + '-bit' : '', e.channels ? e.channels + ' ch' : ''].filter(Boolean).join(' · '))}</span></div>`;
+    $('chain').innerHTML = [ep(p.input, 'Source'), ...p.stages.map(st => `<div class="stage ${st.active ? '' : 'off'}"><b>${esc(st.name)}${st.active ? '' : ' (bypassed)'}</b><span class="small muted">${esc(st.detail)}</span></div>`), ep(p.output, 'Output · ' + esc(s.output || ''))].join('<div class="arrow">↓</div>')
+      + `<div class="small muted" style="margin-top:6px">${esc(p.label)}${p.latency_seconds ? ` · latency ${(p.latency_seconds * 1000).toFixed(0)} ms` : ''}</div>`;
+  } else $('chain').innerHTML = '<span class="muted">Stopped.</span>';
+  if (!loaded) loadSettings(s.settings);
+}
+
+function loadSettings(set) {
+  loaded = true;
+  $('bitperfect').checked = !!set.dsp.bit_perfect;
+  $('filter').value = set.dsp.filter;
+  $('dither').value = set.dsp.dither;
+  $('convolution').value = set.dsp.convolution || '';
+  $('bits').value = String(set.output.bits);
+  $('eq_enabled').checked = set.dsp.eq_enabled !== false;
+  eqBands = (set.dsp.eq || []).map(b => ({ ...b }));
+  paintEq();
+  const rate = String(set.output.rate ?? 'auto');
+  fillRates(rate);
+  $('device').dataset.want = `${set.output.backend}|${set.output.device}`;
+  if ($('device').options.length) $('device').value = $('device').dataset.want;
+  for (const id of ['filter', 'dither', 'bits']) $(id).disabled = false;
+  lockDsp();
+}
+function lockDsp() { for (const id of ['filter', 'dither', 'convolution']) $(id).disabled = $('bitperfect').checked; }
+function fillRates(cur) {
+  const rates = [...new Set([44100, 48000, 88200, 96000, 176400, 192000, 352800, 384000, 705600, 768000, ...(status?.output_rates || [])])].sort((a, b) => a - b);
+  $('rate').innerHTML = '<option value="auto">Auto (highest multiple of the source)</option><option value="source">Same as the source</option>' + rates.map(r => `<option value="${r}">${r / 1000} kHz</option>`).join('');
+  $('rate').value = cur;
+  if (!$('rate').value) $('rate').value = 'auto';
+}
+function paintEq() {
+  $('eq').innerHTML = eqBands.map((b, i) => `<tr data-i="${i}">
+    <td><select data-k="kind">${EQ_TYPES.map(t => `<option ${b.kind === t ? 'selected' : ''}>${t}</option>`).join('')}</select></td>
+    <td><input type="number" data-k="freq" value="${b.freq ?? 1000}" min="10" max="40000"></td>
+    <td><input type="number" data-k="gain_db" value="${b.gain_db ?? 0}" step="0.1" min="-24" max="24"></td>
+    <td><input type="number" data-k="q" value="${b.q ?? 0.707}" step="0.01" min="0.1" max="20"></td>
+    <td><button data-rm="${i}">✕</button></td></tr>`).join('') || '<tr><td colspan="5" class="muted">No bands.</td></tr>';
+}
+
+async function save(patch) {
+  try { await api('PUT', '/api/settings', patch); } catch (e) { $('error').textContent = e.message; }
+}
+async function control(action, value) {
+  try { paint(await api('POST', '/api/control', value === undefined ? { action } : { action, value })); } catch (e) { $('error').textContent = e.message; }
+}
+
+document.querySelectorAll('[data-a]').forEach(b => b.onclick = () => control(b.dataset.a));
+$('seek').oninput = () => { dragging = true; $('pos').textContent = dur((status?.duration || 0) * $('seek').value / 1000); };
+$('seek').onchange = () => { dragging = false; control('seek', (status?.duration || 0) * $('seek').value / 1000); };
+$('vol').onchange = () => control('volume', Number($('vol').value));
+$('queue').onclick = (e) => { const d = e.target.closest('[data-i]'); if (d) control('play_index', Number(d.dataset.i)); };
+$('bitperfect').onchange = () => { lockDsp(); save({ dsp: { bit_perfect: $('bitperfect').checked } }); };
+$('filter').onchange = () => save({ dsp: { filter: $('filter').value } });
+$('dither').onchange = () => save({ dsp: { dither: $('dither').value } });
+$('convolution').onchange = () => save({ dsp: { convolution: $('convolution').value.trim() } });
+$('bits').onchange = () => save({ output: { bits: Number($('bits').value) } });
+$('rate').onchange = () => save({ output: { rate: /^\d+$/.test($('rate').value) ? Number($('rate').value) : $('rate').value } });
+$('device').onchange = () => { const [backend, ...rest] = $('device').value.split('|'); save({ output: { backend, device: rest.join('|') } }); };
+$('eq_enabled').onchange = () => save({ dsp: { eq_enabled: $('eq_enabled').checked } });
+$('eq').oninput = (e) => { const tr = e.target.closest('tr[data-i]'); const k = e.target.dataset.k; if (!tr || !k) return; const v = e.target.value; eqBands[+tr.dataset.i][k] = k === 'kind' ? v : Number(v); };
+$('eq').onclick = (e) => { const b = e.target.closest('[data-rm]'); if (b) { eqBands.splice(+b.dataset.rm, 1); paintEq(); } };
+$('eq-add').onclick = () => { eqBands.push({ kind: 'peaking', freq: 1000, gain_db: 0, q: 0.707 }); paintEq(); };
+$('eq-save').onclick = () => save({ dsp: { eq: eqBands, eq_enabled: $('eq_enabled').checked } });
+
+(async () => {
+  try {
+    const [filters, dithers, devices] = await Promise.all([api('GET', '/api/filters'), api('GET', '/api/dithers'), api('GET', '/api/devices')]);
+    $('filter').innerHTML = filters.map(f => `<option value="${esc(f.id)}">${esc(f.label)}</option>`).join('');
+    $('dither').innerHTML = dithers.map(d => `<option value="${esc(d.id)}">${esc(d.label)}</option>`).join('');
+    $('device').innerHTML = devices.map(d => `<option value="${esc(d.backend + '|' + d.id)}">${esc(d.backend)} · ${esc(d.name)}</option>`).join('');
+    paint(await api('GET', '/api/status'));
+    if ($('device').dataset.want) $('device').value = $('device').dataset.want;
+  } catch (e) { $('error').textContent = e.message; }
+  const es = new EventSource('/api/events');
+  es.addEventListener('status', (e) => { try { paint(JSON.parse(e.data)); } catch { /* ignore */ } });
+})();
+</script>
+</body>
+</html>

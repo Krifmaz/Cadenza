@@ -42,6 +42,7 @@ struct Worker {
     output: Option<Box<dyn Output>>,
     output_name: String,
     output_format: Option<OutputFormat>,
+    output_rates: Vec<u32>,
     /// `(path, impulse)` so the file is only parsed once.
     convolution: Option<(String, Arc<ConvolutionSpec>)>,
 
@@ -83,6 +84,7 @@ pub(super) fn run(
         output: None,
         output_name: String::new(),
         output_format: None,
+        output_rates: Vec::new(),
         convolution: None,
         error: None,
         runs_finished: 0,
@@ -442,6 +444,12 @@ impl Worker {
             },
         };
         self.output_name = out.name();
+        let bits = self.settings.output.bits;
+        self.output_rates = output::STANDARD_RATES
+            .iter()
+            .copied()
+            .filter(|r| out.supports(*r, bits))
+            .collect();
         self.output = Some(out);
         Ok(())
     }
@@ -753,6 +761,7 @@ impl Worker {
             settings: self.settings.clone(),
             output: self.output_name.clone(),
             output_format: self.output_format,
+            output_rates: self.output_rates.clone(),
             output_frames: self
                 .output
                 .as_ref()

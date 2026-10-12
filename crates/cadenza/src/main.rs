@@ -119,10 +119,7 @@ fn apply_overrides(config: &mut Config, o: &Overrides) {
 }
 
 fn devices() {
-    println!(
-        "{:<8} {:<40} {:<36} {}",
-        "BACKEND", "ID", "NAME", "RATES / BITS"
-    );
+    println!("{:<8} {:<40} {:<36} RATES / BITS", "BACKEND", "ID", "NAME");
     for d in cadenza::output::list_devices() {
         let rates: Vec<String> = d
             .rates
