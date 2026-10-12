@@ -1,0 +1,302 @@
+//! End-to-end: generate WAV files, play them through the real engine with the null output
+//! and check what came out the other side.
+
+use cadenza::config::{RateSetting, Settings};
+use cadenza::engine::{Command, Engine, EngineOptions, Event, PlayState, Track};
+use cadenza_dsp::CoefficientCache;
+use std::f64::consts::PI;
+use std::path::{Path, PathBuf};
+use std::time::Duration;
+
+fn temp_dir(tag: &str) -> PathBuf {
+    let d = std::env::temp_dir().join(format!("cadenza-it-{tag}-{}", std::process::id()));
+    std::fs::create_dir_all(&d).unwrap();
+    d
+}
+
+fn write_sine_wav(path: &Path, rate: u32, bits: u16, seconds: f64, freq: f64) -> usize {
+    let spec = hound::WavSpec {
+        channels: 2,
+        sample_rate: rate,
+        bits_per_sample: bits,
+        sample_format: hound::SampleFormat::Int,
+    };
+    let mut w = hound::WavWriter::create(path, spec).unwrap();
+    let frames = (rate as f64 * seconds) as usize;
+    let amp = ((1u64 << (bits - 1)) as f64 - 1.0) * 0.5;
+    for i in 0..frames {
+        let v = (amp * (2.0 * PI * freq * i as f64 / rate as f64).sin()).round() as i32;
+        if bits == 16 {
+            w.write_sample(v as i16).unwrap();
+            w.write_sample(v as i16).unwrap();
+        } else {
+            w.write_sample(v).unwrap();
+            w.write_sample(v).unwrap();
+        }
+    }
+    w.finalize().unwrap();
+    frames
+}
+
+fn settings(
+    rate: RateSetting,
+    bits: u32,
+    filter: &str,
+    dither: &str,
+    bit_perfect: bool,
+) -> Settings {
+    let mut s = Settings::default();
+    s.output.backend = "null".into();
+    s.output.rate = rate;
+    s.output.bits = bits;
+    s.dsp.filter = filter.into();
+    s.dsp.dither = dither.into();
+    s.dsp.bit_perfect = bit_perfect;
+    s
+}
+
+fn engine(s: Settings) -> Engine {
+    Engine::start(
+        s,
+        EngineOptions {
+            cache: CoefficientCache::disabled(),
+            realtime: false,
+            persist: None,
+        },
+    )
+}
+
+#[test]
+fn plays_a_wav_upsampled_x4_with_tpdf_to_the_null_output() {
+    let dir = temp_dir("x4");
+    let wav = dir.join("tone.wav");
+    let frames = write_sine_wav(&wav, 44100, 16, 1.5, 1000.0);
+
+    let e = engine(settings(
+        RateSetting::Fixed(176_400),
+        24,
+        "sinc-l-4k",
+        "tpdf",
+        false,
+    ));
+    let mut events = e.subscribe();
+    let runs = e.status().runs_finished;
+    e.play_queue(vec![Track::from_arg(wav.to_str().unwrap())], 0, 0.0);
+    let final_status = e.wait_until_finished(runs, Duration::from_secs(60));
+    assert_eq!(
+        final_status.runs_finished,
+        runs + 1,
+        "playback did not finish in time"
+    );
+
+    assert_eq!(
+        final_status.state,
+        PlayState::Stopped,
+        "{:?}",
+        final_status.error
+    );
+    assert_eq!(final_status.error, None);
+    assert_eq!(
+        final_status.output_frames,
+        frames as u64 * 4,
+        "every input frame became four output frames"
+    );
+    let fmt = final_status.output_format.unwrap();
+    assert_eq!((fmt.rate, fmt.bits, fmt.channels), (176_400, 24, 2));
+
+    // Somewhere along the way the status carried the signal path of a running chain.
+    let mut saw_path = false;
+    let mut started = 0;
+    while let Ok(ev) = events.try_recv() {
+        match ev {
+            Event::Status(s) => {
+                if let Some(p) = &s.signal_path {
+                    saw_path = true;
+                    assert_eq!(p.label, "PCM 16/44.1 → 24/176.4");
+                    assert!(!p.bit_perfect);
+                    assert!(p.stages.iter().any(|st| st.id == "resampler" && st.active));
+                    assert!(p.stages.iter().any(|st| st.id == "dither" && st.active));
+                    assert_eq!(s.source_format.as_deref(), Some("PCM 16/44.1"));
+                }
+            }
+            Event::TrackStarted(t) => {
+                started += 1;
+                assert_eq!(t.title, "tone.wav");
+            }
+            Event::TrackPlayed { seconds, .. } => assert!(seconds >= 0.74),
+        }
+    }
+    assert!(saw_path, "no status with a signal path was published");
+    assert_eq!(started, 1);
+    e.shutdown();
+    let _ = std::fs::remove_dir_all(dir);
+}
+
+#[test]
+fn bit_perfect_queue_is_gapless_and_untouched() {
+    let dir = temp_dir("bp");
+    let a = dir.join("a.wav");
+    let b = dir.join("b.wav");
+    let fa = write_sine_wav(&a, 48000, 24, 0.7, 440.0);
+    let fb = write_sine_wav(&b, 48000, 24, 0.4, 880.0);
+
+    let e = engine(settings(
+        RateSetting::Auto,
+        16,
+        "sinc-l-64k",
+        "lipshitz",
+        true,
+    ));
+    let mut events = e.subscribe();
+    let runs = e.status().runs_finished;
+    e.play_queue(
+        vec![
+            Track::from_arg(a.to_str().unwrap()),
+            Track::from_arg(b.to_str().unwrap()),
+        ],
+        0,
+        0.0,
+    );
+    let st = e.wait_until_finished(runs, Duration::from_secs(60));
+    assert_eq!(
+        st.runs_finished,
+        runs + 1,
+        "playback did not finish in time"
+    );
+    assert_eq!(st.error, None);
+    assert_eq!(
+        st.output_frames,
+        (fa + fb) as u64,
+        "bit-perfect: one output frame per input frame, no gaps"
+    );
+    let fmt = st.output_format.unwrap();
+    assert_eq!(
+        (fmt.rate, fmt.bits),
+        (48000, 24),
+        "24-bit source is never truncated to the configured 16 bits"
+    );
+
+    let mut started = Vec::new();
+    while let Ok(ev) = events.try_recv() {
+        match ev {
+            Event::TrackStarted(t) => started.push(t.title),
+            Event::Status(s) => {
+                if let Some(p) = &s.signal_path {
+                    assert!(p.bit_perfect, "{p:?}");
+                    assert_eq!(p.label, "PCM 24/48 · bit-perfect");
+                }
+            }
+            _ => {}
+        }
+    }
+    assert_eq!(started, ["a.wav", "b.wav"]);
+    e.shutdown();
+    let _ = std::fs::remove_dir_all(dir);
+}
+
+#[test]
+fn format_change_between_tracks_rebuilds_the_chain() {
+    let dir = temp_dir("fmt");
+    let a = dir.join("a.wav");
+    let b = dir.join("b.wav");
+    let fa = write_sine_wav(&a, 44100, 16, 0.5, 440.0);
+    let fb = write_sine_wav(&b, 48000, 24, 0.5, 440.0);
+
+    let e = engine(settings(RateSetting::Auto, 24, "sinc-l-4k", "tpdf", false));
+    let mut s = e.settings();
+    s.output.max_rate = 192_000;
+    e.update_settings(s);
+    let runs = e.status().runs_finished;
+    e.play_queue(
+        vec![
+            Track::from_arg(a.to_str().unwrap()),
+            Track::from_arg(b.to_str().unwrap()),
+        ],
+        0,
+        0.0,
+    );
+    let st = e.wait_until_finished(runs, Duration::from_secs(60));
+    assert_eq!(
+        st.runs_finished,
+        runs + 1,
+        "playback did not finish in time"
+    );
+    assert_eq!(st.error, None);
+    // 44.1k ×4 → 176.4k, then 48k ×4 → 192k: the counter spans both opens.
+    assert_eq!(st.output_frames, (fa * 4 + fb * 4) as u64);
+    assert_eq!(st.output_format.unwrap().rate, 192_000);
+    e.shutdown();
+    let _ = std::fs::remove_dir_all(dir);
+}
+
+#[test]
+fn transport_commands_pause_seek_and_stop() {
+    let dir = temp_dir("transport");
+    let a = dir.join("a.wav");
+    write_sine_wav(&a, 44100, 16, 30.0, 440.0);
+
+    let mut s = settings(RateSetting::Source, 16, "sinc-l-4k", "none", false);
+    s.output.backend = "null".into();
+    // A realtime null output so the track does not finish instantly.
+    let e = Engine::start(
+        s,
+        EngineOptions {
+            cache: CoefficientCache::disabled(),
+            realtime: true,
+            persist: None,
+        },
+    );
+    e.play_queue(vec![Track::from_arg(a.to_str().unwrap())], 0, 5.0);
+    std::thread::sleep(Duration::from_millis(600));
+    let st = e.status();
+    assert_eq!(st.state, PlayState::Playing, "{:?}", st.error);
+    assert!(
+        st.position > 4.0 && st.position < 7.0,
+        "position {}",
+        st.position
+    );
+    assert!(
+        st.signal_path.as_ref().unwrap().bit_perfect,
+        "16-bit source, same rate, no dither, 0 dB"
+    );
+
+    e.send(Command::Pause);
+    std::thread::sleep(Duration::from_millis(300));
+    let p1 = e.status();
+    assert_eq!(p1.state, PlayState::Paused);
+    std::thread::sleep(Duration::from_millis(300));
+    assert_eq!(
+        e.status().position,
+        p1.position,
+        "paused position does not move"
+    );
+
+    e.send(Command::Seek(20.0));
+    e.send(Command::Play);
+    std::thread::sleep(Duration::from_millis(600));
+    let st = e.status();
+    assert_eq!(st.state, PlayState::Playing);
+    assert!(
+        st.position > 19.0 && st.position < 22.0,
+        "position after seek {}",
+        st.position
+    );
+
+    e.send(Command::SetVolume(cadenza_dsp::Volume {
+        gain_db: -6.0,
+        muted: false,
+    }));
+    std::thread::sleep(Duration::from_millis(300));
+    let st = e.status();
+    assert_eq!(st.volume.gain_db, -6.0);
+    assert!(
+        !st.signal_path.as_ref().unwrap().bit_perfect,
+        "volume below 0 dB is not bit-perfect"
+    );
+
+    e.send(Command::Stop);
+    std::thread::sleep(Duration::from_millis(300));
+    assert_eq!(e.status().state, PlayState::Stopped);
+    e.shutdown();
+    let _ = std::fs::remove_dir_all(dir);
+}
