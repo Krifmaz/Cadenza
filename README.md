@@ -11,6 +11,12 @@ music server**: your Encore library shows "Cadenza on <host>" next to your phone
 browser tabs, and you can push a queue to it, control it and see its signal path from
 any Encore client.
 
+**Where it runs:** on the machine your DAC is plugged into (a PC, a Mac, a Raspberry Pi
+next to the DAC). Cadenza decodes, processes and plays straight into the DAC itself; it
+does not hand audio back to anyone. When used with Encore, the Encore server only sends
+Cadenza the original file and the commands – all the processing happens on Cadenza's own
+hardware, never on the server.
+
 Dual-licensed under MIT or Apache-2.0.
 
 ## Features

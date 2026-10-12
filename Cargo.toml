@@ -6,7 +6,7 @@ members = ["crates/cadenza-dsp", "crates/cadenza"]
 version = "0.1.0"
 edition = "2021"
 license = "MIT OR Apache-2.0"
-repository = "https://github.com/cadenza-audio/cadenza"
+repository = "https://github.com/Krifmaz/cadenza"
 authors = ["Cadenza contributors"]
 rust-version = "1.85"
 
