@@ -1,0 +1,53 @@
+[package]
+name = "cadenza"
+description = "Cadenza: an open-source bit-perfect / upsampling music playback engine with a control API, a web UI and Encore integration"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+rust-version.workspace = true
+default-run = "cadenza"
+
+[[bin]]
+name = "cadenza"
+path = "src/main.rs"
+
+[features]
+default = ["cpal"]
+# Shared-mode output through the OS mixer on every platform.
+cpal = ["dep:cpal"]
+# Direct `hw:` ALSA devices (Linux): exclusive, exact rate and format.
+alsa = ["dep:alsa"]
+# WASAPI exclusive mode (Windows only; the crate is only compiled there).
+wasapi = ["dep:wasapi"]
+
+[dependencies]
+cadenza-dsp = { path = "../cadenza-dsp" }
+serde.workspace = true
+serde_json.workspace = true
+thiserror.workspace = true
+anyhow.workspace = true
+log.workspace = true
+dirs.workspace = true
+hound.workspace = true
+env_logger = "0.11"
+clap = { version = "4", features = ["derive"] }
+toml = "0.8"
+symphonia = { version = "0.5", features = ["all"] }
+ureq = { version = "2", features = ["json"] }
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "sync", "time", "net"] }
+axum = { version = "0.8", features = ["json", "query"] }
+tokio-stream = { version = "0.1", features = ["sync"] }
+futures-util = "0.3"
+gethostname = "1"
+cpal = { version = "0.15", optional = true }
+
+[target.'cfg(target_os = "linux")'.dependencies]
+alsa = { version = "0.9", optional = true }
+
+[target.'cfg(windows)'.dependencies]
+wasapi = { version = "0.26", optional = true }
+
+[dev-dependencies]
+tempfile = "3"
