@@ -197,7 +197,7 @@ impl TimeCore {
 }
 
 enum Core {
-    Fft(FftCore),
+    Fft(Box<FftCore>),
     Time(TimeCore),
 }
 
@@ -307,7 +307,7 @@ impl Resampler {
             let depth = filters[0].partitions();
             let cores = (0..channels)
                 .map(|_| {
-                    Core::Fft(FftCore {
+                    Core::Fft(Box::new(FftCore {
                         engine: BlockEngine::new(block, depth),
                         filters: Arc::clone(&filters),
                         l,
@@ -315,7 +315,7 @@ impl Resampler {
                         u: 0,
                         next_take: delay,
                         phase_out: vec![Vec::with_capacity(block); l],
-                    })
+                    }))
                 })
                 .collect();
             (Engine::FftPolyphase { block }, cores)
@@ -497,7 +497,7 @@ mod tests {
         let mut spec = fft.spectrum();
         fft.forward(&mut buf, &mut spec);
         let mags: Vec<f64> = spec.iter().map(|c| c.norm() * 2.0 / win_sum).collect();
-        let (peak_bin, peak) =
+        let (peak_bin, _) =
             mags.iter()
                 .enumerate()
                 .fold((0, 0.0), |a, (i, &m)| if m > a.1 { (i, m) } else { a });
@@ -513,10 +513,10 @@ mod tests {
         // A pure tone's amplitude is RMS·√2; over a thousand periods this is far more
         // accurate than reading a windowed FFT bin (scalloping loss).
         let rms = (x.iter().map(|v| v * v).sum::<f64>() / n as f64).sqrt();
-        let peak = rms * 2f64.sqrt();
+        let peak_amp = rms * 2f64.sqrt();
         let limit_bin = (limit_hz / hz_per_bin).ceil() as usize;
         let worst = mags[limit_bin..].iter().cloned().fold(0.0, f64::max);
-        (peak_hz, peak, 20.0 * (worst / peak).log10())
+        (peak_hz, peak_amp, 20.0 * (worst / peak_amp).log10())
     }
 
     #[test]
