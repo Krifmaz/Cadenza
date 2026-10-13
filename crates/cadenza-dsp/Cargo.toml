@@ -17,3 +17,4 @@ serde_json.workspace = true
 thiserror.workspace = true
 log.workspace = true
 dirs.workspace = true
+rayon.workspace = true
