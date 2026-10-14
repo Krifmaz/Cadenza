@@ -15,8 +15,8 @@ pub const PROGRAM_NAME: &str = "cadenza_kernels.cu";
 
 /// Every kernel the host launches, in pipeline order: the convolver's six, then the
 /// polyphase upsampler's own (it shares `pack_real`, the single transforms and
-/// `copy_complex` with the convolver).
-pub const KERNEL_NAMES: [&str; 10] = [
+/// `copy_complex` with the convolver), then the rational resampler's.
+pub const KERNEL_NAMES: [&str; 11] = [
     "pack_real",
     "stockham_radix2",
     "stockham_radix4",
@@ -27,6 +27,7 @@ pub const KERNEL_NAMES: [&str; 10] = [
     "stockham_radix4_batch",
     "poly_fdl_mac",
     "poly_interleave",
+    "rational_dot",
 ];
 
 /// Threads per block for every launch (all kernels are one-dimensional and embarrassingly

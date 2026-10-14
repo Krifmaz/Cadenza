@@ -263,14 +263,14 @@ pub fn run(o: &BenchOptions) -> Vec<BenchRow> {
             {
                 rows.push(gpu_row(
                     backend.label(),
-                    "FFT polyphase core on the GPU; time-domain stages stay on the CPU".into(),
+                    "polyphase stages on the GPU (FFT and time-domain)".into(),
                     Some(&r),
                 ))
             }
             Ok(r) => rows.push(gpu_row(
                 backend.label(),
                 format!(
-                    "not run: no FFT stage could be placed on the GPU ({})",
+                    "not run: no stage could be placed on the GPU ({})",
                     r.engine
                 ),
                 None,

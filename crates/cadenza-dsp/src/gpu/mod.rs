@@ -48,7 +48,8 @@ mod cuda;
 pub mod wgpu_backend;
 
 use crate::convolution::{
-    BlockConvolver, Convolver as CpuConvolver, PolyphaseBlockConvolver, SpectralFilter,
+    BlockConvolver, Convolver as CpuConvolver, PolyphaseBlockConvolver, RationalDotEngine,
+    SpectralFilter,
 };
 use crate::signal_path::Stage;
 use serde::{Deserialize, Serialize};
@@ -71,6 +72,18 @@ pub trait PolyphaseFactory: Sync {
         filters: &[SpectralFilter],
         channels: usize,
     ) -> Result<Vec<Box<dyn PolyphaseBlockConvolver + Send>>, GpuError>;
+
+    /// One time-domain polyphase engine per channel for a rational stage (44.1 ↔ 48 kHz
+    /// families): the `L` reversed sub-filters `sub` of `S` taps each, uploaded once and
+    /// shared. The default keeps the stage on the CPU.
+    fn rational(
+        &self,
+        sub: &[Vec<f64>],
+        channels: usize,
+    ) -> Result<Vec<Box<dyn RationalDotEngine + Send>>, GpuError> {
+        let _ = (sub, channels);
+        Err(GpuError::Disabled)
+    }
 }
 
 impl PolyphaseFactory for Backend {
@@ -88,12 +101,54 @@ impl PolyphaseFactory for Backend {
             Backend::Wgpu { device, arith, .. } => {
                 wgpu_polyphase(filters, channels, *device, *arith)
             }
-            Backend::Cpu { reason } => Err(if reason == &GpuError::NotCompiled.to_string() {
-                GpuError::NotCompiled
-            } else {
-                GpuError::Disabled
-            }),
+            Backend::Cpu { reason } => Err(cpu_reason(reason)),
         }
+    }
+
+    /// CUDA or wgpu rational engines on a GPU backend; `Err` on the CPU backend.
+    #[allow(unused_variables)]
+    fn rational(
+        &self,
+        sub: &[Vec<f64>],
+        channels: usize,
+    ) -> Result<Vec<Box<dyn RationalDotEngine + Send>>, GpuError> {
+        match self {
+            Backend::Cuda { device, .. } => {
+                #[cfg(feature = "cuda")]
+                {
+                    cuda::RationalEngine::for_channels(sub, channels, *device)
+                }
+                #[cfg(not(feature = "cuda"))]
+                {
+                    Err(GpuError::NotCompiled)
+                }
+            }
+            Backend::Wgpu { device, arith, .. } => {
+                #[cfg(feature = "wgpu")]
+                {
+                    wgpu_backend::RationalEngine::for_channels(
+                        sub,
+                        channels,
+                        *device,
+                        (*arith).into(),
+                    )
+                }
+                #[cfg(not(feature = "wgpu"))]
+                {
+                    Err(GpuError::NotCompiled)
+                }
+            }
+            Backend::Cpu { reason } => Err(cpu_reason(reason)),
+        }
+    }
+}
+
+/// The error a CPU backend answers with: `NotCompiled` or `Disabled`.
+fn cpu_reason(reason: &str) -> GpuError {
+    if reason == GpuError::NotCompiled.to_string() {
+        GpuError::NotCompiled
+    } else {
+        GpuError::Disabled
     }
 }
 

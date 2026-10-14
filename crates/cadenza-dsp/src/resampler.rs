@@ -30,7 +30,8 @@
 
 use crate::cache::CoefficientCache;
 use crate::convolution::{
-    choose_block, BlockEngine, OutputScratch, PolyphaseBlockConvolver, SpectralFilter,
+    choose_block, BlockEngine, OutputScratch, PolyphaseBlockConvolver, RationalDotEngine,
+    SpectralFilter,
 };
 use crate::fir::{FilterKind, FirSpec, Phase};
 use crate::gpu::PolyphaseFactory;
@@ -471,7 +472,10 @@ impl GpuCore {
     }
 }
 
-/// Per-channel state of the time-domain polyphase engine.
+/// Per-channel state of the time-domain polyphase engine. The dot products run on the CPU,
+/// or on a GPU ([`RationalDotEngine`]) when one was given; the history and the output clock
+/// stay here either way, so a device error hands the stream to the CPU mid-call without
+/// losing or repeating a sample.
 struct TimeCore {
     /// Reversed sub-filters: `sub[p][k'] = h[(S−1−k')·l + p] · l`.
     sub: Arc<Vec<Vec<f64>>>,
@@ -483,6 +487,11 @@ struct TimeCore {
     base: i64,
     /// Upsampled-rate index of the next output sample.
     t: u64,
+    /// The GPU engine, while it works.
+    engine: Option<Box<dyn RationalDotEngine + Send>>,
+    /// Shared by the channels of one stage: a lost device is logged once.
+    reported: Arc<AtomicBool>,
+    scratch: Vec<f64>,
 }
 
 impl TimeCore {
@@ -496,24 +505,89 @@ impl TimeCore {
             buf: vec![0.0; sub_len - 1],
             base: -(sub_len as i64 - 1),
             t: delay,
+            engine: None,
+            reported: Arc::new(AtomicBool::new(false)),
+            scratch: Vec::new(),
+        }
+    }
+
+    fn with_engine(
+        mut self,
+        engine: Box<dyn RationalDotEngine + Send>,
+        reported: Arc<AtomicBool>,
+    ) -> Self {
+        self.engine = Some(engine);
+        self.reported = reported;
+        self
+    }
+
+    /// All outputs the history allows, on the GPU engine. `false` when there is none (or
+    /// it just failed and was dropped): the CPU loop then does the work.
+    fn push_on_engine(&mut self, out: &mut Vec<f64>) -> bool {
+        let Some(engine) = self.engine.as_mut() else {
+            return false;
+        };
+        let (l, m, s) = (self.l, self.m, self.sub_len);
+        // Output t is possible while t / l − base < buf.len().
+        let limit = (self.base + self.buf.len() as i64) as u64 * l;
+        if self.t >= limit {
+            return true;
+        }
+        let count = (limit - self.t).div_ceil(m) as usize;
+        let first = (self.t / l) as i64 - self.base;
+        let phase0 = (self.t % l) as usize;
+        let start = first as usize + 1 - s;
+        let last = first as usize + (phase0 + (count - 1) * m as usize) / l as usize;
+        self.scratch.clear();
+        self.scratch.resize(count, 0.0);
+        match engine.run(
+            &self.buf[start..=last],
+            s - 1,
+            phase0,
+            m as usize,
+            &mut self.scratch,
+        ) {
+            Ok(()) => {
+                out.extend_from_slice(&self.scratch);
+                self.t += count as u64 * m;
+                true
+            }
+            Err(e) => {
+                if !self.reported.swap(true, Ordering::Relaxed) {
+                    log::error!(
+                        "GPU: {e} in the rational resampler on {}; this stream continues on the CPU",
+                        engine.device_label()
+                    );
+                }
+                self.engine = None;
+                false
+            }
         }
     }
 
     fn push(&mut self, input: &[f64], out: &mut Vec<f64>) {
         self.buf.extend_from_slice(input);
-        let s = self.sub_len;
-        loop {
-            let n = (self.t / self.l) as i64;
-            let idx = (n - self.base) as usize; // position of x[n] in buf
-            if idx >= self.buf.len() {
-                break;
+        if !self.push_on_engine(out) {
+            let s = self.sub_len;
+            loop {
+                let n = (self.t / self.l) as i64;
+                let idx = (n - self.base) as usize; // position of x[n] in buf
+                if idx >= self.buf.len() {
+                    break;
+                }
+                let p = (self.t % self.l) as usize;
+                let window = &self.buf[idx + 1 - s..=idx];
+                let y: f64 = dot(&self.sub[p], window);
+                out.push(y);
+                self.t += self.m;
             }
-            let p = (self.t % self.l) as usize;
-            let window = &self.buf[idx + 1 - s..=idx];
-            let y: f64 = dot(&self.sub[p], window);
-            out.push(y);
-            self.t += self.m;
         }
+        // Keep only the history the next output can still reach.
+        self.trim();
+    }
+
+    fn trim(&mut self) {
+        let s = self.sub_len;
         // Keep only the history the next output can still reach.
         let next_n = (self.t / self.l) as i64;
         let keep_from = (next_n - self.base) as usize;
@@ -583,11 +657,16 @@ impl Core {
     fn device(&self) -> Option<String> {
         match self {
             Core::Gpu(c) => Some(c.engine.device_label()),
-            _ => None,
+            Core::Time(c) => c.engine.as_ref().map(|e| e.device_label()),
+            Core::Fft(_) => None,
         }
     }
     fn on_gpu(&self) -> bool {
-        matches!(self, Core::Gpu(c) if c.engine.on_gpu())
+        match self {
+            Core::Gpu(c) => c.engine.on_gpu(),
+            Core::Time(c) => c.engine.as_ref().is_some_and(|e| e.on_gpu()),
+            Core::Fft(_) => false,
+        }
     }
 }
 
@@ -684,8 +763,32 @@ impl Stage {
             (Engine::FftPolyphase { block }, cores)
         } else {
             let sub = Arc::new(polyphase(h, l, true));
+            let mut engines = gpu
+                .and_then(|f| match f.rational(&sub, channels) {
+                    Ok(e) if e.len() == channels => {
+                        log::info!(
+                            "GPU: ×{l}/{m} rational stage ({} taps) on {}",
+                            h.len(),
+                            e[0].device_label()
+                        );
+                        Some(e)
+                    }
+                    Ok(_) => None,
+                    Err(e) => {
+                        log::warn!("GPU: {e}; the ×{l}/{m} rational stage runs on the CPU");
+                        None
+                    }
+                })
+                .map(|v| v.into_iter());
+            let reported = Arc::new(AtomicBool::new(false));
             let cores = (0..channels)
-                .map(|_| Core::Time(TimeCore::new(Arc::clone(&sub), l, m, delay)))
+                .map(|_| {
+                    let core = TimeCore::new(Arc::clone(&sub), l, m, delay);
+                    Core::Time(match engines.as_mut().and_then(Iterator::next) {
+                        Some(e) => core.with_engine(e, Arc::clone(&reported)),
+                        None => core,
+                    })
+                })
                 .collect();
             (Engine::TimePolyphase, cores)
         };
@@ -1645,9 +1748,92 @@ mod tests {
         let x = test_signal(5_000, 2);
         let (a, b) = run_pair(&mut cpu, &mut gpu, &x, &[1000]);
         assert_eq!(a, b, "the same CPU core, bit for bit");
-        // A time-domain-only conversion never asks for GPU cores.
+        // A time-domain stage whose engine cannot be built stays on the CPU too.
         let r = Resampler::new_on(44_100, 48_000, 2, kind, 150.0, &cache, Some(&model)).unwrap();
         assert_eq!(r.device(), None);
         assert_eq!(r.engine(), Engine::TimePolyphase);
+    }
+
+    // ---- The time-domain rational stage on the GPU, through its CPU model ----
+
+    fn rational_pair(
+        id: &str,
+        in_rate: u32,
+        out_rate: u32,
+        channels: usize,
+        factory: &dyn PolyphaseFactory,
+    ) -> (Resampler, Resampler) {
+        let cache = CoefficientCache::disabled();
+        let kind = FilterKind::parse(id).unwrap_or_else(|| panic!("{id}"));
+        let cpu = Resampler::new(in_rate, out_rate, channels, kind, 150.0, &cache).unwrap();
+        let gpu = Resampler::new_on(
+            in_rate,
+            out_rate,
+            channels,
+            kind,
+            150.0,
+            &cache,
+            Some(factory),
+        )
+        .unwrap();
+        (cpu, gpu)
+    }
+
+    #[test]
+    fn rational_stage_on_the_gpu_model_matches_the_cpu() {
+        let model = ReferenceFactory::default();
+        for (id, inr, outr, ch) in [
+            ("sinc-l-64k", 44_100, 48_000, 2),
+            ("sinc-m-16k", 48_000, 44_100, 1),
+            ("sinc-l-16k", 96_000, 44_100, 2),
+            ("sinc-l-64k", 44_100, 96_000, 1),
+        ] {
+            let (mut cpu, mut gpu) = rational_pair(id, inr, outr, ch, &model);
+            assert_eq!(gpu.engine(), Engine::TimePolyphase, "{inr}→{outr}");
+            assert_eq!(gpu.device().as_deref(), Some("GPU model (CPU)"));
+            let x = test_signal(7_000, ch);
+            let (a, b) = run_pair(&mut cpu, &mut gpu, &x, &[1, 999, 64, 4410]);
+            let e = rel_err(&a, &b);
+            assert!(e < 1e-12, "{id} {inr}→{outr}: {e:e}");
+        }
+        // The cascade 44.1 → 1.536 MHz: the 160/147 stage and the ×32 stage both there.
+        let (mut cpu, mut gpu) = rational_pair("sinc-l-16k", 44_100, 1_536_000, 2, &model);
+        assert_eq!(gpu.stages().len(), 2);
+        assert!(gpu.stages().iter().all(|s| s.device.is_some()));
+        let x = test_signal(3_000, 2);
+        let (a, b) = run_pair(&mut cpu, &mut gpu, &x, &[700, 13]);
+        assert!(rel_err(&a, &b) < 1e-12);
+    }
+
+    #[test]
+    fn rational_stage_in_double_f32_is_within_48_bit_rounding() {
+        let model = crate::gpu::wgsl::WgslModelFactory {
+            arith: crate::gpu::Arith::DoubleF32,
+        };
+        let (mut cpu, mut gpu) = rational_pair("sinc-l-64k", 44_100, 48_000, 2, &model);
+        assert_eq!(
+            gpu.device().as_deref(),
+            Some("WGSL model (double-f32, CPU)")
+        );
+        let x = test_signal(5_000, 2);
+        let (a, b) = run_pair(&mut cpu, &mut gpu, &x, &[441, 7]);
+        let e = rel_err(&a, &b);
+        assert!(e > 0.0 && e < 1e-10, "{e:e}");
+    }
+
+    #[test]
+    fn rational_stage_failure_mid_stream_continues_on_the_cpu() {
+        for fail in [0, 3, 20] {
+            let model = ReferenceFactory {
+                fail_at_block: Some(fail),
+                ..Default::default()
+            };
+            let (mut cpu, mut gpu) = rational_pair("sinc-l-64k", 44_100, 48_000, 2, &model);
+            let x = test_signal(9_000, 2);
+            let (a, b) = run_pair(&mut cpu, &mut gpu, &x, &[100, 3, 777]);
+            let e = rel_err(&a, &b);
+            assert!(e < 1e-12, "fail at call {fail}: {e:e}");
+            assert_eq!(gpu.device(), None, "the stage now runs on the CPU");
+        }
     }
 }

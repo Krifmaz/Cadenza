@@ -12,7 +12,9 @@
 
 use super::kernels::pass_schedule;
 use super::{GpuError, PolyphaseFactory};
-use crate::convolution::{BlockConvolver, PolyphaseBlockConvolver, SpectralFilter};
+use crate::convolution::{
+    BlockConvolver, PolyphaseBlockConvolver, RationalDotEngine, SpectralFilter,
+};
 use rustfft::num_complex::Complex;
 use std::sync::Arc;
 
@@ -327,10 +329,15 @@ impl PolyphaseBlockConvolver for ReferencePolyphase {
     }
 }
 
-/// Builds [`ReferencePolyphase`] cores: the GPU upsampler path of the resampler, run on the
-/// CPU – what the tests compare against the CPU engine. `fail_at_block` makes every core
-/// fail (as a lost device would) when that many blocks have been processed; `fail_build`
-/// makes construction fail (as a missing driver or full device memory would).
+/// The GPU rational (time-domain polyphase) kernel on the CPU in `f64`: the CUDA kernel's
+/// reduction order (see [`super::wgsl::rational_dot`]).
+pub type ReferenceRational = super::wgsl::RationalModel<f64>;
+
+/// Builds [`ReferencePolyphase`] cores (and [`ReferenceRational`] engines): the GPU
+/// upsampler path of the resampler, run on the CPU – what the tests compare against the
+/// CPU engine. `fail_at_block` makes every core fail (as a lost device would) when that
+/// many blocks (rational engine: calls) have been processed; `fail_build` makes
+/// construction fail (as a missing driver or full device memory would).
 #[derive(Clone, Copy, Debug, Default)]
 pub struct ReferenceFactory {
     /// Fail at this block index (0 = the first block) on every channel.
@@ -361,6 +368,23 @@ impl PolyphaseFactory for ReferenceFactory {
                 Box::new(core) as Box<dyn PolyphaseBlockConvolver + Send>
             })
             .collect())
+    }
+
+    fn rational(
+        &self,
+        sub: &[Vec<f64>],
+        channels: usize,
+    ) -> Result<Vec<Box<dyn RationalDotEngine + Send>>, GpuError> {
+        if self.fail_build {
+            return Err(GpuError::Driver(
+                "simulated build failure (reference)".into(),
+            ));
+        }
+        Ok(super::wgsl::rational_models::<f64>(
+            sub,
+            channels,
+            self.fail_at_block,
+        ))
     }
 }
 

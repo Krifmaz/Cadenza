@@ -14,11 +14,11 @@
 
 use super::reference::{check_polyphase, pair_spectra, ReferencePolyphase};
 use super::wgsl::{
-    block_program, dispatch_size, from_device_bytes, source, to_device_bytes, twiddles, Arith,
-    Params, ENTRY_POINTS,
+    block_program, dispatch_size, from_device_bytes, rational_source, source, to_device_bytes,
+    twiddles, Arith, Params, RationalModel, RationalParams, ENTRY_POINTS, MAX_GROUPS_X,
 };
 use super::{Backend, GpuError, GpuPrecision};
-use crate::convolution::{PolyphaseBlockConvolver, SpectralFilter};
+use crate::convolution::{PolyphaseBlockConvolver, RationalDotEngine, SpectralFilter};
 use std::collections::HashMap;
 use std::sync::{mpsc, Arc, Mutex, OnceLock};
 
@@ -169,6 +169,8 @@ pub(crate) struct Shared {
     queue: wgpu::Queue,
     pipelines: Vec<wgpu::ComputePipeline>,
     layout: wgpu::BindGroupLayout,
+    rational: wgpu::ComputePipeline,
+    rational_layout: wgpu::BindGroupLayout,
     name: String,
     api: &'static str,
     arith: Arith,
@@ -314,6 +316,41 @@ fn open_uncached(index: usize, precision: GpuPrecision) -> Result<Arc<Shared>, G
             })
         })
         .collect();
+    let rational_module = device.create_shader_module(wgpu::ShaderModuleDescriptor {
+        label: Some("cadenza rational"),
+        source: wgpu::ShaderSource::Wgsl(rational_source(arith).into()),
+    });
+    let rational_layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+        label: Some("cadenza rational"),
+        entries: &[
+            wgpu::BindGroupLayoutEntry {
+                binding: 0,
+                visibility: wgpu::ShaderStages::COMPUTE,
+                ty: wgpu::BindingType::Buffer {
+                    ty: wgpu::BufferBindingType::Uniform,
+                    has_dynamic_offset: false,
+                    min_binding_size: wgpu::BufferSize::new(RationalParams::BYTES as u64),
+                },
+                count: None,
+            },
+            storage(1, true),
+            storage(2, true),
+            storage(3, false),
+        ],
+    });
+    let rational_pipeline_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
+        label: Some("cadenza rational"),
+        bind_group_layouts: &[Some(&rational_layout)],
+        ..Default::default()
+    });
+    let rational = device.create_compute_pipeline(&wgpu::ComputePipelineDescriptor {
+        label: Some("rational_dot"),
+        layout: Some(&rational_pipeline_layout),
+        module: &rational_module,
+        entry_point: Some("rational_dot"),
+        compilation_options: Default::default(),
+        cache: None,
+    });
     if let Some(e) = pollster::block_on(scope.pop()) {
         return Err(GpuError::Compile(format!("{}: {e}", info.name)));
     }
@@ -323,6 +360,8 @@ fn open_uncached(index: usize, precision: GpuPrecision) -> Result<Arc<Shared>, G
         queue,
         pipelines,
         layout,
+        rational,
+        rational_layout,
         name: info.name.clone(),
         api: info.api,
         arith,
@@ -332,6 +371,7 @@ fn open_uncached(index: usize, precision: GpuPrecision) -> Result<Arc<Shared>, G
         error,
     });
     self_test(&shared)?;
+    rational_self_test(&shared)?;
     log::info!(
         "GPU: {} ({}) opened, {}, self-test passed",
         info.name,
@@ -383,6 +423,297 @@ fn self_test(shared: &Arc<Shared>) -> Result<(), GpuError> {
         shared.arith.id()
     );
     Ok(())
+}
+
+/// The rational kernel on the device against its CPU model in `f64`.
+fn rational_self_test(shared: &Arc<Shared>) -> Result<(), GpuError> {
+    let (l, s) = (3, 600);
+    let sub: Vec<Vec<f64>> = (0..l)
+        .map(|p| {
+            (0..s)
+                .map(|k| (((k * l + p) as f64) * 0.013).sin() / (1.0 + k as f64 * 0.01))
+                .collect()
+        })
+        .collect();
+    let window: Vec<f64> = (0..3000).map(|i| (i as f64 * 0.37).cos()).collect();
+    let mut dev = RationalEngine::for_channels_on(Arc::clone(shared), &sub, 1)?;
+    let mut model = RationalModel::<f64>::new(&sub);
+    let (mut want, mut got) = (vec![0.0; 900], vec![0.0; 900]);
+    model.run(&window, s - 1, 1, 2, &mut want)?;
+    dev[0].run(&window, s - 1, 1, 2, &mut got)?;
+    let peak = want.iter().fold(1e-30f64, |m, v| m.max(v.abs()));
+    let worst = want
+        .iter()
+        .zip(&got)
+        .map(|(p, q)| (p - q).abs() / peak)
+        .fold(0.0, f64::max);
+    if !worst.is_finite() || worst > SELF_TEST_TOLERANCE {
+        return Err(GpuError::Driver(format!(
+            "{} ({}) failed the rational {} self-test: error {worst:.1e} relative",
+            shared.name,
+            shared.api,
+            shared.arith.id()
+        )));
+    }
+    Ok(())
+}
+
+/// Submit `enc` (which ends by copying the results into `staging`), wait, and read
+/// `out.len()` values back.
+fn submit_and_read(
+    sh: &Shared,
+    enc: wgpu::CommandEncoder,
+    staging: &wgpu::Buffer,
+    out: &mut [f64],
+) -> Result<(), GpuError> {
+    let bytes = (out.len() * 8) as u64;
+    let index = sh.queue.submit([enc.finish()]);
+    let (tx, rx) = mpsc::channel();
+    staging.map_async(wgpu::MapMode::Read, 0..bytes, move |r| {
+        let _ = tx.send(r);
+    });
+    sh.device
+        .poll(wgpu::PollType::Wait {
+            submission_index: Some(index),
+            timeout: None,
+        })
+        .map_err(|e| GpuError::Driver(format!("{}: {e}", sh.name)))?;
+    rx.recv()
+        .map_err(|_| GpuError::Driver("readback never completed".into()))?
+        .map_err(|e| GpuError::Driver(format!("{}: {e}", sh.name)))?;
+    {
+        let view = staging
+            .get_mapped_range(0..bytes)
+            .map_err(|e| GpuError::Driver(format!("{}: {e}", sh.name)))?;
+        from_device_bytes(&view, sh.arith, out);
+    }
+    staging.unmap();
+    if let Some(e) = sh.take_error() {
+        return Err(GpuError::Driver(e));
+    }
+    Ok(())
+}
+
+/// The rational resampler's time-domain polyphase bank on a wgpu device (one per channel;
+/// the sub-filters are shared): per call, upload the window and the parameters, one
+/// workgroup per output sample, read the outputs back.
+pub struct RationalEngine {
+    shared: Arc<Shared>,
+    sub: Arc<wgpu::Buffer>,
+    l: usize,
+    s: usize,
+    params: wgpu::Buffer,
+    win: wgpu::Buffer,
+    out: wgpu::Buffer,
+    staging: wgpu::Buffer,
+    bind: wgpu::BindGroup,
+}
+
+impl std::fmt::Debug for RationalEngine {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("gpu::wgpu::RationalEngine")
+            .field("device", &self.shared.name)
+            .field("arith", &self.shared.arith)
+            .field("phases", &self.l)
+            .field("taps", &self.s)
+            .finish()
+    }
+}
+
+impl RationalEngine {
+    /// Build `channels` engines for the reversed sub-filters `sub` on adapter `device`.
+    pub fn for_channels(
+        sub: &[Vec<f64>],
+        channels: usize,
+        device: usize,
+        precision: GpuPrecision,
+    ) -> Result<Vec<Box<dyn RationalDotEngine + Send>>, GpuError> {
+        Self::for_channels_on(open(device, precision)?, sub, channels)
+    }
+
+    fn for_channels_on(
+        shared: Arc<Shared>,
+        sub: &[Vec<f64>],
+        channels: usize,
+    ) -> Result<Vec<Box<dyn RationalDotEngine + Send>>, GpuError> {
+        let (l, s) = (sub.len(), sub.first().map_or(0, Vec::len));
+        if l == 0 || s == 0 {
+            return Err(GpuError::Driver("empty rational filter".into()));
+        }
+        let bytes = (l * s * 8) as u64;
+        if bytes > shared.max_binding.min(shared.max_buffer) {
+            return Err(GpuError::Driver(format!(
+                "the rational filter needs a {} MB buffer; {} allows {} MB",
+                bytes >> 20,
+                shared.name,
+                shared.max_binding.min(shared.max_buffer) >> 20
+            )));
+        }
+        let dev = &shared.device;
+        let scope = dev.push_error_scope(wgpu::ErrorFilter::OutOfMemory);
+        let flat: Vec<f64> = sub.iter().flatten().copied().collect();
+        let table = Arc::new(buffer(
+            dev,
+            "rational sub-filters",
+            bytes,
+            wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_DST,
+        ));
+        shared
+            .queue
+            .write_buffer(&table, 0, &to_device_bytes(&flat, shared.arith));
+        let mut out: Vec<Box<dyn RationalDotEngine + Send>> = Vec::new();
+        for _ in 0..channels.max(1) {
+            out.push(Box::new(Self::with_capacity(
+                Arc::clone(&shared),
+                Arc::clone(&table),
+                l,
+                s,
+                4 * s,
+                1024,
+            )));
+        }
+        if let Some(e) = pollster::block_on(scope.pop()) {
+            return Err(GpuError::Driver(format!("{}: {e}", shared.name)));
+        }
+        Ok(out)
+    }
+
+    fn with_capacity(
+        shared: Arc<Shared>,
+        sub: Arc<wgpu::Buffer>,
+        l: usize,
+        s: usize,
+        win_cap: usize,
+        out_cap: usize,
+    ) -> Self {
+        let dev = &shared.device;
+        let rw = wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_DST;
+        let params = buffer(
+            dev,
+            "rational params",
+            RationalParams::BYTES as u64,
+            wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
+        );
+        let win = buffer(dev, "rational window", (win_cap * 8) as u64, rw);
+        let out = buffer(
+            dev,
+            "rational out",
+            (out_cap * 8) as u64,
+            rw | wgpu::BufferUsages::COPY_SRC,
+        );
+        let staging = buffer(
+            dev,
+            "rational readback",
+            (out_cap * 8) as u64,
+            wgpu::BufferUsages::MAP_READ | wgpu::BufferUsages::COPY_DST,
+        );
+        let bind = dev.create_bind_group(&wgpu::BindGroupDescriptor {
+            label: Some("cadenza rational"),
+            layout: &shared.rational_layout,
+            entries: &[
+                wgpu::BindGroupEntry {
+                    binding: 0,
+                    resource: params.as_entire_binding(),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 1,
+                    resource: sub.as_entire_binding(),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 2,
+                    resource: win.as_entire_binding(),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 3,
+                    resource: out.as_entire_binding(),
+                },
+            ],
+        });
+        Self {
+            shared,
+            sub,
+            l,
+            s,
+            params,
+            win,
+            out,
+            staging,
+            bind,
+        }
+    }
+}
+
+impl RationalDotEngine for RationalEngine {
+    fn phases(&self) -> usize {
+        self.l
+    }
+
+    fn sub_len(&self) -> usize {
+        self.s
+    }
+
+    fn run(
+        &mut self,
+        window: &[f64],
+        first: usize,
+        phase0: usize,
+        m: usize,
+        out: &mut [f64],
+    ) -> Result<(), GpuError> {
+        if out.is_empty() {
+            return Ok(());
+        }
+        if let Some(e) = self.shared.take_error() {
+            return Err(GpuError::Driver(e));
+        }
+        let win_cap = (self.win.size() / 8) as usize;
+        let out_cap = (self.out.size() / 8) as usize;
+        if window.len() > win_cap || out.len() > out_cap {
+            *self = Self::with_capacity(
+                Arc::clone(&self.shared),
+                Arc::clone(&self.sub),
+                self.l,
+                self.s,
+                window.len().next_power_of_two().max(win_cap),
+                out.len().next_power_of_two().max(out_cap),
+            );
+        }
+        let sh = Arc::clone(&self.shared);
+        let p = RationalParams {
+            s: self.s as u32,
+            l: self.l as u32,
+            m: m as u32,
+            phase0: phase0 as u32,
+            first: first as u32,
+            count: out.len() as u32,
+            one: 1.0,
+        };
+        sh.queue.write_buffer(&self.params, 0, &p.to_bytes());
+        sh.queue
+            .write_buffer(&self.win, 0, &to_device_bytes(window, sh.arith));
+        let mut enc = sh
+            .device
+            .create_command_encoder(&wgpu::CommandEncoderDescriptor { label: None });
+        {
+            let mut pass = enc.begin_compute_pass(&wgpu::ComputePassDescriptor::default());
+            pass.set_pipeline(&sh.rational);
+            pass.set_bind_group(0, &self.bind, &[]);
+            let groups = out.len() as u32;
+            let x = groups.min(MAX_GROUPS_X);
+            pass.dispatch_workgroups(x, groups.div_ceil(x), 1);
+        }
+        enc.copy_buffer_to_buffer(&self.out, 0, &self.staging, 0, (out.len() * 8) as u64);
+        submit_and_read(&sh, enc, &self.staging, out)
+    }
+
+    fn device_label(&self) -> String {
+        let sh = &self.shared;
+        format!("{} ({})", sh.api, super::short_device_name(&sh.name))
+    }
+
+    fn on_gpu(&self) -> bool {
+        true
+    }
 }
 
 /// What the channels of one stage share: the packed sub-filter spectra and the twiddles.
@@ -612,32 +943,7 @@ impl PolyphaseCore {
         }
         let out_bytes = (block * l * 8) as u64;
         enc.copy_buffer_to_buffer(&self.io, 0, &self.staging, 0, out_bytes);
-        let index = sh.queue.submit([enc.finish()]);
-        let (tx, rx) = mpsc::channel();
-        self.staging
-            .map_async(wgpu::MapMode::Read, 0..out_bytes, move |r| {
-                let _ = tx.send(r);
-            });
-        sh.device
-            .poll(wgpu::PollType::Wait {
-                submission_index: Some(index),
-                timeout: None,
-            })
-            .map_err(|e| GpuError::Driver(format!("{}: {e}", sh.name)))?;
-        rx.recv()
-            .map_err(|_| GpuError::Driver("readback never completed".into()))?
-            .map_err(|e| GpuError::Driver(format!("{}: {e}", sh.name)))?;
-        {
-            let view = self
-                .staging
-                .get_mapped_range(0..out_bytes)
-                .map_err(|e| GpuError::Driver(format!("{}: {e}", sh.name)))?;
-            from_device_bytes(&view, sh.arith, out);
-        }
-        self.staging.unmap();
-        if let Some(e) = sh.take_error() {
-            return Err(GpuError::Driver(e));
-        }
+        submit_and_read(sh, enc, &self.staging, out)?;
         self.head = head;
         self.count = count;
         self.frame.copy_within(block.., 0);
@@ -686,18 +992,28 @@ mod tests {
     #[test]
     fn wgsl_validates_and_translates_for_every_backend() {
         use naga::valid::{Capabilities, ValidationFlags, Validator};
-        for arith in [Arith::F64, Arith::DoubleF32] {
-            let module = naga::front::wgsl::parse_str(&source(arith))
-                .unwrap_or_else(|e| panic!("{arith:?}: {}", e.emit_to_string(&source(arith))));
+        for (arith, src) in [
+            (Arith::F64, source(Arith::F64)),
+            (Arith::DoubleF32, source(Arith::DoubleF32)),
+            (Arith::F64, rational_source(Arith::F64)),
+            (Arith::DoubleF32, rational_source(Arith::DoubleF32)),
+        ] {
+            let module = naga::front::wgsl::parse_str(&src)
+                .unwrap_or_else(|e| panic!("{arith:?}: {}", e.emit_to_string(&src)));
             let caps = match arith {
                 Arith::F64 => Capabilities::FLOAT64,
                 Arith::DoubleF32 => Capabilities::empty(),
             };
             let info = Validator::new(ValidationFlags::all(), caps)
                 .validate(&module)
-                .unwrap_or_else(|e| panic!("{arith:?}: {}", e.emit_to_string(&source(arith))));
-            for e in ENTRY_POINTS {
-                assert!(module.entry_points.iter().any(|ep| ep.name == e), "{e}");
+                .unwrap_or_else(|e| panic!("{arith:?}: {}", e.emit_to_string(&src)));
+            let entries: &[&str] = if src.contains("fn rational_dot(") {
+                &["rational_dot"]
+            } else {
+                &ENTRY_POINTS
+            };
+            for e in entries {
+                assert!(module.entry_points.iter().any(|ep| ep.name == *e), "{e}");
             }
             let spv = naga::back::spv::write_vec(
                 &module,
@@ -713,7 +1029,7 @@ mod tests {
             naga::back::hlsl::Writer::new(&mut hlsl, &opts, &pipeline)
                 .write(&module, &info, None)
                 .unwrap_or_else(|e| panic!("{arith:?} HLSL: {e}"));
-            assert!(hlsl.contains("poly_fdl_mac"));
+            assert!(hlsl.contains(entries[entries.len() - 1]));
             if arith == Arith::DoubleF32 {
                 let (msl, _) = naga::back::msl::write_string(
                     &module,
@@ -818,6 +1134,63 @@ mod tests {
             gpu.process_block(&x, &mut got);
             for (p, q) in want.iter().zip(&got) {
                 assert!((p - q).abs() < 1e-10, "{p} vs {q}");
+            }
+        }
+    }
+
+    /// The rational (44.1 ↔ 48 kHz) stage on the device against the CPU resampler, in both
+    /// arithmetics, alone and in the 44.1 kHz → 1.536 MHz cascade.
+    #[test]
+    #[ignore = "needs a Vulkan / Metal / DX12 device"]
+    fn device_rational_stage_matches_the_cpu_resampler() {
+        use crate::cache::CoefficientCache;
+        use crate::fir::FilterKind;
+        use crate::resampler::Resampler;
+        let cache = CoefficientCache::disabled();
+        let kind = FilterKind::parse("sinc-l-64k").unwrap();
+        for precision in [GpuPrecision::DoubleF32, GpuPrecision::Auto] {
+            let backend = probe(0, precision).expect("device opens");
+            for (inr, outr) in [(44_100, 48_000), (48_000, 44_100), (44_100, 1_536_000)] {
+                let mut cpu = Resampler::new(inr, outr, 2, kind, 150.0, &cache).unwrap();
+                let mut gpu =
+                    Resampler::new_on(inr, outr, 2, kind, 150.0, &cache, Some(&backend)).unwrap();
+                assert!(
+                    gpu.stages().iter().all(|s| s.device.is_some()),
+                    "{}",
+                    gpu.describe()
+                );
+                let x: Vec<f64> = (0..2 * 12_000)
+                    .map(|i| ((i as f64) * 0.0137).sin() * 0.5)
+                    .collect();
+                let (mut a, mut b) = (Vec::new(), Vec::new());
+                for chunk in x.chunks(2 * 1_000) {
+                    a.extend(cpu.push(chunk));
+                    b.extend(gpu.push(chunk));
+                }
+                a.extend(cpu.flush());
+                b.extend(gpu.flush());
+                assert_eq!(a.len(), b.len());
+                let peak = a.iter().fold(0.0f64, |m, v| m.max(v.abs()));
+                let err = a
+                    .iter()
+                    .zip(&b)
+                    .map(|(p, q)| (p - q).abs())
+                    .fold(0.0, f64::max);
+                let tol = if backend.label().contains("64-bit") {
+                    1e-12
+                } else {
+                    1e-10
+                };
+                eprintln!(
+                    "{} {inr}→{outr}: {:.1e} relative",
+                    backend.label(),
+                    err / peak
+                );
+                assert!(
+                    err / peak < tol,
+                    "{} {inr}→{outr}: {err:e}",
+                    backend.label()
+                );
             }
         }
     }

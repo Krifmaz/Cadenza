@@ -31,7 +31,7 @@
 
 use super::reference::{check_polyphase, pair_spectra};
 use super::{GpuError, PolyphaseFactory};
-use crate::convolution::{PolyphaseBlockConvolver, SpectralFilter};
+use crate::convolution::{PolyphaseBlockConvolver, RationalDotEngine, SpectralFilter};
 use std::fmt::Debug;
 use std::sync::Arc;
 
@@ -653,6 +653,105 @@ fn poly_interleave(@builtin(workgroup_id) w: vec3<u32>, @builtin(num_workgroups)
 }
 "#;
 
+/// The WGSL source of the rational kernel ([`rational_dot`] on the device) in `arith`.
+pub fn rational_source(arith: Arith) -> String {
+    let prelude = match arith {
+        Arith::F64 => PRELUDE_F64,
+        Arith::DoubleF32 => PRELUDE_DF64,
+    };
+    format!("{RATIONAL_HEADER}{prelude}{RATIONAL_KERNEL}")
+}
+
+/// Parameters of one rational launch, exactly the WGSL struct (8 × 4 bytes).
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+pub struct RationalParams {
+    /// Taps per sub-filter.
+    pub s: u32,
+    /// Sub-filters.
+    pub l: u32,
+    /// Decimation step at the upsampled rate.
+    pub m: u32,
+    /// Upsampled offset of the first output.
+    pub phase0: u32,
+    /// Window position of the input the first output ends at (at `phase0 / l = 0`).
+    pub first: u32,
+    /// Outputs.
+    pub count: u32,
+    /// Always 1.0 (see the double-f32 prelude).
+    pub one: f32,
+}
+
+impl RationalParams {
+    /// Size of the struct on the device.
+    pub const BYTES: usize = 32;
+
+    /// The 32 bytes the uniform buffer holds.
+    pub fn to_bytes(&self) -> [u8; Self::BYTES] {
+        let words = [
+            self.s,
+            self.l,
+            self.m,
+            self.phase0,
+            self.first,
+            self.count,
+            self.one.to_bits(),
+            0,
+        ];
+        let mut out = [0u8; Self::BYTES];
+        for (chunk, w) in out.chunks_exact_mut(4).zip(words) {
+            chunk.copy_from_slice(&w.to_le_bytes());
+        }
+        out
+    }
+}
+
+const RATIONAL_HEADER: &str = r#"// Cadenza WGSL kernel: the rational resampler's time-domain polyphase bank.
+
+struct Params {
+    s: u32, l: u32, m: u32, phase0: u32,
+    first: u32, count: u32, one: f32, pad: u32,
+}
+
+@group(0) @binding(0) var<uniform> P: Params;
+"#;
+
+const RATIONAL_KERNEL: &str = r#"
+@group(0) @binding(1) var<storage, read> sub: RArr;
+@group(0) @binding(2) var<storage, read> win: RArr;
+@group(0) @binding(3) var<storage, read_write> outv: RArr;
+
+var<workgroup> part: array<R, 256>;
+
+// One workgroup per output sample: 256 strided partial sums, then a tree reduction.
+@compute @workgroup_size(256)
+fn rational_dot(@builtin(workgroup_id) w: vec3<u32>, @builtin(num_workgroups) nw: vec3<u32>,
+                @builtin(local_invocation_id) li: vec3<u32>) {
+    let j = w.y * nw.x + w.x;
+    let th = li.x;
+    let valid = j < P.count;
+    var acc = r_zero();
+    if (valid) {
+        let u = P.phase0 + j * P.m;
+        let p = u % P.l;
+        let start = P.first + u / P.l + 1u - P.s;
+        for (var k = th; k < P.s; k += 256u) {
+            acc = r_fma(sub[p * P.s + k], win[start + k], acc);
+        }
+    }
+    part[th] = acc;
+    workgroupBarrier();
+    for (var stride = 128u; stride > 0u; stride = stride >> 1u) {
+        if (th < stride) {
+            part[th] = r_add(part[th], part[th + stride]);
+        }
+        workgroupBarrier();
+    }
+    if (valid && th == 0u) {
+        outv[j] = part[0];
+    }
+}
+"#;
+
 /// The buffers of one core, as on the device.
 #[derive(Debug, Clone)]
 struct Buffers<R> {
@@ -869,6 +968,151 @@ impl<R: Real> PolyphaseBlockConvolver for WgslPolyphase<R> {
     }
 }
 
+/// Threads per output sample of the rational kernel (one workgroup / CUDA block each).
+pub const RATIONAL_THREADS: usize = 256;
+
+/// The rational (time-domain polyphase) kernel on the CPU in arithmetic `R`, thread by
+/// thread: each of the [`RATIONAL_THREADS`] threads of an output sums the taps
+/// `k ≡ thread (mod 256)` in order with `r_fma`, then a tree reduction (128, 64, … 1)
+/// adds the partial sums. The CUDA kernel and the WGSL kernel run exactly this order.
+///
+/// `sub` holds the `l` reversed sub-filters one after another (`l × S` values).
+pub fn rational_dot<R: Real>(
+    sub: &[R],
+    l: usize,
+    window: &[R],
+    first: usize,
+    phase0: usize,
+    m: usize,
+    out: &mut [R],
+) {
+    let s = sub.len() / l;
+    let mut part = [R::default(); RATIONAL_THREADS];
+    for (j, o) in out.iter_mut().enumerate() {
+        let u = phase0 + j * m;
+        let p = u % l;
+        let start = first + u / l + 1 - s;
+        for (th, slot) in part.iter_mut().enumerate() {
+            let mut acc = R::default();
+            let mut k = th;
+            while k < s {
+                acc = sub[p * s + k].fma(window[start + k], acc);
+                k += RATIONAL_THREADS;
+            }
+            *slot = acc;
+        }
+        let mut stride = RATIONAL_THREADS / 2;
+        while stride > 0 {
+            for th in 0..stride {
+                part[th] = part[th].add(part[th + stride]);
+            }
+            stride /= 2;
+        }
+        *o = part[0];
+    }
+}
+
+/// The GPU rational engine on the CPU, in arithmetic `R` (see [`rational_dot`]).
+#[derive(Debug)]
+pub struct RationalModel<R: Real> {
+    sub: Arc<Vec<R>>,
+    l: usize,
+    s: usize,
+    window: Vec<R>,
+    out: Vec<R>,
+    /// Test hook: fail (like a lost device) on this call (0 = the first).
+    pub fail_at_call: Option<u64>,
+    calls: u64,
+}
+
+impl<R: Real> RationalModel<R> {
+    /// Model the engine for the reversed sub-filters `sub` (`L` of `S` taps each).
+    pub fn new(sub: &[Vec<f64>]) -> Self {
+        Self::with_table(Arc::new(flatten_subfilters(sub)), sub.len(), sub[0].len())
+    }
+
+    fn with_table(sub: Arc<Vec<R>>, l: usize, s: usize) -> Self {
+        Self {
+            sub,
+            l,
+            s,
+            window: Vec::new(),
+            out: Vec::new(),
+            fail_at_call: None,
+            calls: 0,
+        }
+    }
+}
+
+/// The sub-filters of a rational stage, one after another (`L × S` values), in `R`.
+pub fn flatten_subfilters<R: Real>(sub: &[Vec<f64>]) -> Vec<R> {
+    sub.iter().flatten().map(|&v| R::from_f64(v)).collect()
+}
+
+impl<R: Real> RationalDotEngine for RationalModel<R> {
+    fn phases(&self) -> usize {
+        self.l
+    }
+
+    fn sub_len(&self) -> usize {
+        self.s
+    }
+
+    fn run(
+        &mut self,
+        window: &[f64],
+        first: usize,
+        phase0: usize,
+        m: usize,
+        out: &mut [f64],
+    ) -> Result<(), GpuError> {
+        if self.fail_at_call == Some(self.calls) {
+            return Err(GpuError::Driver("simulated device loss (reference)".into()));
+        }
+        self.calls += 1;
+        self.window.clear();
+        self.window.extend(window.iter().map(|&v| R::from_f64(v)));
+        self.out.clear();
+        self.out.resize(out.len(), R::default());
+        rational_dot(
+            &self.sub,
+            self.l,
+            &self.window,
+            first,
+            phase0,
+            m,
+            &mut self.out,
+        );
+        for (o, v) in out.iter_mut().zip(&self.out) {
+            *o = v.to_f64();
+        }
+        Ok(())
+    }
+
+    fn device_label(&self) -> String {
+        match R::ARITH {
+            Arith::F64 => "GPU model (CPU)".into(),
+            Arith::DoubleF32 => "WGSL model (double-f32, CPU)".into(),
+        }
+    }
+}
+
+/// `channels` rational model engines sharing one sub-filter table.
+pub fn rational_models<R: Real>(
+    sub: &[Vec<f64>],
+    channels: usize,
+    fail_at_call: Option<u64>,
+) -> Vec<Box<dyn RationalDotEngine + Send>> {
+    let table = Arc::new(flatten_subfilters::<R>(sub));
+    (0..channels)
+        .map(|_| {
+            let mut m = RationalModel::<R>::with_table(Arc::clone(&table), sub.len(), sub[0].len());
+            m.fail_at_call = fail_at_call;
+            Box::new(m) as Box<dyn RationalDotEngine + Send>
+        })
+        .collect()
+}
+
 /// Builds [`WgslPolyphase`] cores in `arith`: the wgpu upsampler path of the resampler,
 /// run on the CPU (what the tests compare against the CPU engine).
 #[derive(Clone, Copy, Debug)]
@@ -906,6 +1150,17 @@ impl PolyphaseFactory for WgslModelFactory {
             Arith::F64 => build::<f64>(filters, channels),
             Arith::DoubleF32 => build::<Df64>(filters, channels),
         }
+    }
+
+    fn rational(
+        &self,
+        sub: &[Vec<f64>],
+        channels: usize,
+    ) -> Result<Vec<Box<dyn RationalDotEngine + Send>>, GpuError> {
+        Ok(match self.arith {
+            Arith::F64 => rational_models::<f64>(sub, channels, None),
+            Arith::DoubleF32 => rational_models::<Df64>(sub, channels, None),
+        })
     }
 }
 

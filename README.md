@@ -103,8 +103,8 @@ Dual-licensed under MIT or Apache-2.0.
 - **CUDA GPU offload (64-bit)** of the long-FIR upsampler and the room convolution
   (feature `cuda`): the upsampler's FFT polyphase core runs on the card – one forward FFT
   per input block, every sub-filter's multiply-accumulate and inverse FFT batched, the
-  phases interleaved on the device, only the finished block copied back – and so does the
-  partitioned room-correction convolver. Our own Stockham FFT kernels compiled at run time
+  phases interleaved on the device, only the finished block copied back – and so do the
+  time-domain 44.1 ↔ 48 kHz stage and the partitioned room-correction convolver. Our own Stockham FFT kernels compiled at run time
   by the driver's NVRTC, `f64` throughout, filter spectra and frequency-delay lines
   resident on the card. Needs only an NVIDIA driver (≥ 525), no CUDA toolkit – and the
   same binary runs without a GPU (`gpu = auto | on | off | cuda | wgpu`, `gpu_device`; the
@@ -155,7 +155,7 @@ implemented and tested here; the notes say where we differ.
 | Exclusive output | ASIO/WASAPI, CoreAudio hog, ALSA | WASAPI exclusive, CoreAudio hog + integer mode, ALSA hw: | matched; **no ASIO** |
 | Native DSD on Windows | via ASIO | DoP only (no standard WASAPI DSD GUID; opt-in driver GUID) | not matched without ASIO |
 | Network endpoint | NAA | Cadenza endpoint (`cadenza endpoint`, mDNS, TCP, ack-paced, PCM + DSD) | matched; our own protocol, not NAA-compatible |
-| GPU offload | CUDA only (64-bit) | CUDA (64-bit, driver only – no toolkit) **and wgpu: Vulkan / Metal / DX12 on AMD, Intel, Apple Silicon and NVIDIA** (64-bit where the card has it, double-f32 ≈48-bit elsewhere); also builds and runs without a GPU; the upsampler's FFT polyphase core and the room convolution run on it, verified against the CPU engine (CUDA through a CPU model of the exact kernels; wgpu on real Vulkan in CI with Mesa's software driver: 1.7e-15 relative in f64, 2.5e-14 in double-f32) and benchmarked (`cadenza bench`, row `upsampling (GPU)`) | exceeded on hardware: HQPlayer has no AMD / Intel / Apple GPU support. Not yet measured on real AMD / Intel / Apple cards (none here); the time-domain 44.1 ↔ 48 stage is still CPU-only |
+| GPU offload | CUDA only (64-bit) | CUDA (64-bit, driver only – no toolkit) **and wgpu: Vulkan / Metal / DX12 on AMD, Intel, Apple Silicon and NVIDIA** (64-bit where the card has it, double-f32 ≈48-bit elsewhere); also builds and runs without a GPU; the upsampler's FFT polyphase core, the time-domain 44.1 ↔ 48 kHz stage and the room convolution run on it, verified against the CPU engine (CUDA through a CPU model of the exact kernels; wgpu on real Vulkan in CI with Mesa's software driver: 1.2–2.4e-15 relative in f64, 1–3e-14 in double-f32) and benchmarked (`cadenza bench`, row `upsampling (GPU)`) | exceeded on hardware: HQPlayer has no AMD / Intel / Apple GPU support. Not yet measured on real AMD / Intel / Apple cards, and the CUDA kernels are not yet run on an NVIDIA card since the rational stage was added (none here) |
 | 64-bit processing | yes | yes everywhere | matched |
 | UPnP / Roon / control | UPnP renderer, Roon via NAA | HTTP API, web UI, Encore device | **not matched**: no UPnP renderer, no Roon |
 | Licence / price | proprietary | MIT / Apache-2.0, free | – |
@@ -171,8 +171,11 @@ to do it:
    pairs of phases packed into one complex transform), with a seamless switch to the CPU if the device
    fails mid-stream. On wgpu the maths is native `f64` where the card has it and double-f32 (≈48 bits)
    where it does not; every device must pass a self-test against the CPU first. Verified on Mesa's
-   software Vulkan driver here and in CI; not yet on a real AMD / Intel / Apple card. Next: the
-   time-domain rational stage (44.1 ↔ 48 kHz families) on the GPU as well.
+   software Vulkan driver here and in CI; not yet on a real AMD / Intel / Apple card. The
+   time-domain rational stage (44.1 ↔ 48 kHz families, and the first stage of a cascade such as
+   44.1 kHz → 1.536 MHz) runs on the GPU too – done on CUDA and wgpu: one workgroup per output
+   sample, the history and output clock stay on the host, so a device failure hands the stream to the
+   CPU without a gap.
 2. **Error-correction modulators** – done on the CPU: `asdm5ec`, `asdm7ec` (4-bit look-ahead, 4 paths)
    and `asdm7ec8` (8 bits, 8 paths, DSD256 and below; above it falls back to `asdm7ec`). A trellis keeps
    the best candidate bit sequences by the low-passed (in-band) quantisation error, which lowers the
@@ -427,8 +430,7 @@ one line: `GPU: CUDA (RTX 4060) · 64-bit available`, or `GPU: CUDA unavailable 
 the CPU (64-bit)`. The signal path's `Compute` stage says what the current chain does with
 it: `CUDA (RTX 4060) · 64-bit · upsampling + room convolution` (or just one of them) for
 the engines that run on the card, `… · available, not used by this chain yet` when nothing
-in the chain can use it (no resampling and no room correction, or a purely time-domain
-rational conversion). The kernels (`crates/cadenza-dsp/src/gpu/kernels.cu`) are compiled on the user's
+in the chain can use it (no resampling and no room correction). The kernels (`crates/cadenza-dsp/src/gpu/kernels.cu`) are compiled on the user's
 machine by the NVRTC that ships with the driver.
 
 Requirements: an NVIDIA card and **driver 525 or newer** (the CUDA 12 driver API; nothing
@@ -458,11 +460,16 @@ What runs on the GPU:
   failure while building just leaves that stage on the CPU. The device kernels have their
   own tests against that model (`cargo test -p cadenza-dsp --features cuda -- --ignored`),
   which need a card.
+- **The time-domain polyphase bank** of the rational conversions (44.1 ↔ 48 kHz families:
+  ×160/147, ×147/160 …, and the first stage of a cascade such as 44.1 kHz → 1.536 MHz):
+  the `L` sub-filters stay on the card, and per call the new input goes up and one block of
+  256 threads computes each output sample (strided partial sums, then a tree reduction).
+  The input history and the output clock stay on the host, so a device error just hands
+  the same state to the CPU core – no gap, no repeat.
 - **Room-correction convolution**: the same partitioned engine (FFT → multiply-accumulate
   over all partitions → inverse FFT).
 
-The time-domain polyphase bank (44.1 ↔ 48 kHz families) stays on the CPU for now, and so
-does the sigma-delta modulator, which is sequential. Everything is `double` – no `f32`
+The sigma-delta modulator stays on the CPU for now (it is sequential). Everything is `double` – no `f32`
 anywhere on the CUDA path (the wgpu path is described below). Device memory: an upsampler filter of *T* taps holds about
 *16 × T* bytes of shared spectra plus *32 × T / L* bytes of delay line per channel (a
 16M-tap filter at ×16: about 256 MiB + 2 × 32 MiB); a room filter of *P* partitions at
@@ -547,7 +554,7 @@ SwiftShader, WARP) are slower than the CPU engine and are skipped unless
 - [ ] "v3"-class modulators and more poly-sinc variants
 - [x] The resampler's FFT polyphase stages on the GPU (CUDA)
 - [x] A `wgpu` path for AMD / Intel / Apple GPUs (Vulkan / Metal / DX12)
-- [ ] The time-domain rational stage on the GPU
+- [x] The time-domain rational stage on the GPU (CUDA and wgpu)
 
 ## Development
 

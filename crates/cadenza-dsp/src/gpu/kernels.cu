@@ -239,4 +239,40 @@ __global__ void poly_interleave(const double* __restrict__ acc, double* __restri
     out[t] = acc[src] * scale;
 }
 
+// Rational resampler (44.1 <-> 48 kHz families), the time-domain polyphase bank: one block
+// of 256 threads per output sample j (blockIdx.x). Output j sits at upsampled offset
+// u = phase0 + j·m, uses reversed sub-filter p = u mod l (s taps, `sub` holds l·s) and the
+// s inputs of `win` ending at first + u / l. Each thread sums the taps k ≡ thread (mod 256)
+// with fma, then a tree reduction adds the partial sums (the order `rational_dot` in
+// wgsl.rs models).
+__global__ void rational_dot(const double* __restrict__ sub, const double* __restrict__ win,
+                             double* __restrict__ out, int s, int l, int m, int phase0,
+                             int first, int count)
+{
+    __shared__ double part[256];
+    int j = blockIdx.x;
+    if (j >= count) {
+        return;                                 // the whole block leaves together
+    }
+    int th = threadIdx.x;
+    long long u = (long long)phase0 + (long long)j * m;
+    long long p = u % l;
+    long long start = (long long)first + u / l + 1 - s;
+    double acc = 0.0;
+    for (int k = th; k < s; k += 256) {
+        acc = fma(sub[p * s + k], win[start + k], acc);
+    }
+    part[th] = acc;
+    __syncthreads();
+    for (int stride = 128; stride > 0; stride >>= 1) {
+        if (th < stride) {
+            part[th] = part[th] + part[th + stride];
+        }
+        __syncthreads();
+    }
+    if (th == 0) {
+        out[j] = part[0];
+    }
+}
+
 } // extern "C"

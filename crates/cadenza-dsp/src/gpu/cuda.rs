@@ -8,7 +8,9 @@
 use super::kernels::{grid_for, pass_schedule, KERNEL_SOURCE, PROGRAM_NAME, THREADS_PER_BLOCK};
 use super::reference::{check_polyphase, filter_spectra, pair_spectra};
 use super::{Backend, GpuError, MIN_DRIVER_VERSION};
-use crate::convolution::{BlockConvolver, PolyphaseBlockConvolver, SpectralFilter};
+use crate::convolution::{
+    BlockConvolver, PolyphaseBlockConvolver, RationalDotEngine, SpectralFilter,
+};
 use cudarc::driver::{
     CudaContext, CudaFunction, CudaModule, CudaSlice, CudaStream, DriverError, LaunchConfig,
     PushKernelArg,
@@ -648,6 +650,158 @@ impl PolyphaseBlockConvolver for PolyphaseConvolver {
     }
 }
 
+/// What the channels of one rational stage share: the kernel and the sub-filters.
+struct RationalShared {
+    _module: Arc<CudaModule>,
+    kernel: CudaFunction,
+    /// `l × s` doubles, the reversed sub-filters one after another.
+    d_sub: CudaSlice<f64>,
+    l: usize,
+    s: usize,
+    device_name: String,
+}
+
+/// The rational resampler's time-domain polyphase bank on a CUDA device (one per channel,
+/// each on its own stream; the sub-filters are shared): per call, upload the input window,
+/// one block of 256 threads per output sample, download the outputs. Mirrors
+/// [`super::wgsl::rational_dot`].
+pub struct RationalEngine {
+    shared: Arc<RationalShared>,
+    stream: Arc<CudaStream>,
+    d_win: CudaSlice<f64>,
+    d_out: CudaSlice<f64>,
+}
+
+impl RationalEngine {
+    /// Build `channels` engines for the reversed sub-filters `sub` on CUDA device `device`.
+    pub fn for_channels(
+        sub: &[Vec<f64>],
+        channels: usize,
+        device: usize,
+    ) -> Result<Vec<Box<dyn RationalDotEngine + Send>>, GpuError> {
+        let Backend::Cuda { name, .. } = probe(device)? else {
+            unreachable!("probe returns a CUDA backend or an error")
+        };
+        let (l, s) = (sub.len(), sub.first().map_or(0, Vec::len));
+        if l == 0 || s == 0 {
+            return Err(GpuError::Driver("empty rational filter".into()));
+        }
+        let ctx = CudaContext::new(device)?;
+        let streams = (0..channels.max(1))
+            .map(|_| ctx.new_stream())
+            .collect::<Result<Vec<_>, _>>()?;
+        let module = compile(&ctx)?;
+        let flat: Vec<f64> = sub.iter().flatten().copied().collect();
+        let d_sub = streams[0].clone_htod(&flat)?;
+        streams[0].synchronize()?;
+        let shared = Arc::new(RationalShared {
+            kernel: module.load_function("rational_dot")?,
+            _module: module,
+            d_sub,
+            l,
+            s,
+            device_name: name,
+        });
+        streams
+            .into_iter()
+            .map(|stream| {
+                Ok(Box::new(RationalEngine {
+                    d_win: stream.alloc_zeros::<f64>(4 * s)?,
+                    d_out: stream.alloc_zeros::<f64>(1024)?,
+                    shared: Arc::clone(&shared),
+                    stream,
+                }) as Box<dyn RationalDotEngine + Send>)
+            })
+            .collect()
+    }
+
+    fn run_on_device(
+        &mut self,
+        window: &[f64],
+        first: usize,
+        phase0: usize,
+        m: usize,
+        out: &mut [f64],
+    ) -> Result<(), DriverError> {
+        let sh = Arc::clone(&self.shared);
+        if self.d_win.len() < window.len() {
+            self.d_win = self
+                .stream
+                .alloc_zeros::<f64>(window.len().next_power_of_two())?;
+        }
+        if self.d_out.len() < out.len() {
+            self.d_out = self
+                .stream
+                .alloc_zeros::<f64>(out.len().next_power_of_two())?;
+        }
+        self.stream
+            .memcpy_htod(window, &mut self.d_win.slice_mut(..window.len()))?;
+        let (s, l, m) = (sh.s as i32, sh.l as i32, m as i32);
+        let (phase0, first, count) = (phase0 as i32, first as i32, out.len() as i32);
+        let cfg = LaunchConfig {
+            grid_dim: (out.len() as u32, 1, 1),
+            block_dim: (super::wgsl::RATIONAL_THREADS as u32, 1, 1),
+            shared_mem_bytes: 0,
+        };
+        // SAFETY: argument types and order match `rational_dot` in kernels.cu; the caller
+        // guarantees every window index the outputs need is inside `window` (the trait
+        // contract), the device buffers are at least that long, and `d_out` holds `count`.
+        unsafe {
+            self.stream
+                .launch_builder(&sh.kernel)
+                .arg(&sh.d_sub)
+                .arg(&self.d_win)
+                .arg(&mut self.d_out)
+                .arg(&s)
+                .arg(&l)
+                .arg(&m)
+                .arg(&phase0)
+                .arg(&first)
+                .arg(&count)
+                .launch(cfg)?;
+        }
+        self.stream
+            .memcpy_dtoh(&self.d_out.slice(..out.len()), out)?;
+        self.stream.synchronize()
+    }
+}
+
+impl RationalDotEngine for RationalEngine {
+    fn phases(&self) -> usize {
+        self.shared.l
+    }
+
+    fn sub_len(&self) -> usize {
+        self.shared.s
+    }
+
+    fn run(
+        &mut self,
+        window: &[f64],
+        first: usize,
+        phase0: usize,
+        m: usize,
+        out: &mut [f64],
+    ) -> Result<(), GpuError> {
+        if out.is_empty() {
+            return Ok(());
+        }
+        self.run_on_device(window, first, phase0, m, out)
+            .map_err(GpuError::from)
+    }
+
+    fn device_label(&self) -> String {
+        format!(
+            "CUDA ({})",
+            super::short_device_name(&self.shared.device_name)
+        )
+    }
+
+    fn on_gpu(&self) -> bool {
+        true
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -738,6 +892,40 @@ mod tests {
             for (p, q) in want.iter().zip(&got) {
                 assert!((p - q).abs() < 1e-11, "{p} vs {q}");
             }
+        }
+    }
+
+    /// Runs only on a machine with an NVIDIA card: the rational stage on the device against
+    /// the CPU resampler (44.1 → 48 kHz and back, and the 44.1 kHz → 1.536 MHz cascade).
+    #[test]
+    #[ignore = "needs a CUDA device"]
+    fn gpu_rational_stage_matches_the_cpu_resampler() {
+        use crate::cache::CoefficientCache;
+        use crate::fir::FilterKind;
+        use crate::resampler::Resampler;
+        let backend = probe(0).expect("CUDA device");
+        let cache = CoefficientCache::disabled();
+        let kind = FilterKind::parse("sinc-l-64k").unwrap();
+        for (inr, outr) in [(44_100, 48_000), (48_000, 44_100), (44_100, 1_536_000)] {
+            let mut cpu = Resampler::new(inr, outr, 2, kind, 150.0, &cache).unwrap();
+            let mut gpu =
+                Resampler::new_on(inr, outr, 2, kind, 150.0, &cache, Some(&backend)).unwrap();
+            assert!(gpu.on_gpu(), "{}", gpu.describe());
+            let x: Vec<f64> = (0..2 * 20_000)
+                .map(|i| ((i as f64) * 0.0137).sin() * 0.5)
+                .collect();
+            let mut a = cpu.push(&x);
+            a.extend(cpu.flush());
+            let mut b = gpu.push(&x);
+            b.extend(gpu.flush());
+            assert_eq!(a.len(), b.len());
+            let peak = a.iter().fold(0.0f64, |m, v| m.max(v.abs()));
+            let err = a
+                .iter()
+                .zip(&b)
+                .map(|(p, q)| (p - q).abs())
+                .fold(0.0, f64::max);
+            assert!(err / peak < 1e-12, "{inr}→{outr}: {err:e}");
         }
     }
 

@@ -64,6 +64,45 @@ pub trait PolyphaseBlockConvolver {
     }
 }
 
+/// The time-domain polyphase bank of a rational resampler stage (44.1 ↔ 48 kHz families)
+/// on another engine: a GPU, or the CPU model of the GPU algorithm in `gpu::reference`.
+///
+/// The engine holds the `L` reversed sub-filters of `S` taps each (`sub[p][k]`, as the CPU
+/// core holds them). [`RationalDotEngine::run`] computes `count` output samples from a
+/// window of input history: output `j` sits at upsampled offset `u_j = phase0 + j·m`, uses
+/// sub-filter `p_j = u_j mod L` and the `S` inputs ending at window position
+/// `n_j = first + u_j / L`:
+///
+/// ```text
+/// out[j] = Σ_k sub[p_j][k] · window[n_j + 1 − S + k]
+/// ```
+///
+/// The resampler keeps the history, the output clock and the flush logic, so a device
+/// error (`Err`) simply hands the same state to the CPU core.
+pub trait RationalDotEngine {
+    /// `L`, the number of sub-filters.
+    fn phases(&self) -> usize;
+    /// `S`, the taps per sub-filter.
+    fn sub_len(&self) -> usize;
+    /// Compute `out.len()` outputs (see the trait docs). `window` must reach every input
+    /// the outputs need: `first + (phase0 + (out.len() − 1)·m) / L < window.len()` and
+    /// `first + 1 ≥ S`.
+    fn run(
+        &mut self,
+        window: &[f64],
+        first: usize,
+        phase0: usize,
+        m: usize,
+        out: &mut [f64],
+    ) -> Result<(), crate::gpu::GpuError>;
+    /// Where it runs, for the signal path: `CUDA (RTX 4060)`.
+    fn device_label(&self) -> String;
+    /// `true` when this engine runs on a GPU.
+    fn on_gpu(&self) -> bool {
+        false
+    }
+}
+
 /// The spectra of one impulse response cut into partitions of `block` samples.
 #[derive(Clone, Debug)]
 pub struct SpectralFilter {
