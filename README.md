@@ -149,6 +149,40 @@ implemented and tested here; the notes say where we differ.
 | UPnP / Roon / control | UPnP renderer, Roon via NAA | HTTP API, web UI, Encore device | **not matched**: no UPnP renderer, no Roon |
 | Licence / price | proprietary | MIT / Apache-2.0, free | – |
 
+### Notes: how Cadenza gets ahead
+
+Where the table says "matched", the plan is to go past HQPlayer, not just tie it. In the order we intend
+to do it:
+
+1. **GPU for the upsampler** – move the polyphase FIR stages onto the CUDA block convolver that already
+   runs the room convolution (that makes the GPU row "matched"). Then a `wgpu` compute path so AMD, Intel
+   and Apple Silicon GPUs work too; HQPlayer is NVIDIA-only.
+2. **Error-correction modulators** – `asdm5ec` / `asdm7ec` and the lookahead variants people use for
+   DSD1024 today, then a GPU modulator path. HQPlayer runs its modulators on one CPU core; that is its
+   biggest bottleneck at DSD1024 and nobody has beaten it yet. DSD2048 is already ours alone.
+3. **ASIO on Windows** – a thin runtime loader for the DAC driver's ASIO COM interface (no SDK bundled, the
+   FlexASIO approach), which brings native DSD on Windows with it. Also the WASAPI native-DSD GUID some
+   drivers accept, so DSD works without ASIO.
+4. **UPnP / OpenHome renderer and AirPlay receiver** in the player and the endpoint, so Audirvana,
+   mconnect, BubbleUPnB and phones can play into Cadenza. Roon talks to HQPlayer only through the closed
+   NAA protocol; Cadenza becomes a Roon zone through Encore's Roon extension instead.
+5. **DST-compressed DFF and SACD ISO** input (we refuse DST today), CUE sheets, gapless DSD.
+6. **Synchronised multi-room** between Cadenza endpoints (sample-accurate clock sync over the LAN).
+   HQPlayer has no multi-room at all.
+7. **Room correction built in** – measure with a USB microphone from the web UI (sweep, capture, compute the
+   correction FIR). HQPlayer needs REW or Acourate outside the program. Headphone crossfeed and HRTF
+   presets in the engine as well.
+8. **Filter designer** – pick transition width, stopband depth and phase and Cadenza designs and caches the
+   filter; live response plots (passband ripple, stopband, impulse) for every filter in the web UI.
+   HQPlayer only offers fixed catalogue entries.
+9. **Noise shaping "auto"** – the remaining named shapers for parity, then a per-DAC automatic choice of
+   shaper and dither from the output's measured noise floor.
+10. **Loopback verification** – play a test signal, capture it from an ADC or the DAC's monitor output, and
+    show measured THD+N and a bit-perfect check. Proves the chain instead of trusting it.
+
+Already ahead today: DSD2048, free and open source, built into the Encore desktop app with a full web UI
+and automatic device linking, every stage of the chain reported in the signal path.
+
 ## Running
 
 ```bash
