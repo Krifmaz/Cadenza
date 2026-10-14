@@ -9,6 +9,7 @@
 
 pub mod description;
 pub mod http;
+pub mod openhome;
 pub mod renderer;
 pub mod ssdp;
 pub mod xml;
@@ -110,7 +111,11 @@ pub fn start(engine: Engine, config: &UpnpConfig, announce: bool) -> anyhow::Res
     let listener = std::net::TcpListener::bind(("0.0.0.0", config.port))?;
     listener.set_nonblocking(true)?;
     let port = listener.local_addr()?.port();
-    let shared = http::Shared::new(renderer::Renderer::new(engine), name.clone(), udn.clone());
+    let shared = http::Shared::new(
+        renderer::Renderer::new(engine, name.clone()),
+        name.clone(),
+        udn.clone(),
+    );
     let stop = Arc::new(AtomicBool::new(false));
     {
         let shared = Arc::clone(&shared);

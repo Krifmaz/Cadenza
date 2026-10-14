@@ -86,6 +86,7 @@ struct State {
 pub struct Renderer {
     engine: Engine,
     state: Mutex<State>,
+    oh: super::openhome::OpenHome,
 }
 
 fn url_of(t: &Track) -> Option<&str> {
@@ -160,12 +161,18 @@ fn http_only(uri: &str) -> Result<(), Fault> {
 }
 
 impl Renderer {
-    /// A renderer driving `engine`.
-    pub fn new(engine: Engine) -> Self {
+    /// A renderer driving `engine`, named `name` (OpenHome's room).
+    pub fn new(engine: Engine, name: String) -> Self {
         Self {
+            oh: super::openhome::OpenHome::new(engine.clone(), name),
             engine,
             state: Mutex::new(State::default()),
         }
+    }
+
+    /// Follow the engine (called regularly by the event loop).
+    pub fn tick(&self) {
+        self.oh.tick();
     }
 
     /// Follow the engine: when it has moved on to the queued next URI (gapless), that is
@@ -222,6 +229,9 @@ impl Renderer {
             "AVTransport" => self.av_transport(action, body),
             "RenderingControl" => self.rendering_control(action, body),
             "ConnectionManager" => Self::connection_manager(action, body),
+            "Product" | "Playlist" | "Volume" | "Time" | "Info" => {
+                self.oh.handle(service, action, body)
+            }
             _ => Err(Fault::INVALID_ACTION),
         }
     }
@@ -240,6 +250,7 @@ impl Renderer {
                 st.current = Media { uri, meta };
                 st.next = Media::default();
                 st.next_queued = false;
+                self.oh.avtransport_active();
                 if was_playing {
                     // Most controllers expect a playing renderer to switch at once.
                     self.start(&mut st);
@@ -279,6 +290,7 @@ impl Renderer {
                 if Self::loaded(&st, &status) {
                     self.engine.send(Command::Play);
                 } else {
+                    self.oh.avtransport_active();
                     self.start(&mut st);
                 }
                 Ok(Vec::new())
@@ -545,6 +557,7 @@ impl Renderer {
                 .last_change(service)
                 .map(|v| vec![("LastChange", v)])
                 .unwrap_or_default(),
+            "Product" | "Playlist" | "Volume" | "Time" | "Info" => self.oh.evented(service),
             "ConnectionManager" => vec![
                 ("SourceProtocolInfo", String::new()),
                 ("SinkProtocolInfo", description::sink_protocol_info()),

@@ -14,30 +14,348 @@ pub struct Service {
     pub service_type: &'static str,
     /// `urn:upnp-org:serviceId:AVTransport`.
     pub service_id: &'static str,
-    /// The SCPD document.
-    pub scpd: &'static str,
+    /// Builds the SCPD document.
+    pub scpd: fn() -> String,
 }
 
-/// The services, in description order.
-pub const SERVICES: [Service; 3] = [
+/// The services, in description order: UPnP AV, then OpenHome.
+pub const SERVICES: [Service; 8] = [
     Service {
         name: "AVTransport",
         service_type: "urn:schemas-upnp-org:service:AVTransport:1",
         service_id: "urn:upnp-org:serviceId:AVTransport",
-        scpd: AV_TRANSPORT_SCPD,
+        scpd: || AV_TRANSPORT_SCPD.to_string(),
     },
     Service {
         name: "RenderingControl",
         service_type: "urn:schemas-upnp-org:service:RenderingControl:1",
         service_id: "urn:upnp-org:serviceId:RenderingControl",
-        scpd: RENDERING_CONTROL_SCPD,
+        scpd: || RENDERING_CONTROL_SCPD.to_string(),
     },
     Service {
         name: "ConnectionManager",
         service_type: "urn:schemas-upnp-org:service:ConnectionManager:1",
         service_id: "urn:upnp-org:serviceId:ConnectionManager",
-        scpd: CONNECTION_MANAGER_SCPD,
+        scpd: || CONNECTION_MANAGER_SCPD.to_string(),
     },
+    Service {
+        name: "Product",
+        service_type: "urn:av-openhome-org:service:Product:2",
+        service_id: "urn:av-openhome-org:serviceId:Product",
+        scpd: || build_scpd(OH_PRODUCT_ACTIONS, OH_PRODUCT_VARS),
+    },
+    Service {
+        name: "Playlist",
+        service_type: "urn:av-openhome-org:service:Playlist:1",
+        service_id: "urn:av-openhome-org:serviceId:Playlist",
+        scpd: || build_scpd(OH_PLAYLIST_ACTIONS, OH_PLAYLIST_VARS),
+    },
+    Service {
+        name: "Volume",
+        service_type: "urn:av-openhome-org:service:Volume:2",
+        service_id: "urn:av-openhome-org:serviceId:Volume",
+        scpd: || build_scpd(OH_VOLUME_ACTIONS, OH_VOLUME_VARS),
+    },
+    Service {
+        name: "Time",
+        service_type: "urn:av-openhome-org:service:Time:1",
+        service_id: "urn:av-openhome-org:serviceId:Time",
+        scpd: || build_scpd(OH_TIME_ACTIONS, OH_TIME_VARS),
+    },
+    Service {
+        name: "Info",
+        service_type: "urn:av-openhome-org:service:Info:1",
+        service_id: "urn:av-openhome-org:serviceId:Info",
+        scpd: || build_scpd(OH_INFO_ACTIONS, OH_INFO_VARS),
+    },
+];
+
+/// `(argument, "in"/"out", related variable)`.
+type Arg = (&'static str, &'static str, &'static str);
+/// `(action, arguments)`.
+type Actions = &'static [(&'static str, &'static [Arg])];
+/// `(variable, data type, evented)`.
+type Vars = &'static [(&'static str, &'static str, bool)];
+
+/// An SCPD document from compact action and variable lists.
+pub fn build_scpd(actions: Actions, vars: Vars) -> String {
+    let mut s = String::from(
+        r#"<?xml version="1.0" encoding="utf-8"?>
+<scpd xmlns="urn:schemas-upnp-org:service-1-0"><specVersion><major>1</major><minor>0</minor></specVersion><actionList>"#,
+    );
+    for (name, args) in actions {
+        s.push_str(&format!("<action><name>{name}</name><argumentList>"));
+        for (arg, dir, var) in *args {
+            s.push_str(&format!(
+                "<argument><name>{arg}</name><direction>{dir}</direction><relatedStateVariable>{var}</relatedStateVariable></argument>"
+            ));
+        }
+        s.push_str("</argumentList></action>");
+    }
+    s.push_str("</actionList><serviceStateTable>");
+    for (name, ty, ev) in vars {
+        s.push_str(&format!(
+            r#"<stateVariable sendEvents="{}"><name>{name}</name><dataType>{ty}</dataType></stateVariable>"#,
+            if *ev { "yes" } else { "no" }
+        ));
+    }
+    s.push_str("</serviceStateTable></scpd>\n");
+    s
+}
+
+const OH_PRODUCT_ACTIONS: Actions = &[
+    (
+        "Manufacturer",
+        &[
+            ("Name", "out", "ManufacturerName"),
+            ("Info", "out", "ManufacturerInfo"),
+            ("Url", "out", "ManufacturerUrl"),
+            ("ImageUri", "out", "ManufacturerImageUri"),
+        ],
+    ),
+    (
+        "Model",
+        &[
+            ("Name", "out", "ModelName"),
+            ("Info", "out", "ModelInfo"),
+            ("Url", "out", "ModelUrl"),
+            ("ImageUri", "out", "ModelImageUri"),
+        ],
+    ),
+    (
+        "Product",
+        &[
+            ("Room", "out", "ProductRoom"),
+            ("Name", "out", "ProductName"),
+            ("Info", "out", "ProductInfo"),
+            ("Url", "out", "ProductUrl"),
+            ("ImageUri", "out", "ProductImageUri"),
+        ],
+    ),
+    ("Standby", &[("Value", "out", "Standby")]),
+    ("SetStandby", &[("Value", "in", "Standby")]),
+    ("SourceCount", &[("Value", "out", "SourceCount")]),
+    ("SourceXml", &[("Value", "out", "SourceXml")]),
+    ("SourceIndex", &[("Value", "out", "SourceIndex")]),
+    ("SetSourceIndex", &[("Value", "in", "SourceIndex")]),
+    ("SetSourceIndexByName", &[("Value", "in", "SourceName")]),
+    (
+        "SetSourceBySystemName",
+        &[("Value", "in", "SourceSystemName")],
+    ),
+    (
+        "Source",
+        &[
+            ("Index", "in", "SourceIndex"),
+            ("SystemName", "out", "SourceSystemName"),
+            ("Type", "out", "SourceType"),
+            ("Name", "out", "SourceName"),
+            ("Visible", "out", "SourceVisible"),
+        ],
+    ),
+    ("Attributes", &[("Value", "out", "Attributes")]),
+    (
+        "SourceXmlChangeCount",
+        &[("Value", "out", "SourceXmlChangeCount")],
+    ),
+];
+const OH_PRODUCT_VARS: Vars = &[
+    ("ManufacturerName", "string", true),
+    ("ManufacturerInfo", "string", true),
+    ("ManufacturerUrl", "string", true),
+    ("ManufacturerImageUri", "string", true),
+    ("ModelName", "string", true),
+    ("ModelInfo", "string", true),
+    ("ModelUrl", "string", true),
+    ("ModelImageUri", "string", true),
+    ("ProductRoom", "string", true),
+    ("ProductName", "string", true),
+    ("ProductInfo", "string", true),
+    ("ProductUrl", "string", true),
+    ("ProductImageUri", "string", true),
+    ("Standby", "boolean", true),
+    ("SourceIndex", "ui4", true),
+    ("SourceCount", "ui4", true),
+    ("SourceXml", "string", true),
+    ("Attributes", "string", true),
+    ("SourceXmlChangeCount", "ui4", false),
+    ("SourceType", "string", false),
+    ("SourceName", "string", false),
+    ("SourceSystemName", "string", false),
+    ("SourceVisible", "boolean", false),
+];
+const OH_PLAYLIST_ACTIONS: Actions = &[
+    ("Play", &[]),
+    ("Pause", &[]),
+    ("Stop", &[]),
+    ("Next", &[]),
+    ("Previous", &[]),
+    ("SetRepeat", &[("Value", "in", "Repeat")]),
+    ("Repeat", &[("Value", "out", "Repeat")]),
+    ("SetShuffle", &[("Value", "in", "Shuffle")]),
+    ("Shuffle", &[("Value", "out", "Shuffle")]),
+    ("SeekSecondAbsolute", &[("Value", "in", "Absolute")]),
+    ("SeekSecondRelative", &[("Value", "in", "Relative")]),
+    ("SeekId", &[("Value", "in", "Id")]),
+    ("SeekIndex", &[("Value", "in", "Index")]),
+    ("TransportState", &[("Value", "out", "TransportState")]),
+    ("Id", &[("Value", "out", "Id")]),
+    (
+        "Read",
+        &[
+            ("Id", "in", "Id"),
+            ("Uri", "out", "Uri"),
+            ("Metadata", "out", "Metadata"),
+        ],
+    ),
+    (
+        "ReadList",
+        &[
+            ("IdList", "in", "IdList"),
+            ("TrackList", "out", "TrackList"),
+        ],
+    ),
+    (
+        "Insert",
+        &[
+            ("AfterId", "in", "Id"),
+            ("Uri", "in", "Uri"),
+            ("Metadata", "in", "Metadata"),
+            ("NewId", "out", "Id"),
+        ],
+    ),
+    ("DeleteId", &[("Value", "in", "Id")]),
+    ("DeleteAll", &[]),
+    ("TracksMax", &[("Value", "out", "TracksMax")]),
+    (
+        "IdArray",
+        &[
+            ("Token", "out", "IdArrayToken"),
+            ("Array", "out", "IdArray"),
+        ],
+    ),
+    (
+        "IdArrayChanged",
+        &[
+            ("Token", "in", "IdArrayToken"),
+            ("Value", "out", "IdArrayChanged"),
+        ],
+    ),
+    ("ProtocolInfo", &[("Value", "out", "ProtocolInfo")]),
+];
+const OH_PLAYLIST_VARS: Vars = &[
+    ("TransportState", "string", true),
+    ("Repeat", "boolean", true),
+    ("Shuffle", "boolean", true),
+    ("Id", "ui4", true),
+    ("IdArray", "bin.base64", true),
+    ("TracksMax", "ui4", true),
+    ("ProtocolInfo", "string", true),
+    ("Index", "ui4", false),
+    ("Relative", "i4", false),
+    ("Absolute", "ui4", false),
+    ("IdList", "string", false),
+    ("TrackList", "string", false),
+    ("Uri", "string", false),
+    ("Metadata", "string", false),
+    ("IdArrayToken", "ui4", false),
+    ("IdArrayChanged", "boolean", false),
+];
+const OH_VOLUME_ACTIONS: Actions = &[
+    (
+        "Characteristics",
+        &[
+            ("VolumeMax", "out", "VolumeMax"),
+            ("VolumeUnity", "out", "VolumeUnity"),
+            ("VolumeSteps", "out", "VolumeSteps"),
+            ("VolumeMilliDbPerStep", "out", "VolumeMilliDbPerStep"),
+            ("BalanceMax", "out", "BalanceMax"),
+            ("FadeMax", "out", "FadeMax"),
+        ],
+    ),
+    ("SetVolume", &[("Value", "in", "Volume")]),
+    ("VolumeInc", &[]),
+    ("VolumeDec", &[]),
+    ("Volume", &[("Value", "out", "Volume")]),
+    ("SetBalance", &[("Value", "in", "Balance")]),
+    ("BalanceInc", &[]),
+    ("BalanceDec", &[]),
+    ("Balance", &[("Value", "out", "Balance")]),
+    ("SetFade", &[("Value", "in", "Fade")]),
+    ("FadeInc", &[]),
+    ("FadeDec", &[]),
+    ("Fade", &[("Value", "out", "Fade")]),
+    ("SetMute", &[("Value", "in", "Mute")]),
+    ("Mute", &[("Value", "out", "Mute")]),
+    ("VolumeLimit", &[("Value", "out", "VolumeLimit")]),
+    ("UnityGain", &[("Value", "out", "UnityGain")]),
+];
+const OH_VOLUME_VARS: Vars = &[
+    ("Volume", "ui4", true),
+    ("Mute", "boolean", true),
+    ("Balance", "i4", true),
+    ("Fade", "i4", true),
+    ("VolumeLimit", "ui4", true),
+    ("VolumeMax", "ui4", true),
+    ("VolumeUnity", "ui4", true),
+    ("VolumeSteps", "ui4", true),
+    ("VolumeMilliDbPerStep", "ui4", true),
+    ("BalanceMax", "ui4", true),
+    ("FadeMax", "ui4", true),
+    ("UnityGain", "boolean", true),
+];
+const OH_TIME_ACTIONS: Actions = &[(
+    "Time",
+    &[
+        ("TrackCount", "out", "TrackCount"),
+        ("Duration", "out", "Duration"),
+        ("Seconds", "out", "Seconds"),
+    ],
+)];
+const OH_TIME_VARS: Vars = &[
+    ("TrackCount", "ui4", true),
+    ("Duration", "ui4", true),
+    ("Seconds", "ui4", true),
+];
+const OH_INFO_ACTIONS: Actions = &[
+    (
+        "Counters",
+        &[
+            ("TrackCount", "out", "TrackCount"),
+            ("DetailsCount", "out", "DetailsCount"),
+            ("MetatextCount", "out", "MetatextCount"),
+        ],
+    ),
+    (
+        "Track",
+        &[("Uri", "out", "Uri"), ("Metadata", "out", "Metadata")],
+    ),
+    (
+        "Details",
+        &[
+            ("Duration", "out", "Duration"),
+            ("BitRate", "out", "BitRate"),
+            ("BitDepth", "out", "BitDepth"),
+            ("SampleRate", "out", "SampleRate"),
+            ("Lossless", "out", "Lossless"),
+            ("CodecName", "out", "CodecName"),
+        ],
+    ),
+    ("Metatext", &[("Value", "out", "Metatext")]),
+];
+const OH_INFO_VARS: Vars = &[
+    ("TrackCount", "ui4", true),
+    ("DetailsCount", "ui4", true),
+    ("MetatextCount", "ui4", true),
+    ("Uri", "string", true),
+    ("Metadata", "string", true),
+    ("Duration", "ui4", true),
+    ("BitRate", "ui4", true),
+    ("BitDepth", "ui4", true),
+    ("SampleRate", "ui4", true),
+    ("Lossless", "boolean", true),
+    ("CodecName", "string", true),
+    ("Metatext", "string", true),
 ];
 
 /// The service with short name `name`.
@@ -309,24 +627,25 @@ mod tests {
                 "<controlURL>/upnp/control/{}</controlURL>",
                 s.name
             )));
+            let scpd = (s.scpd)();
             // Balanced tags (a rough well-formedness check).
             for tag in ["action", "argument", "stateVariable", "argumentList"] {
                 assert_eq!(
-                    s.scpd.matches(&format!("<{tag}>")).count()
-                        + s.scpd.matches(&format!("<{tag} ")).count(),
-                    s.scpd.matches(&format!("</{tag}>")).count(),
+                    scpd.matches(&format!("<{tag}>")).count()
+                        + scpd.matches(&format!("<{tag} ")).count(),
+                    scpd.matches(&format!("</{tag}>")).count(),
                     "{} {tag}",
                     s.name
                 );
             }
             // Every related state variable is declared.
-            let mut rest = s.scpd;
+            let mut rest = scpd.as_str();
             while let Some(i) = rest.find("<relatedStateVariable>") {
                 rest = &rest[i + 22..];
                 let end = rest.find('<').unwrap();
                 let var = &rest[..end];
                 assert!(
-                    s.scpd.contains(&format!("<name>{var}</name><dataType>")),
+                    scpd.contains(&format!("<name>{var}</name><dataType>")),
                     "{}: {var} not declared",
                     s.name
                 );

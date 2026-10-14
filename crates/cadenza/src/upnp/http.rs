@@ -75,7 +75,7 @@ async fn device(State(s): State<Arc<Shared>>) -> Response {
 
 async fn scpd(Path(file): Path<String>) -> Response {
     match file.strip_suffix(".xml").and_then(description::service) {
-        Some(svc) => xml_response(svc.scpd.to_string()),
+        Some(svc) => xml_response((svc.scpd)()),
         None => StatusCode::NOT_FOUND.into_response(),
     }
 }
@@ -314,6 +314,7 @@ fn initial_event(s: &Arc<Shared>, sid: &str) {
 
 /// Check for state changes and notify the subscribers; drop expired subscriptions.
 pub fn tick(s: &Arc<Shared>) {
+    s.renderer.tick();
     let now = Instant::now();
     s.subs
         .lock()

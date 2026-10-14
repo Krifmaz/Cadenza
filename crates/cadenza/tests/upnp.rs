@@ -453,3 +453,220 @@ fn a_control_point_drives_the_renderer() {
     drop(r);
     engine.shutdown();
 }
+
+#[test]
+fn an_openhome_control_point_builds_and_plays_a_playlist() {
+    let media = media_server(vec![
+        ("/a.wav", wav(1.5, 440.0)),
+        ("/b.wav", wav(1.5, 660.0)),
+        ("/c.wav", wav(1.5, 880.0)),
+    ]);
+    let mut s = Settings::default();
+    s.output.backend = "null".into();
+    s.output.rate = RateSetting::Auto;
+    s.dsp.bit_perfect = true;
+    let engine = Engine::start(
+        s,
+        EngineOptions {
+            cache: CoefficientCache::disabled(),
+            realtime: true,
+            persist: None,
+        },
+    );
+    let cfg = UpnpConfig {
+        enabled: true,
+        name: "OH room".into(),
+        port: 0,
+    };
+    let r = upnp::start(engine.clone(), &cfg, false).unwrap();
+    let cp = Cp {
+        base: format!("http://127.0.0.1:{}", r.port),
+    };
+    let call = |svc: &str, action: &str, args: &[(&str, &str)]| cp.call(svc, action, args);
+    let get = |svc: &str, action: &str, out: &str| {
+        xml::text(&call(svc, action, &[]).unwrap(), out).unwrap_or_default()
+    };
+
+    // The device lists the OpenHome services; Product names the room and two sources.
+    let d = ureq::get(&format!("{}/upnp/device.xml", cp.base))
+        .call()
+        .unwrap()
+        .into_string()
+        .unwrap();
+    for t in ["Product:2", "Playlist:1", "Volume:2", "Time:1", "Info:1"] {
+        assert!(
+            d.contains(&format!("urn:av-openhome-org:service:{t}")),
+            "{t}"
+        );
+        let name = t.split(':').next().unwrap();
+        let scpd = ureq::get(&format!("{}/upnp/{name}.xml", cp.base))
+            .call()
+            .unwrap()
+            .into_string()
+            .unwrap();
+        assert!(scpd.contains("<actionList>"));
+    }
+    assert_eq!(get("Product", "Product", "Room"), "OH room");
+    assert_eq!(get("Product", "SourceCount", "Value"), "2");
+    assert!(get("Product", "SourceXml", "Value").contains("<Type>Playlist</Type>"));
+    assert_eq!(get("Playlist", "TransportState", "Value"), "Stopped");
+
+    // Build a playlist: a, then c after a, then b after a → a, b, c.
+    let url = |f: &str| format!("http://127.0.0.1:{media}/{f}");
+    let meta = |t: &str| format!("<DIDL-Lite><item><dc:title>{t}</dc:title></item></DIDL-Lite>");
+    let insert = |after: &str, f: &str, t: &str| {
+        let r = call(
+            "Playlist",
+            "Insert",
+            &[("AfterId", after), ("Uri", &url(f)), ("Metadata", &meta(t))],
+        )
+        .unwrap();
+        xml::text(&r, "NewId").unwrap()
+    };
+    let a = insert("0", "a.wav", "A");
+    let c = insert(&a, "c.wav", "C");
+    let b = insert(&a, "b.wav", "B");
+    assert_eq!(
+        call(
+            "Playlist",
+            "Insert",
+            &[("AfterId", "999"), ("Uri", &url("a.wav")), ("Metadata", "")]
+        ),
+        Err("800".into())
+    );
+    assert_eq!(
+        call(
+            "Playlist",
+            "Insert",
+            &[("AfterId", "0"), ("Uri", "/etc/passwd"), ("Metadata", "")]
+        ),
+        Err("716".into())
+    );
+    let ids = call("Playlist", "IdArray", &[]).unwrap();
+    let token = xml::text(&ids, "Token").unwrap();
+    let decoded: Vec<u32> = {
+        let b64 = xml::text(&ids, "Array").unwrap();
+        // Decode standard base64.
+        let t = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+        let mut bits = Vec::new();
+        for ch in b64.chars().filter(|c| *c != '=') {
+            let v = t.find(ch).unwrap() as u32;
+            for k in (0..6).rev() {
+                bits.push((v >> k) & 1);
+            }
+        }
+        bits.chunks(8)
+            .filter(|c| c.len() == 8)
+            .map(|c| c.iter().fold(0u8, |a, b| (a << 1) | *b as u8))
+            .collect::<Vec<u8>>()
+            .chunks(4)
+            .filter(|c| c.len() == 4)
+            .map(|c| u32::from_be_bytes([c[0], c[1], c[2], c[3]]))
+            .collect()
+    };
+    assert_eq!(
+        decoded,
+        vec![
+            a.parse::<u32>().unwrap(),
+            b.parse::<u32>().unwrap(),
+            c.parse::<u32>().unwrap()
+        ]
+    );
+    assert_eq!(
+        xml::text(
+            &call("Playlist", "IdArrayChanged", &[("Token", &token)]).unwrap(),
+            "Value"
+        )
+        .as_deref(),
+        Some("false")
+    );
+    let list = xml::text(
+        &call(
+            "Playlist",
+            "ReadList",
+            &[("IdList", &format!("{a} {c} 77"))],
+        )
+        .unwrap(),
+        "TrackList",
+    )
+    .unwrap();
+    assert_eq!(list.matches("<Entry>").count(), 2);
+    assert!(list.contains("c.wav"));
+
+    // Play from A; the engine moves on to B by itself (gapless queueing).
+    call("Playlist", "SeekId", &[("Value", &a)]).unwrap();
+    let wait = |want: &str, what: &str| {
+        let t0 = Instant::now();
+        loop {
+            let v = get("Playlist", what, "Value");
+            if v == want {
+                break;
+            }
+            assert!(
+                t0.elapsed() < Duration::from_secs(10),
+                "{what} never became {want} (is {v})"
+            );
+            std::thread::sleep(Duration::from_millis(50));
+        }
+    };
+    wait("Playing", "TransportState");
+    assert_eq!(get("Playlist", "Id", "Value"), a);
+    assert_eq!(get("Product", "SourceIndex", "Value"), "0");
+    assert!(get("Info", "Track", "Uri").ends_with("/a.wav"));
+    wait(&b, "Id");
+    assert_eq!(engine.status().track.as_ref().unwrap().title, "B");
+    let t = call("Time", "Time", &[]).unwrap();
+    assert!(xml::text(&t, "TrackCount").unwrap().parse::<u32>().unwrap() >= 2);
+
+    // Deleting the playing entry plays on with the next one.
+    call("Playlist", "DeleteId", &[("Value", &b)]).unwrap();
+    wait(&c, "Id");
+    assert_ne!(
+        xml::text(
+            &call("Playlist", "IdArrayChanged", &[("Token", &token)]).unwrap(),
+            "Value"
+        )
+        .as_deref(),
+        Some("false")
+    );
+
+    // Volume.
+    call("Volume", "SetVolume", &[("Value", "30")]).unwrap();
+    let t0 = Instant::now();
+    while get("Volume", "Volume", "Value") != "30" {
+        assert!(t0.elapsed() < Duration::from_secs(5));
+        std::thread::sleep(Duration::from_millis(20));
+    }
+    call("Volume", "VolumeInc", &[]).unwrap();
+    let t0 = Instant::now();
+    while get("Volume", "Volume", "Value") != "31" {
+        assert!(t0.elapsed() < Duration::from_secs(5));
+        std::thread::sleep(Duration::from_millis(20));
+    }
+
+    // AVTransport takes over: Product shows the UPnP AV source, the playlist stops.
+    call(
+        "AVTransport",
+        "SetAVTransportURI",
+        &[
+            ("InstanceID", "0"),
+            ("CurrentURI", &url("a.wav")),
+            ("CurrentURIMetaData", ""),
+        ],
+    )
+    .unwrap();
+    call(
+        "AVTransport",
+        "Play",
+        &[("InstanceID", "0"), ("Speed", "1")],
+    )
+    .unwrap();
+    cp.wait_state("PLAYING");
+    assert_eq!(get("Product", "SourceIndex", "Value"), "1");
+    assert_eq!(get("Playlist", "TransportState", "Value"), "Stopped");
+
+    call("Playlist", "DeleteAll", &[]).unwrap();
+    assert_eq!(get("Playlist", "Id", "Value"), "0");
+    drop(r);
+    engine.shutdown();
+}

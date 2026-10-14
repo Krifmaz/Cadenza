@@ -159,7 +159,7 @@ implemented and tested here; the notes say where we differ.
 | Network endpoint | NAA | Cadenza endpoint (`cadenza endpoint`, mDNS, TCP, ack-paced, PCM + DSD) | matched; our own protocol, not NAA-compatible |
 | GPU offload | CUDA only (64-bit) | CUDA (64-bit, driver only – no toolkit) **and wgpu: Vulkan / Metal / DX12 on AMD, Intel, Apple Silicon and NVIDIA** (64-bit where the card has it, double-f32 ≈48-bit elsewhere); also builds and runs without a GPU; the upsampler's FFT polyphase core, the time-domain 44.1 ↔ 48 kHz stage and the room convolution run on it, verified against the CPU engine (CUDA through a CPU model of the exact kernels; wgpu on real Vulkan in CI with Mesa's software driver: 1.2–2.4e-15 relative in f64, 1–3e-14 in double-f32) and benchmarked (`cadenza bench`, row `upsampling (GPU)`) | exceeded on hardware: HQPlayer has no AMD / Intel / Apple GPU support. Not yet measured on real AMD / Intel / Apple cards, and the CUDA kernels are not yet run on an NVIDIA card since the rational stage was added (none here) |
 | 64-bit processing | yes | yes everywhere | matched |
-| UPnP / Roon / control | UPnP renderer, Roon via NAA | UPnP/DLNA MediaRenderer (AVTransport, RenderingControl, ConnectionManager, gapless next URI, events), HTTP API, web UI, Encore device | renderer matched (tested with a scripted control point, not yet with BubbleUPnP / mconnect apps); no OpenHome yet; no Roon |
+| UPnP / Roon / control | UPnP renderer, Roon via NAA | UPnP/DLNA MediaRenderer (AVTransport, RenderingControl, ConnectionManager, gapless next URI, events) with OpenHome services, HTTP API, web UI, Encore device | matched: UPnP AV and OpenHome (Product, Playlist, Volume, Time, Info) – tested with scripted control points, not yet with BubbleUPnP / Kazoo / mconnect themselves; no Roon |
 | Licence / price | proprietary | MIT / Apache-2.0, free | – |
 
 ### Notes: how Cadenza gets ahead
@@ -202,8 +202,8 @@ to do it:
    machine here). The WASAPI native-DSD GUID stays opt-in (`CADENZA_WASAPI_DSD_GUID`): there is no
    standard one to ship.
 4. **UPnP / OpenHome renderer and AirPlay receiver** in the player and the endpoint, so Audirvana,
-   mconnect, BubbleUPnP and phones can play into Cadenza. The UPnP/DLNA MediaRenderer is done
-   (`[upnp] enabled = true`, see below); next the OpenHome services, then AirPlay. Roon talks to
+   mconnect, BubbleUPnP and phones can play into Cadenza. The UPnP/DLNA MediaRenderer and the OpenHome
+   services are done (`[upnp] enabled = true`, see below); next AirPlay. Roon talks to
    HQPlayer only through the closed NAA protocol; Cadenza becomes a Roon zone through Encore's Roon
    extension instead.
 5. **DST-compressed DFF and SACD ISO** input (we refuse DST today), CUE sheets, gapless DSD.
@@ -402,8 +402,20 @@ Tested: SSDP discovery against the running server, and a scripted control point 
 drives the whole session end to end – set URI, play, volume, mute, pause, seek, gapless
 next URI, events – through a real engine
 (`cargo test -p cadenza --test upnp`). Not yet tried with the control apps themselves.
-OpenHome (Linn's playlist / volume / time services, used by Kazoo, Lumin, BubbleUPnP's
-OpenHome mode) is next.
+
+**OpenHome** (Linn's services, used by Kazoo, Lumin, BubbleUPnP's OpenHome mode) runs on
+the same device:
+
+- **Playlist**: insert, delete, read, id array with change token, play / pause / stop /
+  next / previous, seek by id, index or seconds, repeat and shuffle. The playlist lives
+  in Cadenza; the engine is given the current entry and the next, and the one after is
+  queued as each track starts – gapless, while the controller edits the list freely.
+  Deleting the playing entry plays on with the next one. Up to 1000 entries; `http(s)`
+  only.
+- **Product**: room name, two sources (Playlist and UPnP AV – whichever a controller uses
+  becomes the active one), standby.
+- **Volume** (0–100 with mute; no balance or fade), **Time** (track count, duration,
+  seconds) and **Info** (track, codec, bit depth, sample rate), all evented.
 
 ## ASIO (Windows)
 
@@ -619,8 +631,8 @@ SwiftShader, WARP) are slower than the CPU engine and are skipped unless
 ## Roadmap
 
 - [ ] ASIO output on Windows (native DSD without a driver GUID)
-- [x] UPnP/DLNA MediaRenderer
-- [ ] OpenHome services, AirPlay receiver, MPRIS, Roon
+- [x] UPnP/DLNA MediaRenderer and OpenHome services
+- [ ] AirPlay receiver, MPRIS, Roon
 - [ ] Non-uniformly partitioned convolution for lower latency with long impulses
 - [ ] "v3"-class modulators and more poly-sinc variants
 - [x] The resampler's FFT polyphase stages on the GPU (CUDA)
