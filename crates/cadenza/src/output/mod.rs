@@ -398,6 +398,57 @@ pub fn default_backend() -> &'static str {
 /// listed too (`endpoint` backend); discovery runs in the background, so the first
 /// listing after start-up may miss them.
 pub fn list_devices() -> Vec<DeviceInfo> {
+    #[cfg(windows)]
+    {
+        // COM (cpal, WASAPI, ASIO) is set up per thread and its objects belong to the
+        // apartment that made them; enumerating from short-lived connection threads
+        // crashed the process on exit. One long-lived thread does all listing instead.
+        windows_device_thread::list()
+    }
+    #[cfg(not(windows))]
+    {
+        list_devices_here()
+    }
+}
+
+#[cfg(windows)]
+mod windows_device_thread {
+    use super::DeviceInfo;
+    use std::sync::mpsc::{channel, Sender};
+    use std::sync::{Mutex, OnceLock};
+
+    type Reply = Sender<Vec<DeviceInfo>>;
+
+    pub fn list() -> Vec<DeviceInfo> {
+        static WORKER: OnceLock<Mutex<Sender<Reply>>> = OnceLock::new();
+        let worker = WORKER.get_or_init(|| {
+            let (tx, rx) = channel::<Reply>();
+            std::thread::Builder::new()
+                .name("cadenza-devices".into())
+                .spawn(move || {
+                    for reply in rx {
+                        let _ = reply.send(super::list_devices_here());
+                    }
+                })
+                .expect("spawn the device thread");
+            Mutex::new(tx)
+        });
+        let (tx, rx) = channel();
+        if worker
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .send(tx)
+            .is_err()
+        {
+            return vec![super::null::device_info()];
+        }
+        rx.recv()
+            .unwrap_or_else(|_| vec![super::null::device_info()])
+    }
+}
+
+/// [`list_devices`] on the calling thread.
+fn list_devices_here() -> Vec<DeviceInfo> {
     let mut out = vec![null::device_info()];
     #[cfg(feature = "cpal")]
     out.extend(cpal_backend::list_devices());
