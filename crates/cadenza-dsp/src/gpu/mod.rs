@@ -8,6 +8,16 @@
 //! device, inverse transformed and downloaded. The sigma-delta modulator is sequential
 //! and stays on the CPU.
 //!
+//! The upsampler's FFT polyphase core runs there too ([`PolyphaseConvolver`]): the `L`
+//! sub-filter spectra are uploaded once per stage (shared by the channels), and per input
+//! block the device does one forward transform into the delay line, one batched
+//! multiply-accumulate over every sub-filter (packed two per complex spectrum), one
+//! batched inverse transform and the interleaving into output order; only the finished,
+//! interleaved block comes back. Delay compensation, decimation and flushing stay in the
+//! resampler, identical for both cores. A CUDA error while building leaves that stage on
+//! the CPU; one mid-stream moves it to the CPU core with the history replayed (no gap, no
+//! glitch), logged once.
+//!
 //! Building needs no CUDA toolkit: `cudarc` is used with its `dynamic-loading` feature,
 //! so the binary links nothing and loads `libcuda` / `nvcuda.dll` at run time. Without the
 //! `cuda` cargo feature, without an NVIDIA driver (≥ 525) or without a card, [`Backend::detect`]
@@ -22,7 +32,9 @@ pub mod reference;
 #[cfg(feature = "cuda")]
 mod cuda;
 
-use crate::convolution::{BlockConvolver, Convolver as CpuConvolver, SpectralFilter};
+use crate::convolution::{
+    BlockConvolver, Convolver as CpuConvolver, PolyphaseBlockConvolver, SpectralFilter,
+};
 use crate::signal_path::Stage;
 use serde::{Deserialize, Serialize};
 use serde_json::json;
@@ -30,7 +42,67 @@ use std::fmt;
 use std::sync::{Arc, Mutex};
 
 #[cfg(feature = "cuda")]
-pub use cuda::Convolver;
+pub use cuda::{Convolver, PolyphaseConvolver};
+
+/// Builds the polyphase upsampler cores of one resampler stage on some engine: the CUDA
+/// device ([`Backend`]) or the CPU model of the GPU algorithm
+/// ([`reference::ReferenceFactory`]). The resampler calls it once per FFT stage.
+pub trait PolyphaseFactory: Sync {
+    /// One core per channel for the `L = filters.len()` sub-filters (all partitioned for
+    /// the same block). The filter spectra should be uploaded once and shared.
+    fn polyphase(
+        &self,
+        filters: &[SpectralFilter],
+        channels: usize,
+    ) -> Result<Vec<Box<dyn PolyphaseBlockConvolver + Send>>, GpuError>;
+}
+
+impl PolyphaseFactory for Backend {
+    /// CUDA cores on a CUDA backend; `Err` on the CPU backend (the caller then keeps its
+    /// own CPU core).
+    fn polyphase(
+        &self,
+        filters: &[SpectralFilter],
+        channels: usize,
+    ) -> Result<Vec<Box<dyn PolyphaseBlockConvolver + Send>>, GpuError> {
+        match self {
+            Backend::Cuda { device, .. } => {
+                PolyphaseConvolver::for_channels(filters, channels, *device)
+            }
+            Backend::Cpu { reason } => Err(if reason == &GpuError::NotCompiled.to_string() {
+                GpuError::NotCompiled
+            } else {
+                GpuError::Disabled
+            }),
+        }
+    }
+}
+
+/// Which engines of a chain run on the GPU (for the `gpu` signal path stage).
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct GpuUse {
+    /// The upsampler's FFT polyphase core.
+    pub upsampling: bool,
+    /// The room convolution.
+    pub convolution: bool,
+}
+
+impl GpuUse {
+    /// Anything at all.
+    pub fn any(self) -> bool {
+        self.upsampling || self.convolution
+    }
+
+    /// `upsampling + room convolution`, `upsampling`, `room convolution`.
+    pub fn label(self) -> &'static str {
+        match (self.upsampling, self.convolution) {
+            (true, true) => "upsampling + room convolution",
+            (true, false) => "upsampling",
+            (false, true) => "room convolution",
+            (false, false) => "",
+        }
+    }
+}
 
 /// `true` when this binary was built with `--features cuda` (the only way CUDA can ever be used).
 pub const COMPILED_IN: bool = cfg!(feature = "cuda");
@@ -226,9 +298,21 @@ impl Backend {
     /// (and the UI badge green) only then – a detected card that no stage of the current
     /// chain uses is reported as `available, not used by this chain yet`.
     pub fn stage(&self, config: &GpuConfig, used: bool) -> Stage {
-        let used = used && self.is_gpu();
+        self.stage_for(
+            config,
+            GpuUse {
+                upsampling: false,
+                convolution: used,
+            },
+        )
+    }
+
+    /// The signal path stage for the compute backend, naming what runs on the device:
+    /// `CUDA (RTX 4060) · 64-bit · upsampling + room convolution`.
+    pub fn stage_for(&self, config: &GpuConfig, uses: GpuUse) -> Stage {
+        let used = uses.any() && self.is_gpu();
         let detail = match self {
-            Backend::Cuda { .. } if used => format!("{} · room convolution", self.label()),
+            Backend::Cuda { .. } if used => format!("{} · {}", self.label(), uses.label()),
             Backend::Cuda { .. } => {
                 format!("{} · available, not used by this chain yet", self.label())
             }
@@ -237,6 +321,8 @@ impl Backend {
         };
         let mut params = self.report(config);
         params["used"] = json!(used);
+        params["upsampling"] = json!(used && uses.upsampling);
+        params["convolution"] = json!(used && uses.convolution);
         Stage {
             id: "gpu".into(),
             name: "Compute".into(),
@@ -327,6 +413,24 @@ impl Convolver {
 
     /// Always `Err(GpuError::NotCompiled)` in this build.
     pub fn new(_h: &[f64], _block: usize, _device: usize) -> Result<Self, GpuError> {
+        Err(GpuError::NotCompiled)
+    }
+}
+
+/// The GPU polyphase upsampler core when the crate is built without the `cuda` feature:
+/// no values; [`PolyphaseConvolver::for_channels`] returns [`GpuError::NotCompiled`].
+#[cfg(not(feature = "cuda"))]
+#[derive(Debug)]
+pub enum PolyphaseConvolver {}
+
+#[cfg(not(feature = "cuda"))]
+impl PolyphaseConvolver {
+    /// Always `Err(GpuError::NotCompiled)` in this build.
+    pub fn for_channels(
+        _filters: &[SpectralFilter],
+        _channels: usize,
+        _device: usize,
+    ) -> Result<Vec<Box<dyn PolyphaseBlockConvolver + Send>>, GpuError> {
         Err(GpuError::NotCompiled)
     }
 }
@@ -516,5 +620,67 @@ mod tests {
             "CUDA (RTX 4060) · 64-bit · available, not used by this chain yet"
         );
         assert_eq!(idle.params["used"], false);
+        // What runs there, by engine.
+        let both = cuda.stage_for(
+            &GpuConfig::default(),
+            GpuUse {
+                upsampling: true,
+                convolution: true,
+            },
+        );
+        assert!(both.active);
+        assert_eq!(
+            both.detail,
+            "CUDA (RTX 4060) · 64-bit · upsampling + room convolution"
+        );
+        assert_eq!(both.params["upsampling"], true);
+        assert_eq!(both.params["convolution"], true);
+        let up = cuda.stage_for(
+            &GpuConfig::default(),
+            GpuUse {
+                upsampling: true,
+                convolution: false,
+            },
+        );
+        assert_eq!(up.detail, "CUDA (RTX 4060) · 64-bit · upsampling");
+        assert_eq!(up.params["convolution"], false);
+        // The CPU backend never claims either, whatever the chain asks for.
+        let cpu = Backend::Cpu { reason: "x".into() };
+        let st = cpu.stage_for(
+            &GpuConfig::default(),
+            GpuUse {
+                upsampling: true,
+                convolution: true,
+            },
+        );
+        assert!(!st.active);
+        assert_eq!(st.params["upsampling"], false);
+    }
+
+    #[test]
+    fn cpu_backend_builds_no_polyphase_cores() {
+        let filters = vec![SpectralFilter::new(&[1.0, 0.5], 64); 2];
+        let off = Backend::Cpu {
+            reason: GpuError::Disabled.to_string(),
+        };
+        assert_eq!(off.polyphase(&filters, 2).err(), Some(GpuError::Disabled));
+        let none = Backend::Cpu {
+            reason: GpuError::NotCompiled.to_string(),
+        };
+        assert_eq!(
+            none.polyphase(&filters, 2).err(),
+            Some(GpuError::NotCompiled)
+        );
+        let err = PolyphaseConvolver::for_channels(&filters, 1, 0)
+            .err()
+            .unwrap();
+        if COMPILED_IN {
+            assert!(matches!(
+                err,
+                GpuError::NoDriver(_) | GpuError::NoDevice(_) | GpuError::Driver(_)
+            ));
+        } else {
+            assert_eq!(err, GpuError::NotCompiled);
+        }
     }
 }

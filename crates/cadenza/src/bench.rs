@@ -1,6 +1,7 @@
 //! `cadenza bench`: realtime factors (seconds of audio per wall-clock second) for the
 //! machine this runs on – the long-FIR upsampler on the CPU and, when a card is present,
-//! its convolution engine on the GPU; room convolution; and the DSD modulator at every
+//! on the GPU (its FFT polyphase core on CUDA), plus its convolution engine alone on both;
+//! room convolution; and the DSD modulator at every
 //! DSD rate (optionally with the long filter that feeds it), so users see where their
 //! CPU/GPU tops out before they pick DSD1024 or `dsd_oversampling = full`.
 //!
@@ -12,7 +13,7 @@ use cadenza_dsp::bench::{self as dsp_bench, BenchResult};
 use cadenza_dsp::convolution::{choose_block, BlockConvolver, Convolver, SpectralFilter};
 use cadenza_dsp::dsd::stage::{bench_modulator, DsdStage};
 use cadenza_dsp::dsd::{DsdConfig, DsdModulator, DsdOversampling, DsdRate};
-use cadenza_dsp::gpu::{Backend, GpuConfig};
+use cadenza_dsp::gpu::{Backend, GpuConfig, GpuError};
 use cadenza_dsp::resampler::RateFamily;
 use cadenza_dsp::signal_path::rate_label;
 use cadenza_dsp::{CoefficientCache, FilterKind};
@@ -157,6 +158,21 @@ fn time_convolver(
     done as f64 / rate as f64 / wall
 }
 
+/// Why a GPU row has no number: `not run: built without the cuda feature`, `not run: no
+/// NVIDIA GPU found (…)`, `not run: gpu = off`.
+fn gpu_not_run_note(backend: &Backend) -> String {
+    match backend {
+        Backend::Cuda { .. } => String::new(),
+        Backend::Cpu { reason } if *reason == GpuError::NotCompiled.to_string() => {
+            "not run: built without the cuda feature".into()
+        }
+        Backend::Cpu { reason } if *reason == GpuError::Disabled.to_string() => {
+            "not run: gpu = off".into()
+        }
+        Backend::Cpu { reason } => format!("not run: no NVIDIA GPU found ({reason})"),
+    }
+}
+
 /// The conversion ratio `l/m` in lowest terms.
 fn ratio(in_rate: u32, out_rate: u32) -> (usize, usize) {
     fn gcd(a: u32, b: u32) -> u32 {
@@ -204,6 +220,61 @@ pub fn run(o: &BenchOptions) -> Vec<BenchRow> {
         }),
     }
 
+    // 1b. The same upsampler with its FFT polyphase core on the GPU, when there is one.
+    let backend = Backend::detect(&o.gpu);
+    let gpu_row = |compute: String, note: String, r: Option<&BenchResult>| match r {
+        Some(r) => {
+            let mut row = from_result(
+                "upsampling (GPU)",
+                compute,
+                format!("{} · {} taps · {}", r.filter, r.taps, r.engine),
+                r,
+            );
+            row.note = note;
+            row
+        }
+        None => BenchRow {
+            kind: "upsampling (GPU)".into(),
+            compute,
+            detail: o.filter.id(),
+            in_rate: o.in_rate,
+            out_rate: o.out_rate,
+            channels: o.channels,
+            realtime_factor: None,
+            design_seconds: 0.0,
+            note,
+        },
+    };
+    if backend.is_gpu() {
+        match dsp_bench::run_on(
+            o.filter,
+            o.in_rate,
+            o.out_rate,
+            o.channels,
+            o.seconds,
+            o.attenuation_db,
+            &o.cache,
+            Some(&backend),
+        ) {
+            Ok(r) if r.engine.contains("CUDA") => rows.push(gpu_row(
+                backend.label(),
+                "FFT polyphase core on the GPU; time-domain stages stay on the CPU".into(),
+                Some(&r),
+            )),
+            Ok(r) => rows.push(gpu_row(
+                backend.label(),
+                format!(
+                    "not run: no FFT stage could be placed on the GPU ({})",
+                    r.engine
+                ),
+                None,
+            )),
+            Err(e) => rows.push(gpu_row(backend.label(), e.to_string(), None)),
+        }
+    } else {
+        rows.push(gpu_row("GPU".into(), gpu_not_run_note(&backend), None));
+    }
+
     // 2. The filter's convolution engine alone, CPU and (when present) GPU, so the two
     //    numbers are directly comparable.
     let (l, m) = ratio(o.in_rate, o.out_rate);
@@ -233,7 +304,6 @@ pub fn run(o: &BenchOptions) -> Vec<BenchRow> {
         design_seconds,
         note: "the FFT engine behind the upsampler, at the output rate".into(),
     });
-    let backend = Backend::detect(&o.gpu);
     if backend.is_gpu() {
         let b = backend.clone();
         let f = Arc::clone(&filter);
@@ -265,10 +335,7 @@ pub fn run(o: &BenchOptions) -> Vec<BenchRow> {
             channels: o.channels,
             realtime_factor: None,
             design_seconds: 0.0,
-            note: match &backend {
-                Backend::Cpu { reason } => format!("not run: {reason}"),
-                Backend::Cuda { .. } => String::new(),
-            },
+            note: gpu_not_run_note(&backend),
         });
     }
 
@@ -429,6 +496,7 @@ mod tests {
         let rows = run(&o);
         let kinds: Vec<&str> = rows.iter().map(|r| r.kind.as_str()).collect();
         assert!(kinds.contains(&"upsampling"));
+        assert!(kinds.contains(&"upsampling (GPU)"));
         assert!(kinds.contains(&"convolver"));
         assert!(kinds.contains(&"room-convolution"));
         assert_eq!(
@@ -442,6 +510,11 @@ mod tests {
                     r.realtime_factor.is_none() && r.note.starts_with("not run"),
                     "{r:?}"
                 );
+                if !cadenza_dsp::gpu::COMPILED_IN {
+                    assert_eq!(r.note, "not run: built without the cuda feature");
+                } else {
+                    assert!(r.note.starts_with("not run: no NVIDIA GPU found"), "{r:?}");
+                }
             } else {
                 assert!(r.realtime_factor.unwrap() > 0.0, "{r:?}");
             }

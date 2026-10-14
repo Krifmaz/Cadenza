@@ -6,9 +6,9 @@
 //! before any `cudarc` call, and turns the absence into [`GpuError::NoDriver`].
 
 use super::kernels::{grid_for, pass_schedule, KERNEL_SOURCE, PROGRAM_NAME, THREADS_PER_BLOCK};
-use super::reference::filter_spectra;
+use super::reference::{check_polyphase, filter_spectra, pair_spectra};
 use super::{Backend, GpuError};
-use crate::convolution::{BlockConvolver, SpectralFilter};
+use crate::convolution::{BlockConvolver, PolyphaseBlockConvolver, SpectralFilter};
 use cudarc::driver::{
     CudaContext, CudaFunction, CudaModule, CudaSlice, CudaStream, DriverError, LaunchConfig,
     PushKernelArg,
@@ -87,6 +87,29 @@ pub fn probe(device: usize) -> Result<Backend, GpuError> {
     })
 }
 
+/// Compile the kernels with NVRTC and load them into `ctx`.
+fn compile(ctx: &Arc<CudaContext>) -> Result<Arc<CudaModule>, GpuError> {
+    let opts = CompileOptions {
+        name: Some(PROGRAM_NAME.to_string()),
+        // Keep every operation IEEE double: no fast-math, exact division and sqrt.
+        use_fast_math: Some(false),
+        prec_div: Some(true),
+        prec_sqrt: Some(true),
+        ..Default::default()
+    };
+    let ptx = compile_ptx_with_opts(KERNEL_SOURCE, opts)?;
+    Ok(ctx.load_module(ptx)?)
+}
+
+/// One-dimensional launch over `items` work items.
+fn cfg(items: usize) -> LaunchConfig {
+    LaunchConfig {
+        grid_dim: (grid_for(items), 1, 1),
+        block_dim: (THREADS_PER_BLOCK, 1, 1),
+        shared_mem_bytes: 0,
+    }
+}
+
 /// A partitioned convolver whose FFTs, multiply-accumulate and frequency-delay line live
 /// on a CUDA device, in `f64`. Implements [`BlockConvolver`] like the CPU engine.
 pub struct Convolver {
@@ -136,16 +159,7 @@ impl Convolver {
         };
         let ctx = CudaContext::new(device)?;
         let stream = ctx.default_stream();
-        let opts = CompileOptions {
-            name: Some(PROGRAM_NAME.to_string()),
-            // Keep every operation IEEE double: no fast-math, exact division and sqrt.
-            use_fast_math: Some(false),
-            prec_div: Some(true),
-            prec_sqrt: Some(true),
-            ..Default::default()
-        };
-        let ptx = compile_ptx_with_opts(KERNEL_SOURCE, opts)?;
-        let module = ctx.load_module(ptx)?;
+        let module = compile(&ctx)?;
         let load = |n: &str| module.load_function(n);
 
         let block = filter.block();
@@ -205,11 +219,7 @@ impl Convolver {
     }
 
     fn cfg(items: usize) -> LaunchConfig {
-        LaunchConfig {
-            grid_dim: (grid_for(items), 1, 1),
-            block_dim: (THREADS_PER_BLOCK, 1, 1),
-            shared_mem_bytes: 0,
-        }
+        cfg(items)
     }
 
     /// In-place FFT of `d_a` (ping-ponging through `d_b`); the result ends in `d_a`.
@@ -345,6 +355,296 @@ impl BlockConvolver for Convolver {
     }
 }
 
+/// What the channels of one polyphase stage share on the device: the compiled kernels and
+/// the packed sub-filter spectra (uploaded once).
+struct PolyShared {
+    _module: Arc<CudaModule>,
+    k_pack: CudaFunction,
+    k_radix2: CudaFunction,
+    k_radix4: CudaFunction,
+    k_radix2_batch: CudaFunction,
+    k_radix4_batch: CudaFunction,
+    k_copy: CudaFunction,
+    k_mac: CudaFunction,
+    k_interleave: CudaFunction,
+    /// `pairs × parts × 2n` doubles: see [`pair_spectra`].
+    d_g: CudaSlice<f64>,
+    block: usize,
+    n: usize,
+    l: usize,
+    pairs: usize,
+    parts: usize,
+    device_name: String,
+}
+
+/// The upsampler's FFT polyphase core on a CUDA device, in `f64` (one per channel, each on
+/// its own stream; the sub-filter spectra are shared). Per input block: upload the block,
+/// one forward transform into the device-resident delay line, one `poly_fdl_mac` launch
+/// over all sub-filter pairs, one batched inverse transform, `poly_interleave`, and the
+/// download of the `block × L` interleaved output. Mirrors
+/// [`super::reference::ReferencePolyphase`] kernel for kernel.
+pub struct PolyphaseConvolver {
+    shared: Arc<PolyShared>,
+    stream: Arc<CudaStream>,
+    head: usize,
+    count: usize,
+    frame: Vec<f64>,
+    d_in: CudaSlice<f64>,
+    d_a: CudaSlice<f64>,
+    d_b: CudaSlice<f64>,
+    d_fdl: CudaSlice<f64>,
+    d_acc: CudaSlice<f64>,
+    d_acc2: CudaSlice<f64>,
+    d_out: CudaSlice<f64>,
+}
+
+impl std::fmt::Debug for PolyphaseConvolver {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("gpu::PolyphaseConvolver")
+            .field("device", &self.shared.device_name)
+            .field("block", &self.shared.block)
+            .field("phases", &self.shared.l)
+            .field("partitions", &self.shared.parts)
+            .finish()
+    }
+}
+
+impl PolyphaseConvolver {
+    /// Build `channels` cores for the `L = filters.len()` sub-filters on CUDA device
+    /// `device`: compile the kernels, upload the packed spectra once
+    /// (`ceil(L/2) × partitions × 2·block` complex `f64`), and give each channel its own
+    /// stream, delay line and work buffers.
+    pub fn for_channels(
+        filters: &[SpectralFilter],
+        channels: usize,
+        device: usize,
+    ) -> Result<Vec<Box<dyn PolyphaseBlockConvolver + Send>>, GpuError> {
+        let (block, parts) = check_polyphase(filters)?;
+        let Backend::Cuda { name, .. } = probe(device)? else {
+            unreachable!("probe returns a CUDA backend or an error")
+        };
+        let ctx = CudaContext::new(device)?;
+        // Streams first, so every buffer below is created with cross-stream event tracking.
+        let streams = (0..channels.max(1))
+            .map(|_| ctx.new_stream())
+            .collect::<Result<Vec<_>, _>>()?;
+        let module = compile(&ctx)?;
+        let load = |n: &str| module.load_function(n);
+        let l = filters.len();
+        let n = 2 * block;
+        let pairs = l.div_ceil(2);
+        let g = pair_spectra(filters);
+        let d_g = streams[0].clone_htod(&g)?;
+        streams[0].synchronize()?;
+        let shared = Arc::new(PolyShared {
+            k_pack: load("pack_real")?,
+            k_radix2: load("stockham_radix2")?,
+            k_radix4: load("stockham_radix4")?,
+            k_radix2_batch: load("stockham_radix2_batch")?,
+            k_radix4_batch: load("stockham_radix4_batch")?,
+            k_copy: load("copy_complex")?,
+            k_mac: load("poly_fdl_mac")?,
+            k_interleave: load("poly_interleave")?,
+            _module: module,
+            d_g,
+            block,
+            n,
+            l,
+            pairs,
+            parts,
+            device_name: name,
+        });
+        streams
+            .into_iter()
+            .map(|stream| {
+                let core = PolyphaseConvolver {
+                    d_in: stream.alloc_zeros::<f64>(n)?,
+                    d_a: stream.alloc_zeros::<f64>(2 * n)?,
+                    d_b: stream.alloc_zeros::<f64>(2 * n)?,
+                    d_fdl: stream.alloc_zeros::<f64>(parts * 2 * n)?,
+                    d_acc: stream.alloc_zeros::<f64>(pairs * 2 * n)?,
+                    d_acc2: stream.alloc_zeros::<f64>(pairs * 2 * n)?,
+                    d_out: stream.alloc_zeros::<f64>(block * l)?,
+                    shared: Arc::clone(&shared),
+                    stream,
+                    head: 0,
+                    count: 0,
+                    frame: vec![0.0; n],
+                };
+                Ok(Box::new(core) as Box<dyn PolyphaseBlockConvolver + Send>)
+            })
+            .collect()
+    }
+
+    /// Bytes of device memory one channel holds on its own (the shared spectra not counted).
+    pub fn device_bytes_per_channel(&self) -> usize {
+        let (n, s) = (self.shared.n, &self.shared);
+        8 * (n + 2 * 2 * n + s.parts * 2 * n + 2 * s.pairs * 2 * n + s.block * s.l)
+    }
+
+    fn run_block(&mut self, input: &[f64], out: &mut [f64]) -> Result<(), DriverError> {
+        let s = Arc::clone(&self.shared);
+        let (block, n) = (s.block, s.n);
+        self.frame[block..].copy_from_slice(input);
+        self.stream.memcpy_htod(&self.frame, &mut self.d_in)?;
+        let n_i = n as i32;
+        // SAFETY (all launches): argument types and order match the kernel signatures in
+        // kernels.cu; every index the kernels compute is bounded by the sizes passed, and
+        // the buffers were allocated with exactly those sizes.
+        unsafe {
+            self.stream
+                .launch_builder(&s.k_pack)
+                .arg(&self.d_in)
+                .arg(&mut self.d_a)
+                .arg(&n_i)
+                .launch(cfg(n))?;
+        }
+        // Forward transform of the block, once for all phases (result in d_a).
+        let mut in_a = true;
+        for (radix, ns) in pass_schedule(n) {
+            let ns_i = ns as i32;
+            let dir = -1i32;
+            let (src, dst) = if in_a {
+                (&self.d_a, &mut self.d_b)
+            } else {
+                (&self.d_b, &mut self.d_a)
+            };
+            let (func, items) = if radix == 4 {
+                (&s.k_radix4, n / 4)
+            } else {
+                (&s.k_radix2, n / 2)
+            };
+            unsafe {
+                self.stream
+                    .launch_builder(func)
+                    .arg(src)
+                    .arg(dst)
+                    .arg(&n_i)
+                    .arg(&ns_i)
+                    .arg(&dir)
+                    .launch(cfg(items))?;
+            }
+            in_a = !in_a;
+        }
+        if !in_a {
+            std::mem::swap(&mut self.d_a, &mut self.d_b);
+        }
+        self.head = (self.head + s.parts - 1) % s.parts;
+        self.count = (self.count + 1).min(s.parts);
+        let slot = self.head as i32;
+        let depth = self.count as i32;
+        let slots = s.parts as i32;
+        let parts = s.parts as i32;
+        let pairs = s.pairs as i32;
+        unsafe {
+            self.stream
+                .launch_builder(&s.k_copy)
+                .arg(&self.d_a)
+                .arg(&mut self.d_fdl)
+                .arg(&n_i)
+                .arg(&slot)
+                .launch(cfg(n))?;
+            self.stream
+                .launch_builder(&s.k_mac)
+                .arg(&self.d_fdl)
+                .arg(&s.d_g)
+                .arg(&mut self.d_acc)
+                .arg(&n_i)
+                .arg(&depth)
+                .arg(&slot)
+                .arg(&slots)
+                .arg(&parts)
+                .arg(&pairs)
+                .launch(cfg(s.pairs * n))?;
+        }
+        // Every pair's inverse transform in one launch per pass (result in d_acc).
+        let mut in_acc = true;
+        for (radix, ns) in pass_schedule(n) {
+            let ns_i = ns as i32;
+            let dir = 1i32;
+            let (src, dst) = if in_acc {
+                (&self.d_acc, &mut self.d_acc2)
+            } else {
+                (&self.d_acc2, &mut self.d_acc)
+            };
+            let (func, items) = if radix == 4 {
+                (&s.k_radix4_batch, s.pairs * n / 4)
+            } else {
+                (&s.k_radix2_batch, s.pairs * n / 2)
+            };
+            unsafe {
+                self.stream
+                    .launch_builder(func)
+                    .arg(src)
+                    .arg(dst)
+                    .arg(&n_i)
+                    .arg(&ns_i)
+                    .arg(&dir)
+                    .arg(&pairs)
+                    .launch(cfg(items))?;
+            }
+            in_acc = !in_acc;
+        }
+        if !in_acc {
+            std::mem::swap(&mut self.d_acc, &mut self.d_acc2);
+        }
+        let block_i = block as i32;
+        let l_i = s.l as i32;
+        let scale = 1.0 / n as f64;
+        unsafe {
+            self.stream
+                .launch_builder(&s.k_interleave)
+                .arg(&self.d_acc)
+                .arg(&mut self.d_out)
+                .arg(&block_i)
+                .arg(&l_i)
+                .arg(&scale)
+                .launch(cfg(block * s.l))?;
+        }
+        self.stream.memcpy_dtoh(&self.d_out, out)?;
+        self.stream.synchronize()?;
+        self.frame.copy_within(block.., 0);
+        Ok(())
+    }
+}
+
+impl PolyphaseBlockConvolver for PolyphaseConvolver {
+    fn block(&self) -> usize {
+        self.shared.block
+    }
+
+    fn phases(&self) -> usize {
+        self.shared.l
+    }
+
+    fn process_block(&mut self, input: &[f64], out: &mut [f64]) -> Result<(), GpuError> {
+        assert_eq!(input.len(), self.shared.block, "one block in");
+        assert_eq!(
+            out.len(),
+            self.shared.block * self.shared.l,
+            "block × L out"
+        );
+        self.run_block(input, out).map_err(GpuError::from)
+    }
+
+    fn reset(&mut self) {
+        // The delay line is cleared lazily through `count`.
+        self.frame.fill(0.0);
+        self.count = 0;
+    }
+
+    fn device_label(&self) -> String {
+        format!(
+            "CUDA ({})",
+            super::short_device_name(&self.shared.device_name)
+        )
+    }
+
+    fn on_gpu(&self) -> bool {
+        true
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -369,6 +669,71 @@ mod tests {
             gpu.process_block(chunk, &mut got);
             for (a, b) in want.iter().zip(&got) {
                 assert!((a - b).abs() < 1e-10, "{a} vs {b}");
+            }
+        }
+    }
+
+    /// Runs only on a machine with an NVIDIA card: the device polyphase core against its
+    /// CPU model and the CPU engine, ×2 … ×64 and an odd L.
+    #[test]
+    #[ignore = "needs a CUDA device"]
+    fn gpu_polyphase_matches_the_reference_and_the_cpu_resampler() {
+        use crate::cache::CoefficientCache;
+        use crate::fir::FilterKind;
+        use crate::resampler::Resampler;
+        let backend = probe(0).expect("CUDA device");
+        let cache = CoefficientCache::disabled();
+        let kind = FilterKind::parse("sinc-l-64k").unwrap();
+        for (inr, outr) in [
+            (44_100, 88_200),
+            (44_100, 176_400),
+            (44_100, 705_600),
+            (44_100, 1_411_200),
+            (44_100, 2_822_400),
+            (16_000, 48_000),
+        ] {
+            let mut cpu = Resampler::new(inr, outr, 2, kind, 150.0, &cache).unwrap();
+            let mut gpu =
+                Resampler::new_on(inr, outr, 2, kind, 150.0, &cache, Some(&backend)).unwrap();
+            assert!(gpu.on_gpu(), "{}", gpu.describe());
+            let x: Vec<f64> = (0..2 * 20_000)
+                .map(|i| ((i as f64) * 0.0137).sin() * 0.5)
+                .collect();
+            let mut a = cpu.push(&x);
+            a.extend(cpu.flush());
+            let mut b = gpu.push(&x);
+            b.extend(gpu.flush());
+            assert_eq!(a.len(), b.len());
+            let peak = a.iter().fold(0.0f64, |m, v| m.max(v.abs()));
+            let err = a
+                .iter()
+                .zip(&b)
+                .map(|(p, q)| (p - q).abs())
+                .fold(0.0, f64::max);
+            assert!(err / peak < 1e-12, "{inr}→{outr}: {err:e}");
+        }
+        // Device core vs its model, block by block.
+        let h: Vec<f64> = (0..8 * 4096 + 3)
+            .map(|i| ((i as f64) * 0.011).sin() / (1.0 + i as f64 * 0.003))
+            .collect();
+        let subs: Vec<SpectralFilter> = (0..5)
+            .map(|p| {
+                let s: Vec<f64> = h.iter().skip(p).step_by(5).copied().collect();
+                SpectralFilter::new(&s, 512)
+            })
+            .collect();
+        let mut dev = PolyphaseConvolver::for_channels(&subs, 1, 0).expect("CUDA device");
+        let mut model = super::super::reference::ReferencePolyphase::new(&subs).unwrap();
+        let mut want = vec![0.0; 512 * 5];
+        let mut got = vec![0.0; 512 * 5];
+        for b in 0..12 {
+            let x: Vec<f64> = (0..512)
+                .map(|i| ((b * 512 + i) as f64 * 0.37).cos())
+                .collect();
+            model.process_block(&x, &mut want).unwrap();
+            dev[0].process_block(&x, &mut got).unwrap();
+            for (p, q) in want.iter().zip(&got) {
+                assert!((p - q).abs() < 1e-11, "{p} vs {q}");
             }
         }
     }

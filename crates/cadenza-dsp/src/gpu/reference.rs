@@ -2,13 +2,19 @@
 //! complex layout, the same Hermitian expansion of the partition spectra, the same
 //! frequency-delay-line ring and the same MAC order, executed one "thread" at a time.
 //!
+//! [`ReferencePolyphase`] does the same for the GPU polyphase upsampler core: one forward
+//! transform per input block into the delay line, the `poly_fdl_mac` kernel over all
+//! sub-filter pairs, the batched inverse transforms and the `poly_interleave` output.
+//!
 //! It exists so the algorithm the kernels implement can be verified on a machine without
 //! an NVIDIA card (and so a GPU result can be compared with something other than the
 //! `realfft`-based CPU engine). It is not meant to be fast.
 
 use super::kernels::pass_schedule;
-use crate::convolution::{BlockConvolver, SpectralFilter};
+use super::{GpuError, PolyphaseFactory};
+use crate::convolution::{BlockConvolver, PolyphaseBlockConvolver, SpectralFilter};
 use rustfft::num_complex::Complex;
+use std::sync::Arc;
 
 /// One Stockham radix-2 pass (mirror of the `stockham_radix2` kernel) over `n` complex
 /// values stored interleaved.
@@ -86,6 +92,24 @@ pub fn fft(a: &mut Vec<f64>, b: &mut Vec<f64>, n: usize, dir: i32) {
     }
 }
 
+/// `batch` independent `n`-point transforms stored back to back in `a` (`batch × 2n`
+/// doubles), exactly as the `stockham_radix*_batch` kernels run them: every pass over all
+/// transforms, then the ping-pong. The result is left in `a`.
+pub fn fft_batch(a: &mut Vec<f64>, b: &mut Vec<f64>, n: usize, batch: usize, dir: i32) {
+    debug_assert_eq!(a.len(), 2 * n * batch);
+    debug_assert_eq!(b.len(), 2 * n * batch);
+    for (radix, ns) in pass_schedule(n) {
+        for (src, dst) in a.chunks_exact(2 * n).zip(b.chunks_exact_mut(2 * n)) {
+            if radix == 4 {
+                stockham_radix4(src, dst, n, ns, dir);
+            } else {
+                stockham_radix2(src, dst, n, ns, dir);
+            }
+        }
+        std::mem::swap(a, b);
+    }
+}
+
 /// Expand a `realfft` half spectrum (`n/2 + 1` bins) to the full `n`-point spectrum the
 /// complex kernels work on, interleaved: `X[n − k] = conj(X[k])`.
 pub fn expand_hermitian(half: &[Complex<f64>], n: usize) -> Vec<f64> {
@@ -116,6 +140,228 @@ pub fn filter_spectra(filter: &SpectralFilter) -> Vec<f64> {
         all.extend(expand_hermitian(h, n));
     }
     all
+}
+
+/// The sub-filter spectra of a polyphase upsampler as the GPU holds them: the `L`
+/// sub-filters are packed in pairs, `G_{q,p} = H_{2q,p} + i·H_{2q+1,p}` (a zero filter
+/// completes the last pair when `L` is odd), each partition expanded to the full
+/// `n = 2·block` bins. Layout `[pair][partition][bin]`, interleaved complex:
+/// `pairs × partitions × 2n` doubles.
+///
+/// Packing works because each sub-filter output is real: the inverse transform of
+/// `X·(H_a + i·H_b)` is `x∗h_a + i·(x∗h_b)`, so one complex transform yields two phases –
+/// half the multiply-accumulates and half the inverse FFTs of evaluating them one by one.
+pub fn pair_spectra(filters: &[SpectralFilter]) -> Vec<f64> {
+    assert!(!filters.is_empty(), "no sub-filters");
+    let block = filters[0].block();
+    let parts = filters[0].partitions();
+    let n = 2 * block;
+    let pairs = filters.len().div_ceil(2);
+    let mut g = vec![0.0; pairs * parts * 2 * n];
+    for (q, pair) in filters.chunks(2).enumerate() {
+        for p in 0..parts {
+            let dst = &mut g[(q * parts + p) * 2 * n..(q * parts + p + 1) * 2 * n];
+            let a = expand_hermitian(&pair[0].partition_spectra()[p], n);
+            dst.copy_from_slice(&a);
+            if let Some(second) = pair.get(1) {
+                let b = expand_hermitian(&second.partition_spectra()[p], n);
+                // (ar + i·ai) + i·(br + i·bi) = (ar − bi) + i·(ai + br)
+                for k in 0..n {
+                    dst[2 * k] -= b[2 * k + 1];
+                    dst[2 * k + 1] += b[2 * k];
+                }
+            }
+        }
+    }
+    g
+}
+
+/// Check that `filters` can run as one polyphase core: same block, same partitions.
+pub fn check_polyphase(filters: &[SpectralFilter]) -> Result<(usize, usize), GpuError> {
+    let first = filters
+        .first()
+        .ok_or_else(|| GpuError::Driver("no sub-filters".into()))?;
+    let (block, parts) = (first.block(), first.partitions().max(1));
+    if filters
+        .iter()
+        .any(|f| f.block() != block || f.partitions().max(1) != parts)
+    {
+        return Err(GpuError::Driver(
+            "polyphase sub-filters differ in block size or length".into(),
+        ));
+    }
+    Ok((block, parts))
+}
+
+/// The GPU polyphase upsampler core on the CPU (see the module docs): same buffers, same
+/// kernels in the same order, executed one "thread" at a time.
+#[derive(Debug)]
+pub struct ReferencePolyphase {
+    block: usize,
+    n: usize,
+    l: usize,
+    pairs: usize,
+    parts: usize,
+    head: usize,
+    count: usize,
+    frame: Vec<f64>,
+    a: Vec<f64>,
+    b: Vec<f64>,
+    fdl: Vec<f64>,
+    g: Arc<Vec<f64>>,
+    acc: Vec<f64>,
+    acc2: Vec<f64>,
+    /// Test hook: fail (like a lost device) when this many blocks have been processed.
+    fail_at_block: Option<u64>,
+    blocks: u64,
+}
+
+impl ReferencePolyphase {
+    /// Model the GPU core for the `L = filters.len()` sub-filters.
+    pub fn new(filters: &[SpectralFilter]) -> Result<Self, GpuError> {
+        let (block, parts) = check_polyphase(filters)?;
+        Ok(Self::with_spectra(
+            Arc::new(pair_spectra(filters)),
+            block,
+            parts,
+            filters.len(),
+        ))
+    }
+
+    fn with_spectra(g: Arc<Vec<f64>>, block: usize, parts: usize, l: usize) -> Self {
+        let n = 2 * block;
+        let pairs = l.div_ceil(2);
+        Self {
+            block,
+            n,
+            l,
+            pairs,
+            parts,
+            head: 0,
+            count: 0,
+            frame: vec![0.0; n],
+            a: vec![0.0; 2 * n],
+            b: vec![0.0; 2 * n],
+            fdl: vec![0.0; parts * 2 * n],
+            g,
+            acc: vec![0.0; pairs * 2 * n],
+            acc2: vec![0.0; pairs * 2 * n],
+            fail_at_block: None,
+            blocks: 0,
+        }
+    }
+}
+
+impl PolyphaseBlockConvolver for ReferencePolyphase {
+    fn block(&self) -> usize {
+        self.block
+    }
+
+    fn phases(&self) -> usize {
+        self.l
+    }
+
+    fn process_block(&mut self, input: &[f64], out: &mut [f64]) -> Result<(), GpuError> {
+        let (block, n, l) = (self.block, self.n, self.l);
+        assert_eq!(input.len(), block);
+        assert_eq!(out.len(), block * l);
+        if self.fail_at_block == Some(self.blocks) {
+            return Err(GpuError::Driver("simulated device loss (reference)".into()));
+        }
+        self.blocks += 1;
+        self.frame[block..].copy_from_slice(input);
+        // pack_real + forward transform, once for all phases
+        for i in 0..n {
+            self.a[2 * i] = self.frame[i];
+            self.a[2 * i + 1] = 0.0;
+        }
+        fft(&mut self.a, &mut self.b, n, -1);
+        // copy_complex into the newest slot
+        self.head = (self.head + self.parts - 1) % self.parts;
+        self.fdl[self.head * 2 * n..(self.head + 1) * 2 * n].copy_from_slice(&self.a);
+        self.count = (self.count + 1).min(self.parts);
+        // poly_fdl_mac, thread t = q·n + k
+        for t in 0..self.pairs * n {
+            let (q, k) = (t / n, t % n);
+            let (mut re, mut im) = (0.0f64, 0.0f64);
+            let mut slot = self.head;
+            for p in 0..self.count {
+                let xi_ = 2 * (slot * n + k);
+                let gi_ = 2 * ((q * self.parts + p) * n + k);
+                let (xr, xi) = (self.fdl[xi_], self.fdl[xi_ + 1]);
+                let (hr, hi) = (self.g[gi_], self.g[gi_ + 1]);
+                re = xr.mul_add(hr, re);
+                re = (-xi).mul_add(hi, re);
+                im = xr.mul_add(hi, im);
+                im = xi.mul_add(hr, im);
+                slot += 1;
+                if slot == self.parts {
+                    slot = 0;
+                }
+            }
+            self.acc[2 * t] = re;
+            self.acc[2 * t + 1] = im;
+        }
+        // batched inverse transforms
+        fft_batch(&mut self.acc, &mut self.acc2, n, self.pairs, 1);
+        // poly_interleave
+        let scale = 1.0 / n as f64;
+        for (t, o) in out.iter_mut().enumerate() {
+            let (j, p) = (t / l, t % l);
+            let src = 2 * ((p >> 1) * n + j + block) + (p & 1);
+            *o = self.acc[src] * scale;
+        }
+        self.frame.copy_within(block.., 0);
+        Ok(())
+    }
+
+    fn reset(&mut self) {
+        self.frame.fill(0.0);
+        self.fdl.fill(0.0);
+        self.head = 0;
+        self.count = 0;
+    }
+
+    fn device_label(&self) -> String {
+        "GPU model (CPU)".into()
+    }
+}
+
+/// Builds [`ReferencePolyphase`] cores: the GPU upsampler path of the resampler, run on the
+/// CPU – what the tests compare against the CPU engine. `fail_at_block` makes every core
+/// fail (as a lost device would) when that many blocks have been processed; `fail_build`
+/// makes construction fail (as a missing driver or full device memory would).
+#[derive(Clone, Copy, Debug, Default)]
+pub struct ReferenceFactory {
+    /// Fail at this block index (0 = the first block) on every channel.
+    pub fail_at_block: Option<u64>,
+    /// Refuse to build.
+    pub fail_build: bool,
+}
+
+impl PolyphaseFactory for ReferenceFactory {
+    fn polyphase(
+        &self,
+        filters: &[SpectralFilter],
+        channels: usize,
+    ) -> Result<Vec<Box<dyn PolyphaseBlockConvolver + Send>>, GpuError> {
+        if self.fail_build {
+            return Err(GpuError::Driver(
+                "simulated build failure (reference)".into(),
+            ));
+        }
+        let (block, parts) = check_polyphase(filters)?;
+        // Uploaded once, shared by the channels (as on the device).
+        let g = Arc::new(pair_spectra(filters));
+        Ok((0..channels)
+            .map(|_| {
+                let mut core =
+                    ReferencePolyphase::with_spectra(Arc::clone(&g), block, parts, filters.len());
+                core.fail_at_block = self.fail_at_block;
+                Box::new(core) as Box<dyn PolyphaseBlockConvolver + Send>
+            })
+            .collect())
+    }
 }
 
 /// The GPU data flow on the CPU (see the module docs).

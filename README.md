@@ -97,17 +97,18 @@ Dual-licensed under MIT or Apache-2.0.
   hello/caps, open, frames with sequence and presentation time, acks with underrun stats).
   Discovered with mDNS (`_cadenza-endpoint._tcp`), jitter buffer, and resample-free clock
   handling: the sender paces to the DAC's clock from the endpoint's acknowledgements.
-- **CUDA GPU offload (64-bit)** of the partitioned convolution engine (feature `cuda`):
-  room correction runs on it today (the long-FIR upsampler's own convolution stage is on the
-  roadmap, so the signal path marks the GPU active only when the chain really uses it) –
-  our own Stockham FFT kernels compiled
-  at run time by the driver's NVRTC, `f64` throughout, filter spectra and the
-  frequency-delay line resident on the card. Needs only an NVIDIA driver (≥ 525), no CUDA
-  toolkit – and the same binary runs without a GPU (`gpu = auto | off | cuda`,
-  `gpu_device`; the signal path shows `CUDA (RTX 4060) · 64-bit` or the CPU fallback).
+- **CUDA GPU offload (64-bit)** of the long-FIR upsampler and the room convolution
+  (feature `cuda`): the upsampler's FFT polyphase core runs on the card – one forward FFT
+  per input block, every sub-filter's multiply-accumulate and inverse FFT batched, the
+  phases interleaved on the device, only the finished block copied back – and so does the
+  partitioned room-correction convolver. Our own Stockham FFT kernels compiled at run time
+  by the driver's NVRTC, `f64` throughout, filter spectra and frequency-delay lines
+  resident on the card. Needs only an NVIDIA driver (≥ 525), no CUDA toolkit – and the
+  same binary runs without a GPU (`gpu = auto | off | cuda`, `gpu_device`; the signal path
+  shows `CUDA (RTX 4060) · 64-bit · upsampling + room convolution` or the CPU fallback).
 - **`cadenza bench`**: realtime factors (seconds of audio per second) on this machine for
-  the chosen filter and rate – upsampler, its FFT engine on the CPU and on the GPU when
-  present, room convolution, and the modulator at every DSD rate (optionally with the long
+  the chosen filter and rate – the upsampler on the CPU and (row `upsampling (GPU)`) on
+  the GPU when present, its FFT engine alone on both, room convolution, and the modulator at every DSD rate (optionally with the long
   filter feeding each rate, staged or `--dsd-full`), so you see where your CPU/GPU tops out.
 - **Control API** on `127.0.0.1:8777` (JSON + Server-Sent Events) and a single-file
   dark **web UI** showing now playing, transport, volume, the signal path as a chain of
@@ -144,7 +145,7 @@ implemented and tested here; the notes say where we differ.
 | Exclusive output | ASIO/WASAPI, CoreAudio hog, ALSA | WASAPI exclusive, CoreAudio hog + integer mode, ALSA hw: | matched; **no ASIO** |
 | Native DSD on Windows | via ASIO | DoP only (no standard WASAPI DSD GUID; opt-in driver GUID) | not matched without ASIO |
 | Network endpoint | NAA | Cadenza endpoint (`cadenza endpoint`, mDNS, TCP, ack-paced, PCM + DSD) | matched; our own protocol, not NAA-compatible |
-| GPU offload | CUDA (64-bit) | CUDA, 64-bit, driver only – no toolkit; also builds and runs without a GPU; today the room convolution runs on it, verified against the CPU engine and benchmarked (`cadenza bench`) | **partial**: the upsampler's FIR still runs on the CPU |
+| GPU offload | CUDA (64-bit) | CUDA, 64-bit, driver only – no toolkit; also builds and runs without a GPU; the upsampler's FFT polyphase core and the room convolution run on it, verified against the CPU engine (to 1e-12, through a CPU model of the exact GPU algorithm) and benchmarked (`cadenza bench`, row `upsampling (GPU)`) | matched: upsampler and room convolution on CUDA; AMD/Intel/Apple GPUs next (wgpu) |
 | 64-bit processing | yes | yes everywhere | matched |
 | UPnP / Roon / control | UPnP renderer, Roon via NAA | HTTP API, web UI, Encore device | **not matched**: no UPnP renderer, no Roon |
 | Licence / price | proprietary | MIT / Apache-2.0, free | – |
@@ -154,9 +155,11 @@ implemented and tested here; the notes say where we differ.
 Where the table says "matched", the plan is to go past HQPlayer, not just tie it. In the order we intend
 to do it:
 
-1. **GPU for the upsampler** – move the polyphase FIR stages onto the CUDA block convolver that already
-   runs the room convolution (that makes the GPU row "matched"). Then a `wgpu` compute path so AMD, Intel
-   and Apple Silicon GPUs work too; HQPlayer is NVIDIA-only.
+1. **GPU for the upsampler** – done for CUDA: the FFT polyphase stages run on the card (one forward FFT
+   per block, all sub-filters in one batched multiply-accumulate and one batched inverse FFT, pairs of
+   phases packed into one complex transform), with a seamless switch to the CPU if the device fails
+   mid-stream. Next: a `wgpu` compute path so AMD, Intel and Apple Silicon GPUs work too (HQPlayer is
+   NVIDIA-only), and the time-domain rational stage (44.1 ↔ 48 kHz families) on the GPU as well.
 2. **Error-correction modulators** – `asdm5ec` / `asdm7ec` and the lookahead variants people use for
    DSD1024 today, then a GPU modulator path. HQPlayer runs its modulators on one CPU core; that is its
    biggest bottleneck at DSD1024 and nobody has beaten it yet. DSD2048 is already ours alone.
@@ -310,8 +313,8 @@ FLAC 16/44.1 → 705.6k (sinc-l-1m) → ×16 short stage → ASDM7 (-3 dB) → D
 - **`dsd_oversampling = full`** runs the long filter all the way to the DSD rate (44.1 kHz
   → 45.1584 MHz for DSD1024) so the modulator sees a true 1024× 64-bit PCM stream. The
   signal path then reports `1024× (full)`. It is very heavy: run
-  `cadenza bench --dsd-upsampling --dsd-full` first; the CUDA convolver is the intended home
-  for it.
+  `cadenza bench --dsd-upsampling --dsd-full` first; with a CUDA card the FFT polyphase
+  stage of that filter runs on the GPU.
 - **DSD sources**: DSF/DFF go to the device bit-perfect when `dsd_passthrough` is on,
   `output_mode = dsd` (or bit-perfect mode) is set, the output rate equals the file's and
   nothing else touches the samples (volume at 0 dB, EQ/convolution/matrix off). With the
@@ -352,9 +355,10 @@ Build with `--features cuda`. Nothing links against CUDA: `cudarc` loads `libcud
 machines without a GPU. At start-up Cadenza probes the driver and the chosen card and logs
 one line: `GPU: CUDA (RTX 4060) · 64-bit available`, or `GPU: CUDA unavailable (…); using
 the CPU (64-bit)`. The signal path's `Compute` stage says what the current chain does with
-it: `CUDA (RTX 4060) · 64-bit · room convolution` when the convolution stage runs on the
-card, `… · available, not used by this chain yet` when nothing in the chain can use it yet
-(today: a chain without room correction – the upsampler's FIR runs on the CPU). The kernels (`crates/cadenza-dsp/src/gpu/kernels.cu`) are compiled on the user's
+it: `CUDA (RTX 4060) · 64-bit · upsampling + room convolution` (or just one of them) for
+the engines that run on the card, `… · available, not used by this chain yet` when nothing
+in the chain can use it (no resampling and no room correction, or a purely time-domain
+rational conversion). The kernels (`crates/cadenza-dsp/src/gpu/kernels.cu`) are compiled on the user's
 machine by the NVRTC that ships with the driver.
 
 Requirements: an NVIDIA card and **driver 525 or newer** (the CUDA 12 driver API; nothing
@@ -365,13 +369,33 @@ else to install). Settings in `[dsp]`:
 | `gpu`        | `auto` / `off` / `cuda` | `auto` uses a card when present; `cuda` warns when it cannot |
 | `gpu_device` | `0`, `1`, …           | which card, when there are several                   |
 
-What runs on the GPU: the partitioned convolution engine (FFT → multiply-accumulate over
-all partitions → inverse FFT, with the frequency-delay line kept on the device) that both
-the long-FIR upsampler and room-correction convolution use. Everything is `double` – no
-`f32` anywhere on the GPU path. The sigma-delta modulator is sequential and stays on the
-CPU. Device memory: a filter of *P* partitions at block *B* holds *P × B × 32* bytes of
-spectra plus the same for the delay line (a 16M-tap filter at block 16384: about 1 GiB).
-`cadenza bench` prints the CPU and GPU realtime factors side by side.
+What runs on the GPU:
+
+- **The upsampler's FFT polyphase core** (integer ratios ×2 … ×64 … and small rational
+  ones like ×3/2; also the integer stage of a cascade such as 44.1 kHz → 1.536 MHz). The
+  `L` sub-filter spectra are uploaded once per stage and shared by the channels; per input
+  block the device runs one forward FFT into a frequency-delay line that stays on the
+  card, one batched multiply-accumulate over every sub-filter and partition (two real
+  sub-filters packed into one complex spectrum, so `L/2` complex products), one batched
+  inverse FFT, and interleaves the phases into output order; only that block comes back.
+  Delay compensation, decimation and the flush tail are the resampler's, identical for
+  both cores, so the stream is the same sample for sample (to f64 rounding: the tests
+  compare a CPU model of the exact GPU algorithm with the CPU engine at ~1.5e-15 relative
+  for ×2 … ×64, `sinc-l-64k`, `poly-sinc-gauss-l-long` and a 1M-tap filter). Each channel
+  has its own CUDA stream. If the card fails mid-stream, the stage moves to the CPU core
+  with the last blocks replayed into it – no gap, no click – and the log says so once; a
+  failure while building just leaves that stage on the CPU.
+- **Room-correction convolution**: the same partitioned engine (FFT → multiply-accumulate
+  over all partitions → inverse FFT).
+
+The time-domain polyphase bank (44.1 ↔ 48 kHz families) stays on the CPU for now, and so
+does the sigma-delta modulator, which is sequential. Everything is `double` – no `f32`
+anywhere on the GPU path. Device memory: an upsampler filter of *T* taps holds about
+*16 × T* bytes of shared spectra plus *32 × T / L* bytes of delay line per channel (a
+16M-tap filter at ×16: about 256 MiB + 2 × 32 MiB); a room filter of *P* partitions at
+block *B* holds *P × B × 32* bytes of spectra plus the same for its delay line.
+`cadenza bench` prints the CPU and GPU realtime factors side by side (`upsampling` and
+`upsampling (GPU)`).
 
 ## Architecture
 
@@ -411,9 +435,8 @@ spectra plus the same for the delay line (a 16M-tap filter at block 16384: about
 - [ ] UPnP/OpenHome renderer, MPRIS, Roon
 - [ ] Non-uniformly partitioned convolution for lower latency with long impulses
 - [ ] "v3"-class modulators and more poly-sinc variants
-- [ ] The resampler's own convolution stage on the GPU (today the GPU engine runs the room
-      convolution stage, and is reachable through the `BlockConvolver` trait and
-      `cadenza bench`)
+- [x] The resampler's FFT polyphase stages on the GPU (CUDA)
+- [ ] The time-domain rational stage on the GPU, and a `wgpu` path for AMD / Intel / Apple GPUs
 
 ## Development
 

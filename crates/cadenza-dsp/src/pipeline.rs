@@ -15,7 +15,7 @@ use crate::dither::{DitherKind, Quantizer};
 use crate::dsd::{DsdConfig, DsdStage, OutputMode};
 use crate::eq::{Band, Equalizer};
 use crate::fir::FilterKind;
-use crate::gpu::{Backend as GpuBackend, GpuConfig};
+use crate::gpu::{Backend as GpuBackend, GpuConfig, GpuUse, PolyphaseFactory};
 use crate::headroom::{default_headroom_db, Headroom};
 use crate::matrix::{MatrixConfig, MatrixError, MatrixStage};
 use crate::resampler::{ResampleError, Resampler};
@@ -347,8 +347,8 @@ impl Pipeline {
             config.output_rate.unwrap_or(input.rate)
         };
         // Compute backend: probed (and logged) once per `gpu` setting, only when there is
-        // a convolution engine to run. Today the room convolution runs on it; the
-        // resampler's engine is still the CPU one (see the README roadmap).
+        // a convolution engine to run: the room convolution and the upsampler's FFT
+        // polyphase stages run on it (the time-domain rational stage stays on the CPU).
         let has_convolution = !bp && config.convolution.is_some();
         let gpu = if pcm_rate != input.rate || has_convolution {
             GpuBackend::detect(&config.gpu)
@@ -384,13 +384,14 @@ impl Pipeline {
             .map(MatrixStage::output_channels)
             .unwrap_or(ch);
         let resampler = if pcm_rate != input.rate {
-            Some(Resampler::new(
+            Some(Resampler::new_on(
                 input.rate,
                 pcm_rate,
                 out_ch,
                 config.filter,
                 config.attenuation_db,
                 cache,
+                gpu.is_gpu().then_some(&gpu as &dyn PolyphaseFactory),
             )?)
         } else {
             None
@@ -499,11 +500,20 @@ impl Pipeline {
     pub fn gpu(&self) -> &GpuBackend {
         &self.gpu
     }
-    /// `true` when a stage of this chain actually runs on the GPU (today: the room
-    /// convolution when the backend is CUDA). A detected card with nothing to run on it
-    /// is *not* "in use" and the signal path says so.
+    /// `true` when a stage of this chain actually runs on the GPU (the upsampler's FFT
+    /// core and/or the room convolution when the backend is CUDA). A detected card with
+    /// nothing to run on it is *not* "in use" and the signal path says so.
     pub fn gpu_in_use(&self) -> bool {
-        self.convolution.as_ref().is_some_and(|c| c.on_gpu)
+        self.gpu_use().any()
+    }
+
+    /// Which engines of this chain run on the GPU right now (an upsampler that fell back
+    /// to the CPU after a device error no longer counts).
+    pub fn gpu_use(&self) -> GpuUse {
+        GpuUse {
+            upsampling: self.resampler.as_ref().is_some_and(Resampler::on_gpu),
+            convolution: self.convolution.as_ref().is_some_and(|c| c.on_gpu),
+        }
     }
 
     /// Change the volume without rebuilding (ignored in bit-perfect mode).
@@ -734,6 +744,8 @@ impl Pipeline {
                         "cutoff_hz": r.spec().cutoff * r.in_rate() as f64 * l as f64,
                         "l": l, "m": m,
                         "engine": r.engine(),
+                        "device": r.device(),
+                        "on_gpu": r.on_gpu(),
                         "stages": r.stages(),
                         "window": r.spec().window.name(),
                         "family": self.config.filter.family.id(),
@@ -752,7 +764,7 @@ impl Pipeline {
             }),
         }
 
-        stages.push(self.gpu.stage(&self.config.gpu, self.gpu_in_use()));
+        stages.push(self.gpu.stage_for(&self.config.gpu, self.gpu_use()));
 
         match &self.headroom {
             Some(h) => stages.push(Stage {
@@ -1090,18 +1102,26 @@ mod tests {
         if !gpu.is_gpu() {
             assert!(st.detail.starts_with("CPU · 64-bit"), "{}", st.detail);
         }
-        // A pipeline without a convolution stage never claims the GPU, whatever was detected.
+        // Without room correction the GPU is claimed only for the upsampler, and only when
+        // its FFT core really sits on the card.
         let cfg = PipelineConfig {
             output_rate: Some(96_000),
             filter: FilterKind::sinc(Phase::Linear, false, 1 << 12),
             ..Default::default()
         };
         let p = Pipeline::new(input(48000, 24), cfg, &CoefficientCache::disabled()).unwrap();
-        assert!(!p.gpu_in_use());
+        assert_eq!(p.gpu_in_use(), gpu.is_gpu());
+        assert!(!p.gpu_use().convolution);
         let path = p.signal_path();
         let g = path.stages.iter().find(|s| s.id == "gpu").unwrap();
-        assert!(!g.active);
-        assert_eq!(g.params["used"], false);
+        assert_eq!(g.active, gpu.is_gpu());
+        assert_eq!(g.params["used"], gpu.is_gpu());
+        assert_eq!(g.params["upsampling"], gpu.is_gpu());
+        let r = path.stages.iter().find(|s| s.id == "resampler").unwrap();
+        assert_eq!(r.params["on_gpu"], gpu.is_gpu());
+        if gpu.is_gpu() {
+            assert!(g.detail.ends_with("· upsampling"), "{}", g.detail);
+        }
     }
 
     #[test]

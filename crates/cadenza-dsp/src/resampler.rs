@@ -14,16 +14,27 @@
 //!   runs the chosen filter at its own ratio; the first stage's filter defines the passband
 //!   and the second one's transition lies entirely above it.
 //!
+//! * On an NVIDIA card (`--features cuda`, `gpu = auto | cuda`) the FFT polyphase stages
+//!   run on the device ([`crate::gpu::PolyphaseConvolver`]): one forward transform per
+//!   input block, every sub-filter's multiply-accumulate and inverse transform batched,
+//!   the phases interleaved on the device. The resampler keeps the delay compensation,
+//!   decimation and flush logic, so both cores give the same stream (to f64 rounding). A
+//!   CUDA error mid-stream moves the stage to the CPU core with its history replayed.
+//!
 //! The output is **time aligned** with the input: the linear-phase group delay is absorbed
 //! (the first `(N−1)/2` filter outputs are skipped and `flush` pushes the tail out), so a
 //! stream of `n` input frames gives exactly `ceil(n·L/M)` output frames. The processing
 //! latency a player must account for is reported by [`Resampler::latency_input_frames`].
 
 use crate::cache::CoefficientCache;
-use crate::convolution::{choose_block, BlockEngine, OutputScratch, SpectralFilter};
+use crate::convolution::{
+    choose_block, BlockEngine, OutputScratch, PolyphaseBlockConvolver, SpectralFilter,
+};
 use crate::fir::{FilterKind, FirSpec, Phase};
+use crate::gpu::PolyphaseFactory;
 use rayon::prelude::*;
 use serde::{Deserialize, Serialize};
+use std::collections::VecDeque;
 use std::sync::Arc;
 
 /// Longest polyphase sub-filter the time-domain core accepts (per output sample cost).
@@ -177,6 +188,9 @@ pub struct StageInfo {
     pub engine: Engine,
     /// Stage latency in its own input frames.
     pub latency_input_frames: usize,
+    /// Where the FFT core runs when not on the CPU (`CUDA (RTX 4060)`); `None` on the CPU.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub device: Option<String>,
 }
 
 fn gcd(a: u32, b: u32) -> u32 {
@@ -221,6 +235,22 @@ struct FftCore {
 }
 
 impl FftCore {
+    /// A fresh CPU core for one channel.
+    fn new(filters: &Arc<Vec<SpectralFilter>>, par: Parallelism, m: usize, delay: u64) -> Self {
+        let block = filters[0].block();
+        let engine = BlockEngine::new(block, filters[0].partitions());
+        Self {
+            scratch: (0..par.workers).map(|_| engine.scratch()).collect(),
+            engine,
+            filters: Arc::clone(filters),
+            parallel: par.parallel,
+            m,
+            u: 0,
+            next_take: delay,
+            phase_out: vec![Vec::with_capacity(block); filters.len()],
+        }
+    }
+
     fn push(&mut self, input: &[f64], out: &mut Vec<f64>) {
         let Self {
             engine,
@@ -280,6 +310,150 @@ impl FftCore {
 
     fn reset(&mut self, delay: u64) {
         self.engine.reset();
+        self.u = 0;
+        self.next_take = delay;
+    }
+}
+
+/// How the CPU core spreads the `L` phases over the rayon pool.
+#[derive(Clone, Copy, Debug)]
+struct Parallelism {
+    parallel: bool,
+    workers: usize,
+}
+
+/// Per-channel state of the FFT polyphase core on a GPU (or its CPU model): the engine does
+/// one block in, `block × L` interleaved upsampled samples out; this keeps the block
+/// gathering, the delay compensation and decimation (exactly as [`FftCore`]) and the last
+/// `depth` input blocks, so a failing device can be replaced by a CPU core mid-stream
+/// without losing a sample.
+struct GpuCore {
+    engine: Box<dyn PolyphaseBlockConvolver + Send>,
+    /// For the CPU core that takes over after a device error.
+    filters: Arc<Vec<SpectralFilter>>,
+    par: Parallelism,
+    block: usize,
+    m: usize,
+    /// FDL depth: blocks of history needed to rebuild the CPU core's state.
+    depth: usize,
+    /// The input block being gathered.
+    pending: Vec<f64>,
+    /// The last `depth` complete input blocks, oldest first.
+    history: VecDeque<Vec<f64>>,
+    /// The engine's output for one block.
+    out_block: Vec<f64>,
+    u: u64,
+    next_take: u64,
+}
+
+impl GpuCore {
+    fn new(
+        engine: Box<dyn PolyphaseBlockConvolver + Send>,
+        filters: &Arc<Vec<SpectralFilter>>,
+        par: Parallelism,
+        m: usize,
+        delay: u64,
+    ) -> Self {
+        let block = engine.block();
+        let l = engine.phases();
+        let depth = filters[0].partitions().max(1);
+        Self {
+            engine,
+            filters: Arc::clone(filters),
+            par,
+            block,
+            m,
+            depth,
+            pending: Vec::with_capacity(block),
+            history: VecDeque::with_capacity(depth),
+            out_block: vec![0.0; block * l],
+            u: 0,
+            next_take: delay,
+        }
+    }
+
+    /// Push input. On a device error, returns the CPU core that now holds this channel's
+    /// complete state (it has already produced the output of the failed block) and how many
+    /// samples of `input` were consumed; the caller pushes the rest into it.
+    fn push(&mut self, input: &[f64], out: &mut Vec<f64>) -> Option<(Box<FftCore>, usize)> {
+        let mut used = 0;
+        while used < input.len() {
+            let take = (self.block - self.pending.len()).min(input.len() - used);
+            self.pending.extend_from_slice(&input[used..used + take]);
+            used += take;
+            if self.pending.len() < self.block {
+                break;
+            }
+            if let Err(e) = self
+                .engine
+                .process_block(&self.pending, &mut self.out_block)
+            {
+                log::error!(
+                    "GPU: {e} in the upsampler on {}; this stream continues on the CPU",
+                    self.engine.device_label()
+                );
+                return Some((self.move_to_cpu(out), used));
+            }
+            self.emit(out);
+            let mut done = if self.history.len() == self.depth {
+                self.history.pop_front().unwrap_or_default()
+            } else {
+                Vec::with_capacity(self.block)
+            };
+            done.clear();
+            done.extend_from_slice(&self.pending);
+            self.history.push_back(done);
+            self.pending.clear();
+        }
+        None
+    }
+
+    /// Delay compensation and decimation of one engine block (the [`FftCore`] logic over
+    /// the same sample order).
+    fn emit(&mut self, out: &mut Vec<f64>) {
+        if self.m == 1 {
+            if self.u >= self.next_take {
+                out.extend_from_slice(&self.out_block);
+                self.u += self.out_block.len() as u64;
+            } else {
+                for v in &self.out_block {
+                    if self.u >= self.next_take {
+                        out.push(*v);
+                    }
+                    self.u += 1;
+                }
+            }
+            self.next_take = self.next_take.max(self.u);
+        } else {
+            for v in &self.out_block {
+                if self.u == self.next_take {
+                    out.push(*v);
+                    self.next_take += self.m as u64;
+                }
+                self.u += 1;
+            }
+        }
+    }
+
+    /// Rebuild this channel on the CPU: replay the history into a fresh CPU core (its FDL
+    /// then holds exactly what the device held), then run the block that failed through it.
+    fn move_to_cpu(&mut self, out: &mut Vec<f64>) -> Box<FftCore> {
+        let mut cpu = Box::new(FftCore::new(&self.filters, self.par, self.m, 0));
+        for block in &self.history {
+            cpu.engine.push(block, |_| {});
+        }
+        cpu.u = self.u;
+        cpu.next_take = self.next_take;
+        cpu.push(&self.pending, out);
+        self.pending.clear();
+        self.history.clear();
+        cpu
+    }
+
+    fn reset(&mut self, delay: u64) {
+        self.engine.reset();
+        self.pending.clear();
+        self.history.clear();
         self.u = 0;
         self.next_take = delay;
     }
@@ -370,6 +544,7 @@ fn dot(a: &[f64], b: &[f64]) -> f64 {
 
 enum Core {
     Fft(Box<FftCore>),
+    Gpu(Box<GpuCore>),
     Time(TimeCore),
 }
 
@@ -378,13 +553,29 @@ impl Core {
         match self {
             Core::Fft(c) => c.push(input, out),
             Core::Time(c) => c.push(input, out),
+            Core::Gpu(c) => {
+                if let Some((mut cpu, used)) = c.push(input, out) {
+                    cpu.push(&input[used..], out);
+                    *self = Core::Fft(cpu);
+                }
+            }
         }
     }
     fn reset(&mut self, delay: u64) {
         match self {
             Core::Fft(c) => c.reset(delay),
+            Core::Gpu(c) => c.reset(delay),
             Core::Time(c) => c.reset(delay),
         }
+    }
+    fn device(&self) -> Option<String> {
+        match self {
+            Core::Gpu(c) => Some(c.engine.device_label()),
+            _ => None,
+        }
+    }
+    fn on_gpu(&self) -> bool {
+        matches!(self, Core::Gpu(c) if c.engine.on_gpu())
     }
 }
 
@@ -407,7 +598,14 @@ struct Stage {
 }
 
 impl Stage {
-    fn new(in_rate: u32, out_rate: u32, channels: usize, spec: FirSpec, h: &[f64]) -> Self {
+    fn new(
+        in_rate: u32,
+        out_rate: u32,
+        channels: usize,
+        spec: FirSpec,
+        h: &[f64],
+        gpu: Option<&dyn PolyphaseFactory>,
+    ) -> Self {
         let g = gcd(in_rate, out_rate);
         let (l, m) = ((out_rate / g) as usize, (in_rate / g) as usize);
         let delay = match spec.phase {
@@ -428,21 +626,39 @@ impl Stage {
             let threads = rayon::current_num_threads();
             let parallel = l > 1 && threads > 1 && work >= PARALLEL_PHASES_THRESHOLD;
             let workers = if parallel { (2 * threads).min(l) } else { 0 };
-            let cores = (0..channels)
-                .map(|_| {
-                    let engine = BlockEngine::new(block, depth);
-                    Core::Fft(Box::new(FftCore {
-                        scratch: (0..workers).map(|_| engine.scratch()).collect(),
-                        engine,
-                        filters: Arc::clone(&filters),
-                        parallel,
-                        m,
-                        u: 0,
-                        next_take: delay,
-                        phase_out: vec![Vec::with_capacity(block); l],
-                    }))
-                })
-                .collect();
+            let par = Parallelism { parallel, workers };
+            let on_device = gpu.and_then(|f| match f.polyphase(&filters, channels) {
+                Ok(engines) if engines.len() == channels => Some(engines),
+                Ok(_) => {
+                    log::warn!("GPU: wrong number of upsampler cores; upsampling on the CPU");
+                    None
+                }
+                Err(e) => {
+                    log::warn!("GPU: {e}; the ×{l} upsampler runs on the CPU");
+                    None
+                }
+            });
+            let cores = match on_device {
+                Some(engines) => {
+                    log::info!(
+                        "GPU: ×{l}{} upsampler ({} taps) on {}",
+                        if m > 1 {
+                            format!("/{m}")
+                        } else {
+                            String::new()
+                        },
+                        h.len(),
+                        engines[0].device_label()
+                    );
+                    engines
+                        .into_iter()
+                        .map(|e| Core::Gpu(Box::new(GpuCore::new(e, &filters, par, m, delay))))
+                        .collect()
+                }
+                None => (0..channels)
+                    .map(|_| Core::Fft(Box::new(FftCore::new(&filters, par, m, delay))))
+                    .collect(),
+            };
             (Engine::FftPolyphase { block }, cores)
         } else {
             let sub = Arc::new(polyphase(h, l, true));
@@ -486,7 +702,21 @@ impl Stage {
             spec: self.spec.clone(),
             engine: self.engine,
             latency_input_frames: self.latency_input_frames(),
+            device: self.device(),
         }
+    }
+
+    /// The device the FFT core runs on (all channels, else `None`).
+    fn device(&self) -> Option<String> {
+        let first = self.cores.first()?.device()?;
+        self.cores
+            .iter()
+            .all(|c| c.device().as_deref() == Some(first.as_str()))
+            .then_some(first)
+    }
+
+    fn on_gpu(&self) -> bool {
+        !self.cores.is_empty() && self.cores.iter().all(Core::on_gpu)
     }
 
     fn push(&mut self, interleaved: &[f64]) -> Vec<f64> {
@@ -595,6 +825,29 @@ impl Resampler {
         attenuation_db: f64,
         cache: &CoefficientCache,
     ) -> Result<Self, ResampleError> {
+        Self::new_on(
+            in_rate,
+            out_rate,
+            channels,
+            kind,
+            attenuation_db,
+            cache,
+            None,
+        )
+    }
+
+    /// Like [`Resampler::new`], with the FFT polyphase stages on `gpu` when given (a CUDA
+    /// [`crate::gpu::Backend`], or the CPU model of the GPU algorithm in tests). A stage
+    /// whose GPU cores cannot be built stays on the CPU (logged).
+    pub fn new_on(
+        in_rate: u32,
+        out_rate: u32,
+        channels: usize,
+        kind: FilterKind,
+        attenuation_db: f64,
+        cache: &CoefficientCache,
+        gpu: Option<&dyn PolyphaseFactory>,
+    ) -> Result<Self, ResampleError> {
         if in_rate == 0 || out_rate == 0 {
             return Err(ResampleError::Invalid("sample rate is zero"));
         }
@@ -610,7 +863,15 @@ impl Resampler {
         let stages = match cascade_split(l, m) {
             Some(l1) => {
                 let mid_rate = (in_rate as u64 * l1 as u64 / m as u64) as u32;
-                let first = Self::stage(in_rate, mid_rate, channels, kind, attenuation_db, cache);
+                let first = Self::stage(
+                    in_rate,
+                    mid_rate,
+                    channels,
+                    kind,
+                    attenuation_db,
+                    cache,
+                    gpu,
+                );
                 // The second stage must pass everything the first one produced, so it is
                 // never apodizing; its transition lies above the source band.
                 let second_kind = FilterKind {
@@ -624,6 +885,7 @@ impl Resampler {
                     second_kind,
                     attenuation_db,
                     cache,
+                    gpu,
                 );
                 vec![first, second]
             }
@@ -634,6 +896,7 @@ impl Resampler {
                 kind,
                 attenuation_db,
                 cache,
+                gpu,
             )],
         };
         Ok(Self {
@@ -648,6 +911,7 @@ impl Resampler {
         })
     }
 
+    #[allow(clippy::too_many_arguments)]
     fn stage(
         in_rate: u32,
         out_rate: u32,
@@ -655,6 +919,7 @@ impl Resampler {
         kind: FilterKind,
         attenuation_db: f64,
         cache: &CoefficientCache,
+        gpu: Option<&dyn PolyphaseFactory>,
     ) -> Stage {
         let g = gcd(in_rate, out_rate);
         let (l, m) = ((out_rate / g) as usize, (in_rate / g) as usize);
@@ -676,7 +941,7 @@ impl Resampler {
             spec = capped;
         }
         let h = cache.get_or_design(&spec);
-        Stage::new(in_rate, out_rate, channels, spec, &h)
+        Stage::new(in_rate, out_rate, channels, spec, &h, gpu)
     }
 
     /// Build a single-stage converter around an explicit linear- or minimum-phase low-pass
@@ -689,6 +954,18 @@ impl Resampler {
         spec: FirSpec,
         h: &[f64],
     ) -> Self {
+        Self::with_coefficients_on(in_rate, out_rate, channels, spec, h, None)
+    }
+
+    /// [`Resampler::with_coefficients`] with the FFT core on `gpu` when given.
+    pub fn with_coefficients_on(
+        in_rate: u32,
+        out_rate: u32,
+        channels: usize,
+        spec: FirSpec,
+        h: &[f64],
+        gpu: Option<&dyn PolyphaseFactory>,
+    ) -> Self {
         let g = gcd(in_rate, out_rate);
         let (l, m) = ((out_rate / g) as usize, (in_rate / g) as usize);
         Self {
@@ -697,7 +974,7 @@ impl Resampler {
             channels,
             l,
             m,
-            stages: vec![Stage::new(in_rate, out_rate, channels, spec, h)],
+            stages: vec![Stage::new(in_rate, out_rate, channels, spec, h, gpu)],
             input_frames: 0,
             output_frames: 0,
         }
@@ -731,6 +1008,17 @@ impl Resampler {
     pub fn stages(&self) -> Vec<StageInfo> {
         self.stages.iter().map(Stage::info).collect()
     }
+    /// `true` when an FFT polyphase stage currently runs on a GPU (a stage that fell back
+    /// to the CPU after a device error no longer counts).
+    pub fn on_gpu(&self) -> bool {
+        self.stages.iter().any(Stage::on_gpu)
+    }
+
+    /// The device of the first stage that runs off the CPU (`CUDA (RTX 4060)`).
+    pub fn device(&self) -> Option<String> {
+        self.stages.iter().find_map(Stage::device)
+    }
+
     /// Total taps across the stages.
     pub fn total_taps(&self) -> usize {
         self.stages.iter().map(|s| s.spec.taps).sum()
@@ -746,7 +1034,10 @@ impl Resampler {
                 } else {
                     format!("×{}/{}", s.l, s.m)
                 };
-                format!("{ratio} {}", s.engine.label())
+                match s.device() {
+                    Some(d) => format!("{ratio} {} · {d}", s.engine.label()),
+                    None => format!("{ratio} {}", s.engine.label()),
+                }
             })
             .collect::<Vec<_>>()
             .join(" → ")
@@ -1123,5 +1414,218 @@ mod tests {
         assert_eq!(preferred_output_rate(44100, 800_000), 705_600);
         assert_eq!(preferred_output_rate(96000, 1_600_000), 1_536_000);
         assert_eq!(preferred_output_rate(32000, 400_000), 384_000);
+    }
+    // ---- The GPU polyphase core, through its CPU model (`gpu::reference`) ----
+
+    use crate::gpu::reference::ReferenceFactory;
+
+    /// A deterministic broadband test signal (tones + LCG noise), interleaved.
+    fn test_signal(frames: usize, channels: usize) -> Vec<f64> {
+        let mut state = 0x2545_f491_4f6c_dd1du64;
+        (0..frames * channels)
+            .map(|i| {
+                state = state
+                    .wrapping_mul(6_364_136_223_846_793_005)
+                    .wrapping_add(1_442_695_040_888_963_407);
+                let noise = (state >> 11) as f64 / (1u64 << 53) as f64 - 0.5;
+                let t = (i / channels) as f64;
+                let c = (i % channels) as f64;
+                0.4 * (t * (0.031 + 0.007 * c)).sin() + 0.2 * (t * 0.47).cos() + 0.1 * noise
+            })
+            .collect()
+    }
+
+    /// Push `x` through both converters with the same uneven chunking, flush, and return
+    /// both whole streams.
+    fn run_pair(
+        cpu: &mut Resampler,
+        gpu: &mut Resampler,
+        x: &[f64],
+        chunks: &[usize],
+    ) -> (Vec<f64>, Vec<f64>) {
+        let ch = cpu.channels();
+        let (mut a, mut b) = (Vec::new(), Vec::new());
+        let mut at = 0;
+        let mut i = 0;
+        while at < x.len() {
+            let take = (chunks[i % chunks.len()] * ch).min(x.len() - at);
+            let ya = cpu.push(&x[at..at + take]);
+            let yb = gpu.push(&x[at..at + take]);
+            assert_eq!(ya.len(), yb.len(), "same output per push");
+            a.extend(ya);
+            b.extend(yb);
+            at += take;
+            i += 1;
+        }
+        a.extend(cpu.flush());
+        b.extend(gpu.flush());
+        (a, b)
+    }
+
+    /// `max |a − b| / max |a|`.
+    fn rel_err(a: &[f64], b: &[f64]) -> f64 {
+        assert_eq!(a.len(), b.len(), "stream lengths");
+        let peak = a.iter().fold(0.0f64, |m, v| m.max(v.abs()));
+        assert!(peak > 0.0);
+        a.iter()
+            .zip(b)
+            .map(|(x, y)| (x - y).abs())
+            .fold(0.0, f64::max)
+            / peak
+    }
+
+    fn gpu_model_matches_cpu(
+        id: &str,
+        in_rate: u32,
+        out_rate: u32,
+        channels: usize,
+        frames: usize,
+    ) {
+        let cache = CoefficientCache::disabled();
+        let kind = FilterKind::parse(id).unwrap_or_else(|| panic!("{id}"));
+        let model = ReferenceFactory::default();
+        let mut cpu = Resampler::new(in_rate, out_rate, channels, kind, 150.0, &cache).unwrap();
+        let mut gpu = Resampler::new_on(
+            in_rate,
+            out_rate,
+            channels,
+            kind,
+            150.0,
+            &cache,
+            Some(&model),
+        )
+        .unwrap();
+        assert_eq!(gpu.device().as_deref(), Some("GPU model (CPU)"), "{id}");
+        assert!(
+            gpu.describe().ends_with("· GPU model (CPU)"),
+            "{}",
+            gpu.describe()
+        );
+        assert!(!gpu.on_gpu(), "the CPU model is not a GPU");
+        assert_eq!(gpu.latency_input_frames(), cpu.latency_input_frames());
+        let x = test_signal(frames, channels);
+        let (a, b) = run_pair(&mut cpu, &mut gpu, &x, &[1, 7, 1000, 333, 4099, 64]);
+        let (l, m) = cpu.ratio();
+        assert_eq!(
+            a.len() as u64,
+            channels as u64 * (frames as u64 * l as u64).div_ceil(m as u64)
+        );
+        let e = rel_err(&a, &b);
+        assert!(e < 1e-12, "{id} {in_rate}→{out_rate}: relative error {e:e}");
+    }
+
+    #[test]
+    fn gpu_core_matches_cpu_core_sinc_l_64k() {
+        for l in [2u32, 4, 16, 32, 64] {
+            gpu_model_matches_cpu("sinc-l-64k", 44_100, 44_100 * l, 2, 12_000);
+        }
+    }
+
+    #[test]
+    fn gpu_core_matches_cpu_core_poly_sinc_gauss_long() {
+        for l in [2u32, 4, 16, 32, 64] {
+            gpu_model_matches_cpu("poly-sinc-gauss-l-long", 48_000, 48_000 * l, 1, 20_000);
+        }
+    }
+
+    #[test]
+    fn gpu_core_matches_cpu_core_with_a_1m_tap_filter() {
+        gpu_model_matches_cpu("sinc-l-1m", 44_100, 88_200, 1, 40_000);
+        gpu_model_matches_cpu("sinc-l-1m", 44_100, 705_600, 2, 9_000);
+    }
+
+    #[test]
+    fn gpu_core_handles_odd_phase_counts_decimation_and_cascades() {
+        // ×3 (odd L: the last sub-filter pair has a zero partner), 3/2 (decimation after
+        // the polyphase core), and the ×8 FFT stage after a 160/147 time-domain stage.
+        gpu_model_matches_cpu("sinc-l-16k", 16_000, 48_000, 2, 9_000);
+        gpu_model_matches_cpu("sinc-m-16k", 32_000, 48_000, 1, 9_000);
+        gpu_model_matches_cpu("sinc-l-16k", 44_100, 384_000, 2, 9_000);
+    }
+
+    #[test]
+    fn gpu_core_reset_and_reuse_match_a_fresh_cpu_converter() {
+        let cache = CoefficientCache::disabled();
+        let kind = FilterKind::parse("sinc-l-64k").unwrap();
+        let model = ReferenceFactory::default();
+        let mut gpu =
+            Resampler::new_on(44_100, 705_600, 2, kind, 150.0, &cache, Some(&model)).unwrap();
+        let x = test_signal(6_000, 2);
+        // A seek mid-stream: half a stream, reset, then a whole stream from scratch.
+        let _ = gpu.push(&x[..2 * 2_500]);
+        gpu.reset();
+        for round in 0..2 {
+            let mut cpu = Resampler::new(44_100, 705_600, 2, kind, 150.0, &cache).unwrap();
+            let (a, b) = run_pair(&mut cpu, &mut gpu, &x, &[513, 2048, 9]);
+            let e = rel_err(&a, &b);
+            assert!(e < 1e-12, "round {round}: {e:e}");
+            // flush() reset both: the next round starts clean.
+        }
+        // The flush tail is there: the last output frames carry the filter's response to
+        // the last input frames, not silence.
+        let mut gpu =
+            Resampler::new_on(44_100, 176_400, 1, kind, 150.0, &cache, Some(&model)).unwrap();
+        let x = vec![0.5; 3_000];
+        let mut y = gpu.push(&x);
+        assert!(y.len() < 4 * x.len(), "latency holds some output back");
+        y.extend(gpu.flush());
+        assert_eq!(y.len(), 4 * x.len());
+        assert!((y[y.len() - 4 * 200] - 0.5).abs() < 1e-3, "tail flushed");
+    }
+
+    #[test]
+    fn gpu_failure_mid_stream_continues_on_the_cpu_without_a_glitch() {
+        let cache = CoefficientCache::disabled();
+        let kind = FilterKind::parse("sinc-l-64k").unwrap();
+        // ×16: block 256, 16 partitions → the device "dies" in block 5, inside the FDL depth.
+        let model = ReferenceFactory {
+            fail_at_block: Some(5),
+            ..Default::default()
+        };
+        let mut cpu = Resampler::new(44_100, 705_600, 2, kind, 150.0, &cache).unwrap();
+        let mut gpu =
+            Resampler::new_on(44_100, 705_600, 2, kind, 150.0, &cache, Some(&model)).unwrap();
+        assert!(gpu.device().is_some());
+        let x = test_signal(8_000, 2);
+        let (a, b) = run_pair(&mut cpu, &mut gpu, &x, &[100, 3, 777]);
+        let e = rel_err(&a, &b);
+        assert!(e < 1e-12, "fallback must be seamless: {e:e}");
+        assert_eq!(gpu.device(), None, "the stage now runs on the CPU");
+        assert!(!gpu.describe().contains("GPU"));
+
+        // And far past the FDL depth (the history replay is what keeps it exact).
+        let model = ReferenceFactory {
+            fail_at_block: Some(200),
+            ..Default::default()
+        };
+        let mut cpu = Resampler::new(48_000, 192_000, 1, kind, 150.0, &cache).unwrap();
+        let mut gpu =
+            Resampler::new_on(48_000, 192_000, 1, kind, 150.0, &cache, Some(&model)).unwrap();
+        let x = test_signal(400 * 1024, 1);
+        let (a, b) = run_pair(&mut cpu, &mut gpu, &x, &[4096, 17]);
+        assert!(rel_err(&a, &b) < 1e-12);
+        assert_eq!(gpu.device(), None);
+    }
+
+    #[test]
+    fn gpu_build_failure_keeps_the_stage_on_the_cpu() {
+        let cache = CoefficientCache::disabled();
+        let kind = FilterKind::parse("sinc-l-16k").unwrap();
+        let model = ReferenceFactory {
+            fail_build: true,
+            ..Default::default()
+        };
+        let mut cpu = Resampler::new(44_100, 176_400, 2, kind, 150.0, &cache).unwrap();
+        let mut gpu =
+            Resampler::new_on(44_100, 176_400, 2, kind, 150.0, &cache, Some(&model)).unwrap();
+        assert_eq!(gpu.device(), None);
+        assert_eq!(gpu.describe(), cpu.describe());
+        let x = test_signal(5_000, 2);
+        let (a, b) = run_pair(&mut cpu, &mut gpu, &x, &[1000]);
+        assert_eq!(a, b, "the same CPU core, bit for bit");
+        // A time-domain-only conversion never asks for GPU cores.
+        let r = Resampler::new_on(44_100, 48_000, 2, kind, 150.0, &cache, Some(&model)).unwrap();
+        assert_eq!(r.device(), None);
+        assert_eq!(r.engine(), Engine::TimePolyphase);
     }
 }

@@ -13,14 +13,20 @@ pub const KERNEL_SOURCE: &str = include_str!("kernels.cu");
 /// Name of the NVRTC program (shows up in compile logs).
 pub const PROGRAM_NAME: &str = "cadenza_kernels.cu";
 
-/// Every kernel the host launches, in pipeline order.
-pub const KERNEL_NAMES: [&str; 6] = [
+/// Every kernel the host launches, in pipeline order: the convolver's six, then the
+/// polyphase upsampler's own (it shares `pack_real`, the single transforms and
+/// `copy_complex` with the convolver).
+pub const KERNEL_NAMES: [&str; 10] = [
     "pack_real",
     "stockham_radix2",
     "stockham_radix4",
     "copy_complex",
     "fdl_mac",
     "unpack_real_scaled",
+    "stockham_radix2_batch",
+    "stockham_radix4_batch",
+    "poly_fdl_mac",
+    "poly_interleave",
 ];
 
 /// Threads per block for every launch (all kernels are one-dimensional and embarrassingly

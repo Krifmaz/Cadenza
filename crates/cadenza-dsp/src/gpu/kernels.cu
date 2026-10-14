@@ -1,4 +1,4 @@
-// Cadenza CUDA kernels: 64-bit partitioned convolution.
+// Cadenza CUDA kernels: 64-bit partitioned convolution and the polyphase FFT upsampler.
 //
 // Compiled at runtime with NVRTC (the driver ships it; no CUDA toolkit is needed), so this
 // file is plain CUDA C with no includes. Everything is `double`; complex numbers are
@@ -24,15 +24,11 @@ __global__ void pack_real(const double* __restrict__ in, double* __restrict__ ou
     }
 }
 
-// One Stockham radix-2 pass over n complex values (n/2 threads).
-__global__ void stockham_radix2(const double* __restrict__ in, double* __restrict__ out,
-                                int n, int ns, int dir)
+// One Stockham radix-2 butterfly (work item j of n/2) of one n-point transform.
+__device__ __forceinline__ void radix2_item(const double* __restrict__ in, double* __restrict__ out,
+                                            int n, int ns, int dir, int j)
 {
-    int j = blockIdx.x * blockDim.x + threadIdx.x;
     int half = n >> 1;
-    if (j >= half) {
-        return;
-    }
     int k = j & (ns - 1);                       // j mod ns (ns is a power of two)
     double ang = (double)dir * CADENZA_PI * (double)k / (double)ns;   // 2π k / (2 ns)
     double wr = cos(ang);
@@ -50,15 +46,11 @@ __global__ void stockham_radix2(const double* __restrict__ in, double* __restric
     out[2 * (base + ns) + 1] = ai - ti;
 }
 
-// One Stockham radix-4 pass over n complex values (n/4 threads).
-__global__ void stockham_radix4(const double* __restrict__ in, double* __restrict__ out,
-                                int n, int ns, int dir)
+// One Stockham radix-4 butterfly (work item j of n/4) of one n-point transform.
+__device__ __forceinline__ void radix4_item(const double* __restrict__ in, double* __restrict__ out,
+                                            int n, int ns, int dir, int j)
 {
-    int j = blockIdx.x * blockDim.x + threadIdx.x;
     int quarter = n >> 2;
-    if (j >= quarter) {
-        return;
-    }
     int k = j & (ns - 1);
     double ang = (double)dir * CADENZA_PI * (double)k / (2.0 * (double)ns);   // 2π k / (4 ns)
     double w1r = cos(ang),       w1i = sin(ang);
@@ -87,6 +79,57 @@ __global__ void stockham_radix4(const double* __restrict__ in, double* __restric
     out[2 * (base + ns)] = b_r + dj_r;          out[2 * (base + ns) + 1] = b_i + dj_i;
     out[2 * (base + 2 * ns)] = a_r - c_r;       out[2 * (base + 2 * ns) + 1] = a_i - c_i;
     out[2 * (base + 3 * ns)] = b_r - dj_r;      out[2 * (base + 3 * ns) + 1] = b_i - dj_i;
+}
+
+// One Stockham radix-2 pass over n complex values (n/2 threads).
+__global__ void stockham_radix2(const double* __restrict__ in, double* __restrict__ out,
+                                int n, int ns, int dir)
+{
+    int j = blockIdx.x * blockDim.x + threadIdx.x;
+    if (j < (n >> 1)) {
+        radix2_item(in, out, n, ns, dir, j);
+    }
+}
+
+// One Stockham radix-4 pass over n complex values (n/4 threads).
+__global__ void stockham_radix4(const double* __restrict__ in, double* __restrict__ out,
+                                int n, int ns, int dir)
+{
+    int j = blockIdx.x * blockDim.x + threadIdx.x;
+    if (j < (n >> 2)) {
+        radix4_item(in, out, n, ns, dir, j);
+    }
+}
+
+// The radix-2 pass over `batch` independent n-point transforms stored back to back
+// (batch · n/2 threads): the polyphase upsampler's inverse transforms, all in one launch.
+__global__ void stockham_radix2_batch(const double* __restrict__ in, double* __restrict__ out,
+                                      int n, int ns, int dir, int batch)
+{
+    long long t = (long long)blockIdx.x * blockDim.x + threadIdx.x;
+    int half = n >> 1;
+    if (t >= (long long)half * batch) {
+        return;
+    }
+    int b = (int)(t / half);
+    int j = (int)(t - (long long)b * half);
+    long long off = 2LL * b * n;
+    radix2_item(in + off, out + off, n, ns, dir, j);
+}
+
+// The radix-4 pass over `batch` transforms (batch · n/4 threads).
+__global__ void stockham_radix4_batch(const double* __restrict__ in, double* __restrict__ out,
+                                      int n, int ns, int dir, int batch)
+{
+    long long t = (long long)blockIdx.x * blockDim.x + threadIdx.x;
+    int quarter = n >> 2;
+    if (t >= (long long)quarter * batch) {
+        return;
+    }
+    int b = (int)(t / quarter);
+    int j = (int)(t - (long long)b * quarter);
+    long long off = 2LL * b * n;
+    radix4_item(in + off, out + off, n, ns, dir, j);
 }
 
 // Copy n complex values into slot `slot` of the frequency-delay line.
@@ -138,6 +181,62 @@ __global__ void unpack_real_scaled(const double* __restrict__ in, double* __rest
     if (i < block) {
         out[i] = in[2 * (i + block)] * scale;
     }
+}
+
+// Polyphase upsampler, multiply-accumulate for every sub-filter pair at once
+// (pairs · n threads): acc[q][k] = Σ_p X[t − p][k] · G_{q,p}[k], where
+// G_{q,p} = H_{2q,p} + i·H_{2q+1,p} packs two real sub-filters into one complex spectrum
+// (the inverse transform of the sum then carries phase 2q in its real part and phase
+// 2q + 1 in its imaginary part). `parts` is the partitions per sub-filter (the stride of
+// `g`), `depth` the spectra in the delay line so far, `head` the newest of `slots`.
+__global__ void poly_fdl_mac(const double* __restrict__ fdl, const double* __restrict__ g,
+                             double* __restrict__ acc, int n, int depth, int head, int slots,
+                             int parts, int pairs)
+{
+    long long t = (long long)blockIdx.x * blockDim.x + threadIdx.x;
+    if (t >= (long long)pairs * n) {
+        return;
+    }
+    int q = (int)(t / n);
+    int k = (int)(t - (long long)q * n);
+    double re = 0.0;
+    double im = 0.0;
+    int slot = head;
+    for (int p = 0; p < depth; p++) {
+        long long xi_ = 2LL * ((long long)slot * n + k);
+        long long gi_ = 2LL * (((long long)q * parts + p) * n + k);
+        double xr = fdl[xi_];
+        double xi = fdl[xi_ + 1];
+        double hr = g[gi_];
+        double hi = g[gi_ + 1];
+        re = fma(xr, hr, re);
+        re = fma(-xi, hi, re);
+        im = fma(xr, hi, im);
+        im = fma(xi, hr, im);
+        slot = slot + 1;
+        if (slot == slots) {
+            slot = 0;
+        }
+    }
+    acc[2 * t] = re;
+    acc[2 * t + 1] = im;
+}
+
+// Polyphase upsampler output (block · l threads): the valid second half of every pair's
+// inverse transform, scaled, written in output order out[j·l + p] (phase p of input
+// sample j), so the host copies back one ready, interleaved block.
+__global__ void poly_interleave(const double* __restrict__ acc, double* __restrict__ out,
+                                int block, int l, double scale)
+{
+    long long t = (long long)blockIdx.x * blockDim.x + threadIdx.x;
+    if (t >= (long long)block * l) {
+        return;
+    }
+    int j = (int)(t / l);
+    int p = (int)(t - (long long)j * l);
+    int n = 2 * block;
+    long long src = 2LL * ((long long)(p >> 1) * n + j + block) + (p & 1);
+    out[t] = acc[src] * scale;
 }
 
 } // extern "C"

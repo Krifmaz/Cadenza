@@ -7,6 +7,7 @@
 use crate::cache::CoefficientCache;
 use crate::convolution::Convolver;
 use crate::fir::FilterKind;
+use crate::gpu::PolyphaseFactory;
 use crate::resampler::{RateFamily, ResampleError, Resampler};
 use serde::{Deserialize, Serialize};
 use std::time::Instant;
@@ -75,8 +76,42 @@ pub fn run_with(
     attenuation_db: f64,
     cache: &CoefficientCache,
 ) -> Result<BenchResult, ResampleError> {
+    run_on(
+        filter,
+        in_rate,
+        out_rate,
+        channels,
+        audio_seconds,
+        attenuation_db,
+        cache,
+        None,
+    )
+}
+
+/// [`run_with`] with the resampler's FFT polyphase stages on `gpu` (a CUDA
+/// [`crate::gpu::Backend`]); the result's `engine` names the device when a stage runs
+/// there (`×16 FFT polyphase · block 4096 · CUDA (RTX 4060)`).
+#[allow(clippy::too_many_arguments)]
+pub fn run_on(
+    filter: FilterKind,
+    in_rate: u32,
+    out_rate: u32,
+    channels: usize,
+    audio_seconds: f64,
+    attenuation_db: f64,
+    cache: &CoefficientCache,
+    gpu: Option<&dyn PolyphaseFactory>,
+) -> Result<BenchResult, ResampleError> {
     let t0 = Instant::now();
-    let mut r = Resampler::new(in_rate, out_rate, channels, filter, attenuation_db, cache)?;
+    let mut r = Resampler::new_on(
+        in_rate,
+        out_rate,
+        channels,
+        filter,
+        attenuation_db,
+        cache,
+        gpu,
+    )?;
     let design_seconds = t0.elapsed().as_secs_f64();
 
     let frames = (in_rate as f64 * audio_seconds.max(0.1)) as usize;
@@ -200,6 +235,24 @@ mod tests {
             &CoefficientCache::disabled()
         )
         .is_err());
+    }
+
+    #[test]
+    fn upsampling_bench_on_the_gpu_model_names_it() {
+        let model = crate::gpu::reference::ReferenceFactory::default();
+        let r = run_on(
+            FilterKind::sinc(Phase::Linear, false, 1 << 12),
+            44_100,
+            176_400,
+            1,
+            0.1,
+            120.0,
+            &CoefficientCache::disabled(),
+            Some(&model),
+        )
+        .unwrap();
+        assert!(r.engine.ends_with("· GPU model (CPU)"), "{}", r.engine);
+        assert!(r.realtime_factor > 0.0);
     }
 
     #[test]

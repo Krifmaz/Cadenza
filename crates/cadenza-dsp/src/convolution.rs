@@ -36,6 +36,34 @@ pub trait BlockConvolver {
     }
 }
 
+/// The polyphase upsampler's FFT core on another engine (the CUDA device, or the CPU model
+/// of the GPU algorithm in `gpu::reference`): the `L` sub-filters of one long FIR share one
+/// forward transform per input block.
+///
+/// `process_block` takes exactly one input block and writes `block × phases` upsampled
+/// samples in output order (`out[j·L + p]` is phase `p` of input sample `j`), with the same
+/// one-block overlap-save latency as [`BlockEngine`] driving `L` [`SpectralFilter`]s. The
+/// resampler handles delay compensation, decimation and flushing around it, exactly as for
+/// its CPU core. An `Err` means the engine is unusable (the resampler then moves the
+/// stream to the CPU core and replays the history into it).
+pub trait PolyphaseBlockConvolver {
+    /// Input block size in frames.
+    fn block(&self) -> usize;
+    /// `L`, the number of polyphase sub-filters (output samples per input sample).
+    fn phases(&self) -> usize;
+    /// Upsample one block: `input.len() == block`, `out.len() == block · phases`.
+    fn process_block(&mut self, input: &[f64], out: &mut [f64])
+        -> Result<(), crate::gpu::GpuError>;
+    /// Forget all history; the sub-filter spectra stay loaded.
+    fn reset(&mut self);
+    /// Where it runs, for the signal path: `CUDA (RTX 4060)`.
+    fn device_label(&self) -> String;
+    /// `true` when this engine runs on a GPU.
+    fn on_gpu(&self) -> bool {
+        false
+    }
+}
+
 /// The spectra of one impulse response cut into partitions of `block` samples.
 #[derive(Clone, Debug)]
 pub struct SpectralFilter {
