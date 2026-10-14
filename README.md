@@ -177,7 +177,12 @@ to do it:
    HQPlayer only offers fixed catalogue entries.
 9. **Noise shaping "auto"** – the remaining named shapers for parity, then a per-DAC automatic choice of
    shaper and dither from the output's measured noise floor.
-10. **Loopback verification** – play a test signal, capture it from an ADC or the DAC's monitor output, and
+10. **Native desktop app for standalone use** – today a standalone Cadenza is `cadenza serve` plus its web
+    UI in a browser. A small native desktop app (Tauri, like Encore's) wraps the engine with its own window:
+    library folder, queue, device picker, every engine setting, signal path and meters, tray and media keys,
+    one installer per OS. No Encore server needed. HQPlayer's desktop UI is its weak spot, so this is where
+    a free program can look and feel better.
+11. **Loopback verification** – play a test signal, capture it from an ADC or the DAC's monitor output, and
     show measured THD+N and a bit-perfect check. Proves the chain instead of trusting it.
 
 Already ahead today: DSD2048, free and open source, built into the Encore desktop app with a full web UI
