@@ -159,7 +159,7 @@ implemented and tested here; the notes say where we differ.
 | Network endpoint | NAA | Cadenza endpoint (`cadenza endpoint`, mDNS, TCP, ack-paced, PCM + DSD) | matched; our own protocol, not NAA-compatible |
 | GPU offload | CUDA only (64-bit) | CUDA (64-bit, driver only – no toolkit) **and wgpu: Vulkan / Metal / DX12 on AMD, Intel, Apple Silicon and NVIDIA** (64-bit where the card has it, double-f32 ≈48-bit elsewhere); also builds and runs without a GPU; the upsampler's FFT polyphase core, the time-domain 44.1 ↔ 48 kHz stage and the room convolution run on it, verified against the CPU engine (CUDA through a CPU model of the exact kernels; wgpu on real Vulkan in CI with Mesa's software driver: 1.2–2.4e-15 relative in f64, 1–3e-14 in double-f32) and benchmarked (`cadenza bench`, row `upsampling (GPU)`) | exceeded on hardware: HQPlayer has no AMD / Intel / Apple GPU support. Not yet measured on real AMD / Intel / Apple cards, and the CUDA kernels are not yet run on an NVIDIA card since the rational stage was added (none here) |
 | 64-bit processing | yes | yes everywhere | matched |
-| UPnP / Roon / control | UPnP renderer, Roon via NAA | HTTP API, web UI, Encore device | **not matched**: no UPnP renderer, no Roon |
+| UPnP / Roon / control | UPnP renderer, Roon via NAA | UPnP/DLNA MediaRenderer (AVTransport, RenderingControl, ConnectionManager, gapless next URI, events), HTTP API, web UI, Encore device | renderer matched (tested with a scripted control point, not yet with BubbleUPnP / mconnect apps); no OpenHome yet; no Roon |
 | Licence / price | proprietary | MIT / Apache-2.0, free | – |
 
 ### Notes: how Cadenza gets ahead
@@ -202,8 +202,10 @@ to do it:
    machine here). The WASAPI native-DSD GUID stays opt-in (`CADENZA_WASAPI_DSD_GUID`): there is no
    standard one to ship.
 4. **UPnP / OpenHome renderer and AirPlay receiver** in the player and the endpoint, so Audirvana,
-   mconnect, BubbleUPnB and phones can play into Cadenza. Roon talks to HQPlayer only through the closed
-   NAA protocol; Cadenza becomes a Roon zone through Encore's Roon extension instead.
+   mconnect, BubbleUPnP and phones can play into Cadenza. The UPnP/DLNA MediaRenderer is done
+   (`[upnp] enabled = true`, see below); next the OpenHome services, then AirPlay. Roon talks to
+   HQPlayer only through the closed NAA protocol; Cadenza becomes a Roon zone through Encore's Roon
+   extension instead.
 5. **DST-compressed DFF and SACD ISO** input (we refuse DST today), CUE sheets, gapless DSD.
 6. **Synchronised multi-room** between Cadenza endpoints (sample-accurate clock sync over the LAN).
    HQPlayer has no multi-room at all.
@@ -325,6 +327,11 @@ password = "secret"     # or cookie = "encore_session=…", or token = "…" (an
 # device_name = ""      # empty = "Cadenza on <hostname>"
 # embedded = false      # true inside the Encore desktop app (reported to Encore)
 
+[upnp]                  # UPnP / DLNA renderer in `cadenza serve`
+enabled = false         # opens a port on the network, so off by default
+name = ""               # shown in control apps; empty = "Cadenza (<hostname>)"
+port = 49494            # descriptions, control and events (0 = any free port)
+
 [endpoint]              # `cadenza endpoint` on the DAC box
 name = ""               # advertised name; empty = "Cadenza endpoint on <hostname>"
 listen = "0.0.0.0:8778"
@@ -372,6 +379,31 @@ so it runs on Debian bookworm/trixie and newer), and publishes a GitHub release 
 `cadenza-<version>-linux-x86_64.tar.gz`, `cadenza-<version>-linux-aarch64.tar.gz` (each holds
 just `cadenza`) and `SHA256SUMS`. Encore downloads the archive for its architecture, checks
 it against `SHA256SUMS` and runs `cadenza render --describe` before switching to it.
+
+## UPnP / DLNA renderer
+
+With `[upnp] enabled = true`, `cadenza serve` is a UPnP AV MediaRenderer: control apps
+(BubbleUPnP, mconnect, Audirvana, foobar2000, Kazoo in UPnP mode …) find it on the LAN by
+SSDP and play into it, and everything goes through the engine – upsampling, DSD, EQ,
+matrix, the signal path.
+
+- **AVTransport**: set URI, play, pause, stop, seek (time), next/previous, and
+  `SetNextAVTransportURI`, which is queued in the engine so the next track starts
+  gaplessly. Title, artist, album, cover and duration come from the DIDL-Lite metadata.
+- **RenderingControl**: volume 0–100 (the engine's volume curve) and mute.
+- **ConnectionManager**: every format the decoder plays, over HTTP.
+- **Events**: subscribers get `LastChange` notifications for transport state, track and
+  volume changes.
+- Only `http(s)` media URLs are played – never local paths – since anyone on the network
+  can send these commands. The renderer has its own port (`[upnp] port`); the control API
+  keeps its address.
+
+Tested: SSDP discovery against the running server, and a scripted control point that
+drives the whole session end to end – set URI, play, volume, mute, pause, seek, gapless
+next URI, events – through a real engine
+(`cargo test -p cadenza --test upnp`). Not yet tried with the control apps themselves.
+OpenHome (Linn's playlist / volume / time services, used by Kazoo, Lumin, BubbleUPnP's
+OpenHome mode) is next.
 
 ## ASIO (Windows)
 
@@ -587,7 +619,8 @@ SwiftShader, WARP) are slower than the CPU engine and are skipped unless
 ## Roadmap
 
 - [ ] ASIO output on Windows (native DSD without a driver GUID)
-- [ ] UPnP/OpenHome renderer, MPRIS, Roon
+- [x] UPnP/DLNA MediaRenderer
+- [ ] OpenHome services, AirPlay receiver, MPRIS, Roon
 - [ ] Non-uniformly partitioned convolution for lower latency with long impulses
 - [ ] "v3"-class modulators and more poly-sinc variants
 - [x] The resampler's FFT polyphase stages on the GPU (CUDA)

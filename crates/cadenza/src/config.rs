@@ -280,6 +280,8 @@ pub struct Config {
     pub encore: EncoreConfig,
     /// `cadenza endpoint` (the DAC-side network endpoint).
     pub endpoint: EndpointConfig,
+    /// UPnP / DLNA renderer (`cadenza serve`).
+    pub upnp: crate::upnp::UpnpConfig,
 }
 
 impl Config {

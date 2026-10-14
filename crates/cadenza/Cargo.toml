@@ -52,6 +52,9 @@ gethostname = "1"
 cpal = { version = "0.15", optional = true }
 # Endpoint discovery (`_cadenza-endpoint._tcp`).
 mdns-sd = "0.13"
+# UPnP renderer: SSDP socket options and the interface list.
+socket2 = { version = "0.6", features = ["all"] }
+if-addrs = "0.13"
 
 [target.'cfg(target_os = "linux")'.dependencies]
 alsa = { version = "0.9", optional = true }

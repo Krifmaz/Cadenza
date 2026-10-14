@@ -533,6 +533,18 @@ fn serve(config: Config, path: std::path::PathBuf) -> anyhow::Result<()> {
         .encore
         .enabled()
         .then(|| cadenza::encore::start(Arc::new(config.encore.clone()), engine.clone()));
+    // The UPnP renderer, when enabled, for the life of the process.
+    let _upnp = if config.upnp.enabled {
+        match cadenza::upnp::start(engine.clone(), &config.upnp, true) {
+            Ok(r) => Some(r),
+            Err(e) => {
+                log::error!("UPnP renderer: {e}");
+                None
+            }
+        }
+    } else {
+        None
+    };
     runtime.block_on(cadenza::api::serve(&config.server.listen, engine))
 }
 
