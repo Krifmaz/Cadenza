@@ -837,7 +837,7 @@ impl Pipeline {
                 input.short(),
                 rate_label(d.pcm_rate()),
                 self.config.filter.id(),
-                d.config().modulator.label(),
+                d.modulator().label(),
                 d.output_label()
             ),
             None => SignalPath::make_label(&input, &output, bp),
@@ -1180,6 +1180,24 @@ mod tests {
         assert!(!d.active);
         assert!(path.latency_seconds > 0.0);
         serde_json::to_string(&path).unwrap();
+
+        // The summary names the modulator that runs: asdm7ec8 above DSD256 is asdm7ec.
+        let cfg = PipelineConfig {
+            filter: FilterKind::sinc(Phase::Linear, false, 1 << 12),
+            output_mode: OutputMode::Dsd,
+            dsd: crate::dsd::DsdConfig {
+                rate: DsdRate::Dsd512,
+                modulator: DsdModulator::Asdm7ec8,
+                ..Default::default()
+            },
+            ..Default::default()
+        };
+        let p = Pipeline::new(input(44100, 16), cfg, &CoefficientCache::disabled()).unwrap();
+        let label = p.signal_path().label;
+        assert!(
+            label.contains("→ ASDM7EC →") && !label.contains("ASDM7EC8"),
+            "{label}"
+        );
     }
 
     #[test]

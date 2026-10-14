@@ -369,10 +369,11 @@ impl DsdStage {
     }
 }
 
-/// The modulators `cadenza bench` times at `rate`: the configured one, then every
-/// error-correction loop meant for that rate (`asdm7ec8` only up to DSD256).
+/// The modulators `cadenza bench` times at `rate`: the configured one (as it would run at
+/// that rate: `asdm7ec8` becomes `asdm7ec` above DSD256), then every error-correction loop
+/// meant for that rate (`asdm7ec8` only up to DSD256).
 pub fn bench_modulators(primary: DsdModulator, rate: DsdRate) -> Vec<DsdModulator> {
-    let mut kinds = vec![primary];
+    let mut kinds = vec![primary.for_rate(rate)];
     for kind in DsdModulator::catalog() {
         if kind.error_correction() && kind.for_rate(rate) == *kind && !kinds.contains(kind) {
             kinds.push(*kind);
@@ -609,6 +610,11 @@ mod tests {
             bench_modulators(DsdModulator::Asdm7ec, DsdRate::Dsd64).len(),
             3,
             "no duplicate of the configured one"
+        );
+        // A configured asdm7ec8 is timed as what runs above DSD256.
+        assert_eq!(
+            bench_modulators(DsdModulator::Asdm7ec8, DsdRate::Dsd512),
+            [DsdModulator::Asdm7ec, DsdModulator::Asdm5ec]
         );
     }
 

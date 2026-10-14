@@ -628,8 +628,9 @@ impl PolyphaseBlockConvolver for PolyphaseConvolver {
     }
 
     fn reset(&mut self) {
-        // The delay line is cleared lazily through `count`.
+        // The delay line is cleared lazily through `count`; `head` restarts like the model.
         self.frame.fill(0.0);
+        self.head = 0;
         self.count = 0;
     }
 

@@ -148,7 +148,7 @@ implemented and tested here; the notes say where we differ.
 | Exclusive output | ASIO/WASAPI, CoreAudio hog, ALSA | WASAPI exclusive, CoreAudio hog + integer mode, ALSA hw: | matched; **no ASIO** |
 | Native DSD on Windows | via ASIO | DoP only (no standard WASAPI DSD GUID; opt-in driver GUID) | not matched without ASIO |
 | Network endpoint | NAA | Cadenza endpoint (`cadenza endpoint`, mDNS, TCP, ack-paced, PCM + DSD) | matched; our own protocol, not NAA-compatible |
-| GPU offload | CUDA (64-bit) | CUDA, 64-bit, driver only – no toolkit; also builds and runs without a GPU; the upsampler's FFT polyphase core and the room convolution run on it, verified against the CPU engine (to 1e-12, through a CPU model of the exact GPU algorithm) and benchmarked (`cadenza bench`, row `upsampling (GPU)`) | matched: upsampler and room convolution on CUDA; AMD/Intel/Apple GPUs next (wgpu) |
+| GPU offload | CUDA (64-bit) | CUDA, 64-bit, driver only – no toolkit; also builds and runs without a GPU; the upsampler's FFT polyphase core and the room convolution run on it, verified against the CPU engine (to 1e-12, through a CPU model of the exact GPU algorithm; the on-device tests run with `cargo test -p cadenza-dsp --features cuda -- --ignored` on a card, CI has none) and benchmarked (`cadenza bench`, row `upsampling (GPU)`) | matched: upsampler and room convolution on CUDA; AMD/Intel/Apple GPUs next (wgpu) |
 | 64-bit processing | yes | yes everywhere | matched |
 | UPnP / Roon / control | UPnP renderer, Roon via NAA | HTTP API, web UI, Encore device | **not matched**: no UPnP renderer, no Roon |
 | Licence / price | proprietary | MIT / Apache-2.0, free | – |
@@ -167,7 +167,7 @@ to do it:
    and `asdm7ec8` (8 bits, 8 paths, DSD256 and below; above it falls back to `asdm7ec`). A trellis keeps
    the best candidate bit sequences by the low-passed (in-band) quantisation error, which lowers the
    in-band noise by 6 dB (`asdm5ec`) and 10 dB (`asdm7ec`) at DSD64 with the same NTF, guard-free
-   at the default gain at every rate; `cadenza bench` lists them per DSD rate. They cost 3–8× the CPU of the plain loops (on a
+   at the default gain at every rate; `cadenza bench` lists them per DSD rate. They cost about 2–6× the CPU of the plain loops, `asdm7ec8` 7–20× (on a
    loaded 4-core test VM: `asdm7ec` 3.6× realtime per channel at DSD64, 1.2× at DSD256, 0.5× at DSD512;
    `asdm7ec8` 1.1× at DSD64, 0.3× at DSD256). Next: the GPU modulator path – many channels and trellis
    paths in parallel – which is what DSD512/1024 with error correction needs. HQPlayer runs its
@@ -402,7 +402,9 @@ What runs on the GPU:
   for ×2 … ×64, `sinc-l-64k`, `poly-sinc-gauss-l-long` and a 1M-tap filter). Each channel
   has its own CUDA stream. If the card fails mid-stream, the stage moves to the CPU core
   with the last blocks replayed into it – no gap, no click – and the log says so once; a
-  failure while building just leaves that stage on the CPU.
+  failure while building just leaves that stage on the CPU. The device kernels have their
+  own tests against that model (`cargo test -p cadenza-dsp --features cuda -- --ignored`),
+  which need a card.
 - **Room-correction convolution**: the same partitioned engine (FFT → multiply-accumulate
   over all partitions → inverse FFT).
 

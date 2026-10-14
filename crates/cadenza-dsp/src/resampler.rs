@@ -35,6 +35,7 @@ use crate::gpu::PolyphaseFactory;
 use rayon::prelude::*;
 use serde::{Deserialize, Serialize};
 use std::collections::VecDeque;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 
 /// Longest polyphase sub-filter the time-domain core accepts (per output sample cost).
@@ -344,6 +345,9 @@ struct GpuCore {
     out_block: Vec<f64>,
     u: u64,
     next_take: u64,
+    /// Shared by the channels of one stage, so a lost device is logged once, not once per
+    /// channel.
+    reported: Arc<AtomicBool>,
 }
 
 impl GpuCore {
@@ -353,6 +357,7 @@ impl GpuCore {
         par: Parallelism,
         m: usize,
         delay: u64,
+        reported: Arc<AtomicBool>,
     ) -> Self {
         let block = engine.block();
         let l = engine.phases();
@@ -369,6 +374,7 @@ impl GpuCore {
             out_block: vec![0.0; block * l],
             u: 0,
             next_take: delay,
+            reported,
         }
     }
 
@@ -388,10 +394,14 @@ impl GpuCore {
                 .engine
                 .process_block(&self.pending, &mut self.out_block)
             {
-                log::error!(
-                    "GPU: {e} in the upsampler on {}; this stream continues on the CPU",
-                    self.engine.device_label()
-                );
+                if !self.reported.swap(true, Ordering::Relaxed) {
+                    log::error!(
+                        "GPU: {e} in the upsampler on {}; this stream continues on the CPU",
+                        self.engine.device_label()
+                    );
+                } else {
+                    log::debug!("GPU: {e} in another channel of the upsampler; on the CPU");
+                }
                 return Some((self.move_to_cpu(out), used));
             }
             self.emit(out);
@@ -650,9 +660,19 @@ impl Stage {
                         h.len(),
                         engines[0].device_label()
                     );
+                    let reported = Arc::new(AtomicBool::new(false));
                     engines
                         .into_iter()
-                        .map(|e| Core::Gpu(Box::new(GpuCore::new(e, &filters, par, m, delay))))
+                        .map(|e| {
+                            Core::Gpu(Box::new(GpuCore::new(
+                                e,
+                                &filters,
+                                par,
+                                m,
+                                delay,
+                                Arc::clone(&reported),
+                            )))
+                        })
                         .collect()
                 }
                 None => (0..channels)
