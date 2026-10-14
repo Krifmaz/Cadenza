@@ -8,6 +8,13 @@ repository.workspace = true
 authors.workspace = true
 rust-version.workspace = true
 
+[features]
+# CUDA offload of the partitioned convolution (64-bit) through `cudarc` with dynamic
+# loading: building needs no CUDA toolkit, and the binary runs without a GPU (it detects
+# the driver at run time and falls back to the CPU). Pinned to the CUDA 12.5 driver API,
+# which every NVIDIA driver >= 525 provides.
+cuda = ["dep:cudarc", "dep:libloading"]
+
 [dependencies]
 rustfft.workspace = true
 realfft.workspace = true
@@ -18,3 +25,5 @@ thiserror.workspace = true
 log.workspace = true
 dirs.workspace = true
 rayon.workspace = true
+cudarc = { version = "0.19.10", optional = true, default-features = false, features = ["std", "driver", "nvrtc", "dynamic-loading", "cuda-12050"] }
+libloading = { version = "0.9", optional = true }

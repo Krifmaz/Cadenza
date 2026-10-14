@@ -21,6 +21,10 @@ cpal = ["dep:cpal"]
 alsa = ["dep:alsa"]
 # WASAPI exclusive mode (Windows only; the crate is only compiled there).
 wasapi = ["dep:wasapi"]
+# CoreAudio hog mode / integer mode (macOS only; the crate is only compiled there).
+coreaudio = ["dep:coreaudio-sys"]
+# CUDA offload in cadenza-dsp (NVIDIA driver >= 525 at run time, no toolkit to build).
+cuda = ["cadenza-dsp/cuda"]
 
 [dependencies]
 cadenza-dsp = { path = "../cadenza-dsp" }
@@ -42,9 +46,14 @@ tokio-stream = { version = "0.1", features = ["sync"] }
 futures-util = "0.3"
 gethostname = "1"
 cpal = { version = "0.15", optional = true }
+# Endpoint discovery (`_cadenza-endpoint._tcp`).
+mdns-sd = "0.13"
 
 [target.'cfg(target_os = "linux")'.dependencies]
 alsa = { version = "0.9", optional = true }
+
+[target.'cfg(target_os = "macos")'.dependencies]
+coreaudio-sys = { version = "0.2", optional = true }
 
 [target.'cfg(windows)'.dependencies]
 wasapi = { version = "0.26", optional = true }

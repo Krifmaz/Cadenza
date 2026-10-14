@@ -1,6 +1,7 @@
 //! Decoding with Symphonia: any supported container/codec, from a file or an HTTP URL,
 //! to interleaved `f64` PCM.
 
+pub mod dsd;
 pub mod source;
 
 pub use source::Source;

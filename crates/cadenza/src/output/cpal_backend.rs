@@ -5,7 +5,7 @@
 //! Samples are handed to cpal as `f32` (the mixer converts anyway) unless the device offers
 //! an integer format matching the requested depth.
 
-use super::{DeviceInfo, Output, OutputError, OutputFormat, STANDARD_RATES};
+use super::{DeviceInfo, DsdCaps, Output, OutputError, OutputFormat, STANDARD_RATES};
 use cpal::traits::{DeviceTrait, HostTrait, StreamTrait};
 use cpal::{SampleFormat, SampleRate, Stream, StreamConfig};
 use std::collections::VecDeque;
@@ -122,6 +122,8 @@ pub fn list_devices() -> Vec<DeviceInfo> {
                 bits: vec![16, 24, 32],
                 channels,
                 exclusive: false,
+                // A shared-mode mixer resamples and dithers: DoP markers would not survive.
+                dsd: DsdCaps::NONE,
             })
         })
         .collect()
@@ -134,6 +136,13 @@ impl Output for CpalOutput {
 
     fn open(&mut self, format: OutputFormat) -> Result<OutputFormat, OutputError> {
         self.close();
+        if format.is_dsd() {
+            // The OS mixer would resample the DoP frames into noise; refuse loudly instead.
+            return Err(OutputError::Unsupported {
+                device: self.device_name.clone(),
+                format,
+            });
+        }
         let range = self
             .supported(format.rate)
             .ok_or(OutputError::Unsupported {

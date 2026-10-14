@@ -6,21 +6,113 @@
 //! of the design: when a track ends, the next decoder is opened and the pipeline keeps
 //! running, so the filter history carries across the boundary.
 
+use super::decoder::TrackDecoder;
 use super::{Command, Event, PlayState, Shared, Status, Track};
 use crate::config::{RateSetting, Settings};
-use crate::decode::{Decoder, TrackInfo};
-use crate::output::{self, Output, OutputFormat};
+use crate::output::{self, DsdCaps, Output, OutputFormat};
+use cadenza_dsp::dsd::{DsdConfig, DsdPacking, DsdRate, OutputMode, Packer};
 use cadenza_dsp::pipeline::PipelineError;
+use cadenza_dsp::signal_path::{Endpoint, SignalPath, Stage};
 use cadenza_dsp::{
-    CoefficientCache, ConvolutionSpec, DitherKind, FilterKind, InputFormat, Pipeline,
+    CoefficientCache, ConvolutionSpec, DitherKind, FilterKind, Pipeline,
     PipelineConfig, Volume,
 };
+use serde_json::json;
 use std::sync::mpsc::{Receiver, RecvTimeoutError, TryRecvError};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
+/// Bit-perfect DSD pass-through: the source's 1-bit stream packed for the device, nothing
+/// else in between.
+struct Passthrough {
+    packer: Packer,
+    path: SignalPath,
+}
+
+/// `(rate, bits, channels, dsd)` of the current track, its label and its duration.
+type TrackInfo = ((u32, u32, u32, bool), String, Option<f64>);
+
+/// What the worker runs the decoded audio through.
+#[allow(clippy::large_enum_variant)]
+enum Chain {
+    /// The DSP pipeline (PCM in, PCM or modulated DSD out).
+    Pipeline(Box<Pipeline>),
+    /// DSD bits straight to a DoP / native DSD output.
+    Passthrough(Passthrough),
+}
+
+impl Chain {
+    fn process_pcm(&mut self, pcm: &[f64]) -> Vec<i32> {
+        match self {
+            Chain::Pipeline(p) => p.process(pcm),
+            Chain::Passthrough(_) => Vec::new(),
+        }
+    }
+
+    fn process_dsd(&mut self, planar: &[Vec<u8>]) -> Vec<i32> {
+        match self {
+            Chain::Passthrough(p) => {
+                let refs: Vec<&[u8]> = planar.iter().map(|c| c.as_slice()).collect();
+                let mut out = Vec::new();
+                p.packer.push(&refs, &mut out);
+                out
+            }
+            Chain::Pipeline(_) => Vec::new(),
+        }
+    }
+
+    fn flush(&mut self) -> Vec<i32> {
+        match self {
+            Chain::Pipeline(p) => p.flush(),
+            Chain::Passthrough(p) => {
+                let mut out = Vec::new();
+                p.packer.flush(&mut out);
+                p.packer.reset();
+                out
+            }
+        }
+    }
+
+    fn reset(&mut self) {
+        match self {
+            Chain::Pipeline(p) => p.reset(),
+            Chain::Passthrough(p) => p.packer.reset(),
+        }
+    }
+
+    fn set_volume(&mut self, v: Volume) {
+        if let Chain::Pipeline(p) = self {
+            p.set_volume(v);
+        }
+    }
+
+    fn latency_seconds(&self) -> f64 {
+        match self {
+            Chain::Pipeline(p) => p.latency_seconds(),
+            Chain::Passthrough(_) => 0.0,
+        }
+    }
+
+    fn signal_path(&self) -> SignalPath {
+        match self {
+            Chain::Pipeline(p) => p.signal_path(),
+            Chain::Passthrough(p) => p.path.clone(),
+        }
+    }
+
+    fn is_passthrough(&self) -> bool {
+        matches!(self, Chain::Passthrough(_))
+    }
+}
+
 /// Open the next track this long before the current one ends, so HTTP streams are ready.
 const PREFETCH_SECONDS: f64 = 10.0;
+
+/// One decoded chunk.
+enum Chunk {
+    Pcm(Vec<f64>),
+    Dsd(Vec<Vec<u8>>),
+}
 
 struct Worker {
     rx: Receiver<Command>,
@@ -35,14 +127,17 @@ struct Worker {
     state: PlayState,
     volume: Volume,
 
-    decoder: Option<Decoder>,
+    decoder: Option<TrackDecoder>,
+    /// `(rate, bits, channels, dsd)` of the current track, and its label.
     info: Option<TrackInfo>,
-    prefetched: Option<(usize, Decoder)>,
-    pipeline: Option<Pipeline>,
+    prefetched: Option<(usize, TrackDecoder)>,
+    chain: Option<Chain>,
     output: Option<Box<dyn Output>>,
     output_name: String,
     output_format: Option<OutputFormat>,
     output_rates: Vec<u32>,
+    output_dsd: DsdCaps,
+    output_exclusive: bool,
     /// `(path, impulse)` so the file is only parsed once.
     convolution: Option<(String, Arc<ConvolutionSpec>)>,
 
@@ -80,11 +175,13 @@ pub(super) fn run(
         decoder: None,
         info: None,
         prefetched: None,
-        pipeline: None,
+        chain: None,
         output: None,
         output_name: String::new(),
         output_format: None,
         output_rates: Vec::new(),
+        output_dsd: DsdCaps::NONE,
+        output_exclusive: false,
         convolution: None,
         error: None,
         runs_finished: 0,
@@ -181,8 +278,8 @@ impl Worker {
                 self.volume = v;
                 self.settings.dsp.volume_db = v.gain_db;
                 self.settings.dsp.muted = v.muted;
-                if let Some(p) = &mut self.pipeline {
-                    p.set_volume(v);
+                if let Some(c) = &mut self.chain {
+                    c.set_volume(v);
                 }
                 self.persist_settings();
             }
@@ -262,14 +359,20 @@ impl Worker {
         dsp.muted = false;
         old_dsp.volume_db = 0.0;
         old_dsp.muted = false;
-        let chain_changed = old_dsp != dsp;
-        if let Some(p) = &mut self.pipeline {
-            p.set_volume(self.volume);
+        let chain_changed = old_dsp != dsp || old.matrix != self.settings.matrix;
+        // A DSD pass-through chain depends on the volume too (any gain means re-modulating).
+        let passthrough_affected = self
+            .chain
+            .as_ref()
+            .is_some_and(Chain::is_passthrough)
+            && old.dsp.volume_db != self.settings.dsp.volume_db;
+        if let Some(c) = &mut self.chain {
+            c.set_volume(self.volume);
         }
-        if (output_changed || chain_changed) && self.decoder.is_some() {
+        if (output_changed || chain_changed || passthrough_affected) && self.decoder.is_some() {
             // Push out what the old chain still holds, then build the new one.
-            if let Some(p) = &mut self.pipeline {
-                let tail = p.flush();
+            if let Some(c) = &mut self.chain {
+                let tail = c.flush();
                 self.write_out(&tail);
             }
             if output_changed {
@@ -280,8 +383,8 @@ impl Worker {
                 self.output = None;
                 self.output_format = None;
             }
-            if let Some(info) = self.info.clone() {
-                if let Err(e) = self.build_chain(&info) {
+            if self.info.is_some() {
+                if let Err(e) = self.build_chain() {
                     self.fail(format!("rebuilding the chain: {e}"));
                 }
             }
@@ -306,7 +409,7 @@ impl Worker {
         let track = self.queue[i].clone();
         let mut decoder = match self.take_prefetched(i) {
             Some(d) => d,
-            None => match Decoder::open(&track.source) {
+            None => match TrackDecoder::open(&track.source) {
                 Ok(d) => d,
                 Err(e) => {
                     self.fail(format!("{}: {e}", track.source.display()));
@@ -320,14 +423,14 @@ impl Worker {
                 log::warn!("seek to {position}: {e}");
             }
         }
-        let info = decoder.info().clone();
+        let label = decoder.source_label();
+        self.info = Some((decoder.format_key(), label.clone(), decoder.duration()));
         self.decoder = Some(decoder);
-        self.info = Some(info.clone());
         self.played = 0.0;
         self.last_pos = position;
         self.play_reported = false;
-        if let Err(e) = self.build_chain(&info) {
-            self.fail(format!("cannot play {}: {e}", info.label()));
+        if let Err(e) = self.build_chain() {
+            self.fail(format!("cannot play {label}: {e}"));
             self.decoder = None;
             self.state = PlayState::Stopped;
             self.runs_finished += 1;
@@ -363,12 +466,12 @@ impl Worker {
         self.decoder = None;
         self.info = None;
         self.prefetched = None;
-        if let Some(p) = &mut self.pipeline {
+        if let Some(c) = &mut self.chain {
             if drain {
-                let tail = p.flush();
+                let tail = c.flush();
                 self.write_out(&tail);
             } else {
-                p.reset();
+                c.reset();
             }
         }
         if let Some(o) = &mut self.output {
@@ -409,8 +512,8 @@ impl Worker {
         match d.seek(t) {
             Ok(actual) => {
                 self.last_pos = actual;
-                if let Some(p) = &mut self.pipeline {
-                    p.reset();
+                if let Some(c) = &mut self.chain {
+                    c.reset();
                 }
                 if let Some(o) = &mut self.output {
                     let _ = o.discard();
@@ -450,8 +553,44 @@ impl Worker {
             .copied()
             .filter(|r| out.supports(*r, bits))
             .collect();
+        self.output_dsd = out.dsd_caps();
+        self.output_exclusive = out.exclusive();
         self.output = Some(out);
         Ok(())
+    }
+
+    /// Channel count after the matrix (what the device is opened with).
+    fn output_channels(&self, input_channels: u32) -> u32 {
+        if !self.settings.matrix.enabled || self.settings.dsp.bit_perfect {
+            return input_channels;
+        }
+        match self.settings.matrix.resolve(input_channels as usize) {
+            Ok(m) => m.outputs.len() as u32,
+            Err(_) => input_channels,
+        }
+    }
+
+    /// Whether a DSD source can go to the device untouched: DSD output wanted (or
+    /// bit-perfect), pass-through allowed, nothing that would alter the samples, and the
+    /// device takes the source rate (in the configured packing or DoP).
+    fn passthrough_target(&self, decoder: &TrackDecoder, channels: u32) -> Option<(DsdRate, DsdPacking)> {
+        let s = &self.settings;
+        let src = decoder.dsd_rate()?;
+        if !s.dsp.dsd_passthrough || !(s.dsp.bit_perfect || s.dsp.output_mode == OutputMode::Dsd) {
+            return None;
+        }
+        let untouched = s.dsp.bit_perfect
+            || (self.volume.is_unity()
+                && !(s.dsp.eq_enabled && s.dsp.eq.iter().any(|b| b.enabled))
+                && s.dsp.convolution.trim().is_empty()
+                && !s.matrix.enabled);
+        if !untouched {
+            return None;
+        }
+        let (rate, family) = DsdRate::from_hz(src)?;
+        let out = self.output.as_ref()?;
+        let (got_rate, packing) = output::choose_dsd(out.as_ref(), family, rate, s.dsp.dsd_packing, channels)?;
+        (got_rate == rate).then_some((rate, packing))
     }
 
     fn load_convolution(&mut self) -> Option<Arc<ConvolutionSpec>> {
@@ -483,48 +622,125 @@ impl Worker {
         }
     }
 
-    /// Build the pipeline for `info` and (re)open the output to match.
-    fn build_chain(&mut self, info: &TrackInfo) -> Result<(), String> {
+    /// Build the chain for the current decoder and (re)open the output to match.
+    fn build_chain(&mut self) -> Result<(), String> {
         self.ensure_output()?;
         let s = self.settings.clone();
-        let source_bits = if info.bits == 0 { 24 } else { info.bits };
-        let out = self.output.as_mut().unwrap();
+        let decoder = self.decoder.as_ref().ok_or("no track")?;
+        let input = decoder.pcm_input();
+        let src_info = decoder.info();
+        let src_label = decoder.source_label();
+        let channels = self.output_channels(input.channels);
 
-        // Which rate and depth the device gets.
-        let (rate, bits) = if s.dsp.bit_perfect {
-            let bits = [s.output.bits.max(source_bits), 32, 24, 16]
-                .into_iter()
-                .find(|b| *b >= source_bits && out.supports(info.rate, *b))
-                .unwrap_or(s.output.bits);
-            (info.rate, bits)
-        } else {
-            let bits = [s.output.bits, 32, 24, 16]
-                .into_iter()
-                .find(|b| out.supports(info.rate, *b))
-                .unwrap_or(s.output.bits);
-            let rate = match s.output.rate {
-                RateSetting::Source => info.rate,
-                RateSetting::Auto => {
-                    output::choose_rate(out.as_ref(), info.rate, None, s.output.max_rate, bits)
-                }
-                RateSetting::Fixed(r) => {
-                    output::choose_rate(out.as_ref(), info.rate, Some(r), s.output.max_rate, bits)
-                }
+        // ---- DSD pass-through: the bits go to the device untouched --------------------
+        if let Some((rate, packing)) = self.passthrough_target(decoder, channels) {
+            let dsd_hz = src_info.rate;
+            let wanted = OutputFormat::dsd(dsd_hz, packing, channels);
+            self.open_output(wanted)?;
+            let packer = Packer::new(packing, channels as usize);
+            let out_label = format!("{} ({})", rate.label(), packing.label());
+            let input_ep = Endpoint {
+                format: src_info.codec.clone(),
+                rate: dsd_hz,
+                bits: 1,
+                channels,
+                device: None,
             };
-            (rate, bits)
-        };
-        let wanted = OutputFormat {
-            rate,
-            bits,
-            channels: info.channels,
-        };
-        if self.output_format != Some(wanted) {
-            if self.output_format.is_some() {
-                let _ = out.drain();
-            }
-            let got = out.open(wanted).map_err(|e| e.to_string())?;
-            self.output_format = Some(got);
+            let output_ep = Endpoint {
+                format: rate.label(),
+                rate: dsd_hz,
+                bits: 1,
+                channels,
+                device: Some(self.output_name.clone()),
+            };
+            let path = SignalPath {
+                stages: vec![Stage {
+                    id: "dsd-passthrough".into(),
+                    name: "DSD pass-through".into(),
+                    detail: format!("{} bits untouched → {out_label}", rate.label()),
+                    params: json!({
+                        "rate": rate.id(),
+                        "rate_hz": dsd_hz,
+                        "packing": packing.id(),
+                        "device_frame_rate": packer.frame_rate(dsd_hz),
+                        "device_word_bits": packer.word_bits(),
+                    }),
+                    active: true,
+                }],
+                bit_perfect: true,
+                label: format!("{} {} → {out_label} · bit-perfect", src_info.codec, rate.label()),
+                latency_seconds: 0.0,
+                input: input_ep,
+                output: output_ep,
+            };
+            log::info!("{}", path.label);
+            self.chain = Some(Chain::Passthrough(Passthrough { packer, path }));
+            return Ok(());
         }
+
+        // ---- DSD output through the modulator ------------------------------------------
+        let mut dsd: Option<DsdConfig> = None;
+        if s.dsp.dsd_output() {
+            let family = cadenza_dsp::dsd::family_base(input.rate);
+            let out = self.output.as_ref().unwrap();
+            match output::choose_dsd(out.as_ref(), family, s.dsp.dsd_rate, s.dsp.dsd_packing, channels) {
+                Some((rate, packing)) => {
+                    if rate != s.dsp.dsd_rate || packing != s.dsp.dsd_packing {
+                        log::warn!(
+                            "{} does not take {} {}; using {} {}",
+                            self.output_name,
+                            s.dsp.dsd_rate.label(),
+                            s.dsp.dsd_packing.label(),
+                            rate.label(),
+                            packing.label()
+                        );
+                    }
+                    dsd = Some(DsdConfig {
+                        rate,
+                        packing,
+                        ..s.dsp.dsd()
+                    });
+                }
+                None => {
+                    let msg = format!("{} does not accept DSD; playing PCM instead", self.output_name);
+                    log::warn!("{msg}");
+                    self.error = Some(msg);
+                }
+            }
+        }
+
+        // ---- which rate and depth the device gets ----------------------------------------
+        let source_bits = input.bits;
+        let out = self.output.as_mut().unwrap();
+        let wanted = if let Some(d) = &dsd {
+            let family = cadenza_dsp::dsd::family_base(input.rate);
+            OutputFormat::dsd(d.rate.hz(family), d.packing, channels)
+        } else {
+            let (rate, bits) = if s.dsp.bit_perfect {
+                let bits = [s.output.bits.max(source_bits), 32, 24, 16]
+                    .into_iter()
+                    .find(|b| *b >= source_bits && out.supports(input.rate, *b))
+                    .unwrap_or(s.output.bits);
+                (input.rate, bits)
+            } else {
+                let bits = [s.output.bits, 32, 24, 16]
+                    .into_iter()
+                    .find(|b| out.supports(input.rate, *b))
+                    .unwrap_or(s.output.bits);
+                let rate = match s.output.rate {
+                    RateSetting::Source => input.rate,
+                    RateSetting::Auto => {
+                        output::choose_rate(out.as_ref(), input.rate, None, s.output.max_rate, bits)
+                    }
+                    RateSetting::Fixed(r) => {
+                        output::choose_rate(out.as_ref(), input.rate, Some(r), s.output.max_rate, bits)
+                    }
+                };
+                (rate, bits)
+            };
+            OutputFormat::pcm(rate, bits, channels)
+        };
+        self.open_output(wanted)?;
         let got = self.output_format.unwrap();
 
         let convolution = self.load_convolution();
@@ -544,21 +760,42 @@ impl Worker {
             convolution,
             filter,
             attenuation_db: s.dsp.attenuation_db,
-            output_rate: (got.rate != info.rate).then_some(got.rate),
+            output_rate: (!got.is_dsd() && got.rate != input.rate).then_some(got.rate),
             output_bits: got.bits,
             dither,
+            headroom_db: s.dsp.headroom_db,
+            soft_clip: s.dsp.soft_clip,
             output_device: Some(self.output_name.clone()),
-        };
-        let input = InputFormat {
-            rate: info.rate,
-            bits: source_bits,
-            channels: info.channels,
-            codec: info.codec.clone(),
+            output_mode: if dsd.is_some() { OutputMode::Dsd } else { OutputMode::Pcm },
+            dsd: dsd.unwrap_or_else(|| s.dsp.dsd()),
+            gpu: s.dsp.gpu,
+            matrix: s.matrix.clone(),
         };
         let pipeline =
             Pipeline::new(input, config, &self.cache).map_err(|e: PipelineError| e.to_string())?;
-        log::info!("{}", pipeline.signal_path().label);
-        self.pipeline = Some(pipeline);
+        if pipeline.channels() as u32 != got.channels {
+            return Err(format!(
+                "the matrix produces {} channels but the device was opened with {}",
+                pipeline.channels(),
+                got.channels
+            ));
+        }
+        let path = pipeline.signal_path();
+        log::info!("{} ({src_label})", path.label);
+        self.chain = Some(Chain::Pipeline(Box::new(pipeline)));
+        Ok(())
+    }
+
+    /// Open the output in `wanted` unless it already is.
+    fn open_output(&mut self, wanted: OutputFormat) -> Result<(), String> {
+        let out = self.output.as_mut().ok_or("no output")?;
+        if self.output_format != Some(wanted) {
+            if self.output_format.is_some() {
+                let _ = out.drain();
+            }
+            let got = out.open(wanted).map_err(|e| e.to_string())?;
+            self.output_format = Some(got);
+        }
         Ok(())
     }
 
@@ -581,17 +818,24 @@ impl Worker {
             self.state = PlayState::Stopped;
             return;
         };
-        match decoder.next_chunk() {
-            Ok(Some(pcm)) => {
+        let passthrough = self.chain.as_ref().is_some_and(Chain::is_passthrough);
+        let chunk = if passthrough {
+            decoder.next_dsd_chunk().map(|c| c.map(Chunk::Dsd))
+        } else {
+            decoder.next_chunk().map(|c| c.map(Chunk::Pcm))
+        };
+        match chunk {
+            Ok(Some(chunk)) => {
                 let pos = decoder.position_seconds();
                 let delta = pos - self.last_pos;
                 if delta > 0.0 && delta < 2.0 {
                     self.played += delta;
                 }
                 self.last_pos = pos;
-                let out = match &mut self.pipeline {
-                    Some(p) => p.process(&pcm),
-                    None => Vec::new(),
+                let out = match (&mut self.chain, chunk) {
+                    (Some(c), Chunk::Pcm(pcm)) => c.process_pcm(&pcm),
+                    (Some(c), Chunk::Dsd(bits)) => c.process_dsd(&bits),
+                    (None, _) => Vec::new(),
                 };
                 self.write_out(&out);
                 self.report_play();
@@ -611,7 +855,7 @@ impl Worker {
         if self.play_reported {
             return;
         }
-        let threshold = match self.info.as_ref().and_then(|i| i.duration) {
+        let threshold = match self.info.as_ref().and_then(|i| i.2) {
             Some(d) if d > 0.0 => (d / 2.0).min(240.0),
             _ => 240.0,
         };
@@ -632,14 +876,14 @@ impl Worker {
         if self.prefetched.is_some() || i + 1 >= self.queue.len() {
             return;
         }
-        let remaining = match self.info.as_ref().and_then(|x| x.duration) {
+        let remaining = match self.info.as_ref().and_then(|x| x.2) {
             Some(d) => d - self.last_pos,
             None => return,
         };
         if remaining > PREFETCH_SECONDS {
             return;
         }
-        match Decoder::open(&self.queue[i + 1].source) {
+        match TrackDecoder::open(&self.queue[i + 1].source) {
             Ok(d) => self.prefetched = Some((i + 1, d)),
             Err(e) => {
                 log::warn!("prefetch {}: {e}", self.queue[i + 1].source.display());
@@ -650,7 +894,7 @@ impl Worker {
         }
     }
 
-    fn take_prefetched(&mut self, i: usize) -> Option<Decoder> {
+    fn take_prefetched(&mut self, i: usize) -> Option<TrackDecoder> {
         match self.prefetched.take() {
             Some((j, d)) if j == i => Some(d),
             _ => None,
@@ -671,7 +915,7 @@ impl Worker {
         let track = self.queue[next].clone();
         let decoder = match self.take_prefetched(next) {
             Some(d) => d,
-            None => match Decoder::open(&track.source) {
+            None => match TrackDecoder::open(&track.source) {
                 Ok(d) => d,
                 Err(e) => {
                     self.fail(format!("{}: {e}", track.source.display()));
@@ -681,25 +925,24 @@ impl Worker {
                 }
             },
         };
-        let info = decoder.info().clone();
-        let same_format = self.info.as_ref().is_some_and(|old| {
-            (old.rate, old.bits, old.channels) == (info.rate, info.bits, info.channels)
-        });
+        let key = decoder.format_key();
+        let label = decoder.source_label();
+        let same_format = self.info.as_ref().is_some_and(|old| old.0 == key);
         if !same_format {
-            if let Some(p) = &mut self.pipeline {
-                let tail = p.flush();
+            if let Some(c) = &mut self.chain {
+                let tail = c.flush();
                 self.write_out(&tail);
             }
         }
         self.index = Some(next);
+        self.info = Some((key, label.clone(), decoder.duration()));
         self.decoder = Some(decoder);
-        self.info = Some(info.clone());
         self.played = 0.0;
         self.last_pos = 0.0;
         self.play_reported = false;
         if !same_format {
-            if let Err(e) = self.build_chain(&info) {
-                self.fail(format!("cannot play {}: {e}", info.label()));
+            if let Err(e) = self.build_chain() {
+                self.fail(format!("cannot play {label}: {e}"));
                 self.decoder = None;
                 self.state = PlayState::Stopped;
                 self.runs_finished += 1;
@@ -715,8 +958,8 @@ impl Worker {
     fn position(&self) -> f64 {
         let Some(d) = &self.decoder else { return 0.0 };
         let mut pos = d.position_seconds();
-        if let Some(p) = &self.pipeline {
-            pos -= p.latency_seconds();
+        if let Some(c) = &self.chain {
+            pos -= c.latency_seconds();
         }
         if let (Some(o), Some(f)) = (&self.output, self.output_format) {
             pos -= o.queued_frames() as f64 / f.rate as f64;
@@ -741,7 +984,7 @@ impl Worker {
         let duration = self
             .info
             .as_ref()
-            .and_then(|i| i.duration)
+            .and_then(|i| i.2)
             .or(track.as_ref().and_then(|t| t.duration));
         let status = Status {
             state: self.state,
@@ -753,15 +996,17 @@ impl Worker {
             volume_linear: self.volume.to_linear(),
             queue: self.queue.clone(),
             signal_path: self
-                .pipeline
+                .chain
                 .as_ref()
                 .filter(|_| self.decoder.is_some())
-                .map(|p| p.signal_path()),
-            source_format: self.info.as_ref().map(|i| i.label()),
+                .map(Chain::signal_path),
+            source_format: self.info.as_ref().map(|i| i.1.clone()),
             settings: self.settings.clone(),
             output: self.output_name.clone(),
             output_format: self.output_format,
             output_rates: self.output_rates.clone(),
+            output_dsd: self.output_dsd.clone(),
+            output_exclusive: self.output_exclusive,
             output_frames: self
                 .output
                 .as_ref()

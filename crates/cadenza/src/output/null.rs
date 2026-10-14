@@ -1,10 +1,20 @@
 //! The null output: counts frames and, optionally, paces itself like a real device so
 //! positions advance in real time. Used by the tests and on machines without a DAC.
+//!
+//! It pretends to be an ideal exclusive device: PCM at any rate up to 32×, DoP and every
+//! native DSD layout up to DSD1024 (DSD2048 is refused, so the "your device stops at …"
+//! path is exercised too). In DoP it checks the markers of what it is given, so an engine
+//! test that writes a DSD stream to it catches a broken packer.
 
-use super::{DeviceInfo, Output, OutputError, OutputFormat, STANDARD_RATES};
+use super::{DeviceInfo, DsdCaps, Encoding, Output, OutputError, OutputFormat, STANDARD_RATES};
+use cadenza_dsp::dsd::packing::DOP_MARKERS;
+use cadenza_dsp::dsd::{DsdPacking, NativeFormat};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
+
+/// Highest DSD bit rate the null device "accepts" (DSD1024, 48 k family).
+pub const MAX_DSD_RATE: u32 = 49_152_000;
 
 /// See the module documentation.
 pub struct NullOutput {
@@ -14,6 +24,10 @@ pub struct NullOutput {
     /// When the frames written so far will have "played", for pacing.
     clock: Option<Instant>,
     paused: bool,
+    /// Next expected DoP marker index (DoP only).
+    dop_marker: usize,
+    /// DoP frames whose marker byte was wrong.
+    dop_errors: u64,
 }
 
 impl NullOutput {
@@ -25,6 +39,8 @@ impl NullOutput {
             written: Arc::new(AtomicU64::new(0)),
             clock: None,
             paused: false,
+            dop_marker: 0,
+            dop_errors: 0,
         }
     }
 
@@ -36,6 +52,20 @@ impl NullOutput {
     /// Total frames written since creation.
     pub fn frames_written(&self) -> u64 {
         self.written.load(Ordering::Relaxed)
+    }
+
+    /// DoP frames seen with a wrong marker byte (0 for a correct stream).
+    pub fn dop_marker_errors(&self) -> u64 {
+        self.dop_errors
+    }
+}
+
+/// What the null device claims to do with DSD.
+pub fn dsd_caps() -> DsdCaps {
+    DsdCaps {
+        dop: true,
+        native: vec![NativeFormat::U32Be, NativeFormat::U32Le, NativeFormat::U8],
+        max_rate: Some(MAX_DSD_RATE),
     }
 }
 
@@ -50,6 +80,7 @@ pub fn device_info() -> DeviceInfo {
         channels: None,
         default: false,
         exclusive: true,
+        dsd: dsd_caps(),
     }
 }
 
@@ -59,20 +90,53 @@ impl Output for NullOutput {
     }
 
     fn open(&mut self, format: OutputFormat) -> Result<OutputFormat, OutputError> {
+        if !self.supports_format(&format) {
+            return Err(OutputError::Unsupported {
+                device: "null".into(),
+                format,
+            });
+        }
         self.format = Some(format);
         self.clock = None;
+        self.dop_marker = 0;
+        self.dop_errors = 0;
         Ok(format)
     }
 
     fn supports(&self, rate: u32, bits: u32) -> bool {
-        (8000..=1_536_000).contains(&rate) && matches!(bits, 16 | 24 | 32)
+        (8000..=super::MAX_PCM_RATE).contains(&rate) && matches!(bits, 16 | 24 | 32)
+    }
+
+    fn dsd_caps(&self) -> DsdCaps {
+        dsd_caps()
+    }
+
+    fn exclusive(&self) -> bool {
+        true
     }
 
     fn write(&mut self, frames: &[i32]) -> Result<(), OutputError> {
         let fmt = self
             .format
             .ok_or_else(|| OutputError::Backend("null output not open".into()))?;
-        let n = frames.len() / fmt.channels.max(1) as usize;
+        let ch = fmt.channels.max(1) as usize;
+        let n = frames.len() / ch;
+        if let Encoding::Dsd {
+            packing: DsdPacking::Dop,
+            ..
+        } = fmt.encoding
+        {
+            for frame in frames.chunks(ch) {
+                let want = DOP_MARKERS[self.dop_marker];
+                self.dop_marker ^= 1;
+                if frame
+                    .iter()
+                    .any(|w| ((*w as u32 >> 16) & 0xFF) as u8 != want)
+                {
+                    self.dop_errors += 1;
+                }
+            }
+        }
         self.written.fetch_add(n as u64, Ordering::Relaxed);
         if self.realtime {
             // Pretend to hold a quarter second of buffer: sleep until the queue is below that.
@@ -109,6 +173,7 @@ impl Output for NullOutput {
 
     fn discard(&mut self) -> Result<(), OutputError> {
         self.clock = None;
+        self.dop_marker = 0;
         Ok(())
     }
 
@@ -138,20 +203,51 @@ impl Output for NullOutput {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use cadenza_dsp::dsd::{DsdRate, Packer};
 
     #[test]
     fn counts_frames() {
         let mut o = NullOutput::new(false);
-        o.open(OutputFormat {
-            rate: 48000,
-            bits: 24,
-            channels: 2,
-        })
-        .unwrap();
+        o.open(OutputFormat::pcm(48000, 24, 2)).unwrap();
         o.write(&[0; 2000]).unwrap();
         o.write(&[0; 6]).unwrap();
         assert_eq!(o.frames_written(), 1003);
         assert!(o.supports(768_000, 32));
+        assert!(o.supports(1_536_000, 32));
         assert!(!o.supports(48000, 20));
+        assert!(!o.supports(3_072_000, 24));
+    }
+
+    #[test]
+    fn accepts_dsd_up_to_1024_and_checks_dop_markers() {
+        let mut o = NullOutput::new(false);
+        assert!(o.supports_format(&OutputFormat::dsd(
+            DsdRate::Dsd1024.hz(44_100),
+            DsdPacking::Native,
+            2
+        )));
+        assert!(!o.supports_format(&OutputFormat::dsd(
+            DsdRate::Dsd2048.hz(44_100),
+            DsdPacking::Native,
+            2
+        )));
+        let f = OutputFormat::dsd(2_822_400, DsdPacking::Dop, 2);
+        assert_eq!(o.open(f).unwrap(), f);
+        // A correctly packed DoP stream has no marker errors…
+        let mut packer = Packer::new(DsdPacking::Dop, 2);
+        let bytes = vec![0x69u8; 64];
+        let mut words = Vec::new();
+        packer.push(&[&bytes, &bytes], &mut words);
+        o.write(&words[..16]).unwrap();
+        o.write(&words[16..]).unwrap();
+        assert_eq!(o.frames_written(), 32);
+        assert_eq!(o.dop_marker_errors(), 0);
+        // …and plain PCM written in DoP mode is caught.
+        o.write(&[0i32; 8]).unwrap();
+        assert_eq!(o.dop_marker_errors(), 4);
+        assert_eq!(
+            device_info().dsd.max_rate_label().as_deref(),
+            Some("DSD1024")
+        );
     }
 }

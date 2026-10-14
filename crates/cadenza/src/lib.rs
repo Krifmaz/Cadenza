@@ -8,5 +8,6 @@ pub mod api;
 pub mod config;
 pub mod decode;
 pub mod encore;
+pub mod endpoint;
 pub mod engine;
 pub mod output;

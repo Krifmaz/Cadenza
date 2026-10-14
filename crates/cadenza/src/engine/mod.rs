@@ -2,11 +2,12 @@
 //! DSP pipeline and writes to the output. [`Engine`] is the cheap-to-clone handle; the
 //! HTTP API, the CLI and the Encore client all talk to the same one.
 
+pub mod decoder;
 mod worker;
 
 use crate::config::Settings;
 use crate::decode::Source;
-use crate::output::OutputFormat;
+use crate::output::{DsdCaps, OutputFormat};
 use cadenza_dsp::{CoefficientCache, SignalPath, Volume};
 use serde::{Deserialize, Serialize};
 use std::sync::mpsc::{self, Sender};
@@ -115,6 +116,13 @@ pub struct Status {
     pub output_format: Option<OutputFormat>,
     /// Sample rates the current output device accepts (at the configured depth).
     pub output_rates: Vec<u32>,
+    /// What the current output device does with DSD (DoP / native layouts / top rate), so
+    /// the UI can grey out rates the device stops short of.
+    #[serde(default)]
+    pub output_dsd: DsdCaps,
+    /// Whether the output is exclusive (hog / direct), i.e. bit-perfect capable.
+    #[serde(default)]
+    pub output_exclusive: bool,
     /// Frames the output has accepted since it was opened (diagnostics).
     pub output_frames: u64,
     /// How many times playback has come to a stop (queue finished, or `Stop`). Sample it

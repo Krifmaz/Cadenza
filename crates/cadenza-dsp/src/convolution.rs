@@ -9,8 +9,25 @@
 //! its `L` sub-filters).
 
 use crate::fft::{next_pow2, RealFft};
+use rayon::prelude::*;
 use rustfft::num_complex::Complex;
 use std::sync::Arc;
+
+/// Below this many complex multiply-accumulates per block the MAC runs on the calling
+/// thread; above it the bins are split across the rayon pool (whole blocks only, so the
+/// audio thread never waits on a half-finished partition).
+pub const PARALLEL_MAC_THRESHOLD: usize = 1 << 17;
+
+/// The interface every block convolution engine offers (CPU here, CUDA in `gpu::Convolver`):
+/// `input` and `out` are exactly one block long and `out` is the convolution output for the
+/// block that entered `latency()` samples ago.
+pub trait BlockConvolver {
+    /// Convolve one block: `input.len() == out.len() == block size`.
+    fn process_block(&mut self, input: &[f64], out: &mut [f64]);
+    /// Samples between an input block entering and its output leaving (one block for
+    /// overlap-save engines).
+    fn latency(&self) -> usize;
+}
 
 /// The spectra of one impulse response cut into partitions of `block` samples.
 #[derive(Clone, Debug)]
@@ -57,6 +74,12 @@ impl SpectralFilter {
     pub fn partitions(&self) -> usize {
         self.partitions.len()
     }
+
+    /// The partition spectra themselves (`block + 1` bins each, `realfft` half spectra),
+    /// for engines that keep their own copy – the CUDA convolver uploads them once.
+    pub fn partition_spectra(&self) -> &[Vec<Complex<f64>>] {
+        &self.partitions
+    }
 }
 
 /// Frequency-domain delay line: the spectra of the most recent input blocks.
@@ -85,13 +108,45 @@ impl Fdl {
     }
 
     /// `out = Σ_p X[t − p] · H_p`: the spectrum of the next output block for `filter`.
+    ///
+    /// Large products (many partitions × many bins) are split across bins on the rayon
+    /// pool; every thread sums all partitions for its range of bins, so there is no
+    /// reduction step and the inner loop is a plain fused multiply-add over four `f64`
+    /// streams (SIMD friendly).
     pub fn convolve(&self, filter: &SpectralFilter, out: &mut [Complex<f64>]) {
+        let depth = self.count.min(filter.partitions.len());
+        let work = depth * out.len();
+        if work >= PARALLEL_MAC_THRESHOLD && rayon::current_num_threads() > 1 {
+            let chunk = (out.len() / (2 * rayon::current_num_threads())).max(1024);
+            out.par_chunks_mut(chunk).enumerate().for_each(|(i, o)| {
+                let start = i * chunk;
+                self.convolve_range(filter, depth, start, o);
+            });
+        } else {
+            self.convolve_range(filter, depth, 0, out);
+        }
+    }
+
+    /// The MAC for bins `start..start + out.len()`.
+    #[inline]
+    fn convolve_range(
+        &self,
+        filter: &SpectralFilter,
+        depth: usize,
+        start: usize,
+        out: &mut [Complex<f64>],
+    ) {
         out.fill(Complex::new(0.0, 0.0));
         let n = self.spectra.len();
-        for (p, h) in filter.partitions.iter().enumerate().take(self.count) {
-            let x = &self.spectra[(self.head + p) % n];
+        let end = start + out.len();
+        for (p, h) in filter.partitions.iter().enumerate().take(depth) {
+            let x = &self.spectra[(self.head + p) % n][start..end];
+            let h = &h[start..end];
             for ((o, a), b) in out.iter_mut().zip(x).zip(h) {
-                *o += a * b;
+                let re = a.re * b.re - a.im * b.im;
+                let im = a.re * b.im + a.im * b.re;
+                o.re += re;
+                o.im += im;
             }
         }
     }
@@ -105,33 +160,51 @@ impl Fdl {
     }
 }
 
+/// The inverse-FFT scratch one [`BlockEngine::output_with`] call needs. A caller that
+/// evaluates several filters against the same engine in parallel (the polyphase upsampler)
+/// owns one per worker.
+#[derive(Debug)]
+pub struct OutputScratch {
+    fft: RealFft,
+    spec: Vec<Complex<f64>>,
+    time: Vec<f64>,
+}
+
+impl OutputScratch {
+    /// Scratch for an engine with the given block size.
+    pub fn new(block: usize) -> Self {
+        let fft = RealFft::new(2 * block);
+        let spec = fft.spectrum();
+        Self {
+            fft,
+            spec,
+            time: vec![0.0; 2 * block],
+        }
+    }
+}
+
 /// The overlap-save front end shared by the convolver and the upsampler: gathers input
 /// into blocks, transforms each one and keeps the spectra in an [`Fdl`].
 #[derive(Debug)]
 pub struct BlockEngine {
     block: usize,
-    fft: RealFft,
     /// `[previous block | current block]`; the current block fills from `block + filled`.
     frame: Vec<f64>,
     filled: usize,
-    spec: Vec<Complex<f64>>,
-    time: Vec<f64>,
+    scratch: OutputScratch,
     fdl: Fdl,
 }
 
 impl BlockEngine {
     /// An engine with the given block size whose FDL remembers `depth` blocks.
     pub fn new(block: usize, depth: usize) -> Self {
-        let fft = RealFft::new(2 * block);
-        let spec = fft.spectrum();
+        let scratch = OutputScratch::new(block);
         Self {
             block,
             frame: vec![0.0; 2 * block],
             filled: 0,
-            time: vec![0.0; 2 * block],
-            fdl: Fdl::new(depth, spec.len()),
-            spec,
-            fft,
+            fdl: Fdl::new(depth, scratch.spec.len()),
+            scratch,
         }
     }
 
@@ -145,8 +218,19 @@ impl BlockEngine {
         self.filled
     }
 
+    /// A fresh [`OutputScratch`] matching this engine.
+    pub fn scratch(&self) -> OutputScratch {
+        OutputScratch::new(self.block)
+    }
+
+    /// The frequency-domain delay line (the newest block's spectrum first).
+    pub fn fdl(&self) -> &Fdl {
+        &self.fdl
+    }
+
     /// Feed input; every time a block completes, `on_block` receives the engine so it can
-    /// call [`BlockEngine::output`] for each filter it is interested in.
+    /// call [`BlockEngine::output`] (or [`BlockEngine::output_with`]) for each filter it is
+    /// interested in.
     pub fn push(&mut self, input: &[f64], mut on_block: impl FnMut(&mut BlockEngine)) {
         let mut rest = input;
         while !rest.is_empty() {
@@ -156,9 +240,11 @@ impl BlockEngine {
             self.filled += take;
             rest = &rest[take..];
             if self.filled == self.block {
-                self.time.copy_from_slice(&self.frame);
-                self.fft.forward(&mut self.time, &mut self.spec);
-                self.fdl.push(&self.spec);
+                self.scratch.time.copy_from_slice(&self.frame);
+                self.scratch
+                    .fft
+                    .forward(&mut self.scratch.time, &mut self.scratch.spec);
+                self.fdl.push(&self.scratch.spec);
                 on_block(self);
                 // The current block becomes the "previous" half of the next frame.
                 self.frame.copy_within(self.block.., 0);
@@ -169,10 +255,32 @@ impl BlockEngine {
 
     /// Within `on_block`: the newest output block (`block` samples) for `filter`, appended to `out`.
     pub fn output(&mut self, filter: &SpectralFilter, out: &mut Vec<f64>) {
-        self.fdl.convolve(filter, &mut self.spec);
-        self.fft.inverse(&mut self.spec, &mut self.time);
+        let Self { fdl, scratch, .. } = self;
+        Self::output_into(fdl, filter, scratch, out);
+    }
+
+    /// Like [`BlockEngine::output`] but with caller-owned scratch, so several filters can be
+    /// evaluated against the same delay line from several threads at once.
+    pub fn output_with(
+        &self,
+        filter: &SpectralFilter,
+        scratch: &mut OutputScratch,
+        out: &mut Vec<f64>,
+    ) {
+        Self::output_into(&self.fdl, filter, scratch, out);
+    }
+
+    fn output_into(
+        fdl: &Fdl,
+        filter: &SpectralFilter,
+        scratch: &mut OutputScratch,
+        out: &mut Vec<f64>,
+    ) {
+        fdl.convolve(filter, &mut scratch.spec);
+        scratch.fft.inverse(&mut scratch.spec, &mut scratch.time);
         // Overlap-save: the first half is circular wrap-around, the second half is valid.
-        out.extend_from_slice(&self.time[self.block..]);
+        let block = scratch.time.len() / 2;
+        out.extend_from_slice(&scratch.time[block..]);
     }
 
     /// Forget all history.
@@ -254,6 +362,50 @@ impl Convolver {
         self.engine.reset();
         self.input_samples = 0;
         self.output_samples = 0;
+    }
+}
+
+impl BlockConvolver for Convolver {
+    fn process_block(&mut self, input: &[f64], out: &mut [f64]) {
+        assert_eq!(input.len(), self.block(), "process_block wants exactly one block");
+        assert_eq!(out.len(), self.block(), "process_block wants exactly one block");
+        assert_eq!(self.engine.pending(), 0, "process_block after a partial push");
+        let mut tmp = Vec::with_capacity(self.block());
+        self.push(input, &mut tmp);
+        out.copy_from_slice(&tmp);
+    }
+
+    fn latency(&self) -> usize {
+        self.block()
+    }
+}
+
+/// Run one convolver per channel over `inputs` (one deinterleaved buffer per channel),
+/// appending to the matching `outs`; channels run in parallel on the rayon pool when there
+/// is more than one. With `flush`, every convolver is flushed afterwards.
+pub fn process_channels(
+    convolvers: &mut [Convolver],
+    inputs: &[Vec<f64>],
+    outs: &mut [Vec<f64>],
+    flush: bool,
+) {
+    assert!(convolvers.len() == inputs.len() && inputs.len() == outs.len());
+    let run = |(conv, (inp, out)): (&mut Convolver, (&Vec<f64>, &mut Vec<f64>))| {
+        conv.push(inp, out);
+        if flush {
+            conv.flush(out);
+        }
+    };
+    if convolvers.len() > 1 {
+        convolvers
+            .par_iter_mut()
+            .zip(inputs.par_iter().zip(outs.par_iter_mut()))
+            .for_each(run);
+    } else {
+        convolvers
+            .iter_mut()
+            .zip(inputs.iter().zip(outs.iter_mut()))
+            .for_each(run);
     }
 }
 
@@ -372,6 +524,58 @@ mod tests {
         assert_eq!(out.len(), 200);
         for (a, b) in x.iter().zip(&out) {
             assert!((a - b).abs() < 1e-12);
+        }
+    }
+
+    #[test]
+    fn block_convolver_trait_matches_push_and_parallel_mac_matches_serial() {
+        // 40 partitions × 2049 bins is above the parallel threshold.
+        let h: Vec<f64> = (0..40 * 2048)
+            .map(|i| ((i as f64) * 0.013).sin() / (1.0 + i as f64 * 0.01))
+            .collect();
+        let x: Vec<f64> = (0..8 * 2048).map(|i| ((i as f64) * 0.37).cos()).collect();
+        let mut serial = Convolver::with_block(&h, 2048);
+        let mut want = Vec::new();
+        serial.push(&x, &mut want);
+
+        let mut c = Convolver::with_block(&h, 2048);
+        assert_eq!(c.latency(), 2048);
+        let mut got = Vec::new();
+        let mut blk = vec![0.0; 2048];
+        for chunk in x.chunks(2048) {
+            c.process_block(chunk, &mut blk);
+            got.extend_from_slice(&blk);
+        }
+        assert_eq!(got.len(), want.len());
+        for (a, b) in want.iter().zip(&got) {
+            assert!((a - b).abs() < 1e-12, "{a} vs {b}");
+        }
+        // And the parallel MAC agrees with a direct evaluation.
+        let direct_tail = direct(&x[..3000], &h);
+        let mut d = Convolver::with_block(&h, 2048);
+        let mut out = Vec::new();
+        d.push(&x[..3000], &mut out);
+        d.flush(&mut out);
+        for (a, b) in direct_tail.iter().zip(&out) {
+            assert!((a - b).abs() < 1e-9, "{a} vs {b}");
+        }
+    }
+
+    #[test]
+    fn channels_run_in_parallel_with_identical_results() {
+        let h: Vec<f64> = (0..300).map(|i| (-(i as f64) / 40.0).exp()).collect();
+        let inputs: Vec<Vec<f64>> = (0..4)
+            .map(|c| (0..1000).map(|i| ((i * (c + 1)) as f64 * 0.05).sin()).collect())
+            .collect();
+        let mut convs: Vec<Convolver> = (0..4).map(|_| Convolver::with_block(&h, 128)).collect();
+        let mut outs = vec![Vec::new(); 4];
+        process_channels(&mut convs, &inputs, &mut outs, true);
+        for (inp, out) in inputs.iter().zip(&outs) {
+            let want = direct(inp, &h);
+            assert_eq!(out.len(), want.len());
+            for (a, b) in want.iter().zip(out) {
+                assert!((a - b).abs() < 1e-10);
+            }
         }
     }
 

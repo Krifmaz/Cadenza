@@ -1,0 +1,57 @@
+# Cadenza CI: tests + clippy on Linux (ALSA), build-only on macOS (CoreAudio hog mode)
+# and Windows (WASAPI exclusive). Runs on pull requests and by hand – never on plain
+# pushes, to save minutes.
+name: CI
+
+on:
+  pull_request:
+  workflow_dispatch:
+
+env:
+  CARGO_TERM_COLOR: always
+  RUSTFLAGS: -D warnings
+
+jobs:
+  linux:
+    name: Linux · test + clippy (alsa)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy, rustfmt
+      - name: System libraries (ALSA)
+        run: sudo apt-get update && sudo apt-get install -y libasound2-dev pkg-config
+      - uses: Swatinem/rust-cache@v2
+      - name: Format
+        run: cargo fmt --all -- --check
+      - name: Clippy
+        run: cargo clippy --workspace --all-targets --features alsa -- -D warnings
+      - name: Test
+        run: cargo test --release --workspace --features alsa
+      - name: Build with CUDA feature (no toolkit needed)
+        run: cargo build --release --features cuda
+
+  macos:
+    name: macOS · build (coreaudio)
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - name: Build
+        run: cargo build --release --features coreaudio
+      - name: Unit tests (output + endpoint, no device needed)
+        run: cargo test --release -p cadenza --features coreaudio --lib -- output:: endpoint::
+
+  windows:
+    name: Windows · build (wasapi)
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - name: Build
+        run: cargo build --release --features wasapi
+      - name: Unit tests (output + endpoint, no device needed)
+        run: cargo test --release -p cadenza --features wasapi --lib -- output:: endpoint::

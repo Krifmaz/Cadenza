@@ -50,10 +50,19 @@ fn main() {
             devices();
             Ok(())
         }
-        Commands::Filters => {
-            println!("{:<16} FILTER", "ID");
+        Commands::Filters { in_rate, out_rate } => {
+            let in_rate = in_rate.unwrap_or(44_100);
+            let out_rate = out_rate.unwrap_or(705_600);
+            println!(
+                "{:<24} {:>9} {:>10} {:>9} {:>10}  FILTER   ({} Hz -> {} Hz)",
+                "ID", "TAPS", "TRANS Hz", "STOP dB", "LATENCY s", in_rate, out_rate
+            );
             for k in cadenza_dsp::FilterKind::catalog() {
-                println!("{:<16} {}", k.id(), k.label());
+                let i = k.describe(in_rate, out_rate, cadenza_dsp::fir::DEFAULT_ATTENUATION_DB);
+                println!(
+                    "{:<24} {:>9} {:>10.0} {:>9.0} {:>10.4}  {}",
+                    i.id, i.taps_at_rate, i.transition_hz, i.stopband_db, i.latency_seconds, i.label
+                );
             }
             println!("\nAny tap count works too: sinc-l-300000, sinc-ma-2m. Phase: l=linear m=minimum, a=apodizing.");
             Ok(())

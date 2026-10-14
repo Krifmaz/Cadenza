@@ -1,7 +1,10 @@
 //! The TOML configuration file (`~/.config/cadenza/config.toml` or the platform
 //! equivalent) and the runtime [`Settings`] the API exposes.
 
+use crate::endpoint::EndpointConfig;
+use cadenza_dsp::dsd::{DsdConfig, DsdModulator, DsdOversampling, DsdPacking, DsdRate, OutputMode};
 use cadenza_dsp::eq::Band;
+use cadenza_dsp::{GpuConfig, MatrixConfig};
 use serde::{Deserialize, Serialize};
 use std::fmt;
 use std::path::{Path, PathBuf};
@@ -80,7 +83,7 @@ impl<'de> Deserialize<'de> for RateSetting {
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(default)]
 pub struct OutputConfig {
-    /// `null`, `cpal`, `alsa` or `wasapi`.
+    /// `null`, `cpal`, `alsa`, `wasapi`, `coreaudio` or `endpoint://<name>`.
     pub backend: String,
     /// Device id as listed by `cadenza devices` (empty = default).
     pub device: String,
@@ -99,7 +102,7 @@ impl Default for OutputConfig {
             device: String::new(),
             rate: RateSetting::Auto,
             bits: 24,
-            max_rate: 768_000,
+            max_rate: crate::output::MAX_PCM_RATE,
         }
     }
 }
@@ -126,10 +129,35 @@ pub struct DspConfig {
     pub eq: Vec<Band>,
     /// EQ master switch.
     pub eq_enabled: bool,
+    /// Intersample-peak headroom in dB after the upsampler; `None` (absent in TOML, `null`
+    /// in JSON) = automatic: −3 dB when upsampling, 0 dB otherwise.
+    pub headroom_db: Option<f64>,
+    /// Keep the transparent soft clipper as the last guard before quantisation.
+    pub soft_clip: bool,
+    /// `pcm` (quantiser) or `dsd` (sigma-delta modulator).
+    pub output_mode: OutputMode,
+    /// DSD output rate (`dsd64` … `dsd2048`; the family follows the source).
+    pub dsd_rate: DsdRate,
+    /// `asdm5`, `asdm7`, `dsd5v2` or `dsd7v2`.
+    pub dsd_modulator: DsdModulator,
+    /// `dop` or `native`.
+    pub dsd_packing: DsdPacking,
+    /// Gain before the modulator in dB (headroom; default −3).
+    pub dsd_gain_db: f64,
+    /// `staged` (long FIR to f_dsd/8 or /16, then a short polyphase stage) or `full`
+    /// (the long FIR runs to the DSD rate itself: 1024×/2048× PCM inside the pipeline).
+    pub dsd_oversampling: DsdOversampling,
+    /// DSD sources (DSF/DFF) go to a DSD output untouched when the rates match and
+    /// nothing else needs to touch the samples; off = always re-modulate through PCM.
+    pub dsd_passthrough: bool,
+    /// `gpu = auto | off | cuda` and `gpu_device = 0`.
+    #[serde(flatten)]
+    pub gpu: GpuConfig,
 }
 
 impl Default for DspConfig {
     fn default() -> Self {
+        let dsd = DsdConfig::default();
         Self {
             bit_perfect: false,
             filter: cadenza_dsp::FilterKind::default().id(),
@@ -140,7 +168,35 @@ impl Default for DspConfig {
             convolution: String::new(),
             eq: Vec::new(),
             eq_enabled: true,
+            headroom_db: None,
+            soft_clip: true,
+            output_mode: OutputMode::Pcm,
+            dsd_rate: dsd.rate,
+            dsd_modulator: dsd.modulator,
+            dsd_packing: dsd.packing,
+            dsd_gain_db: dsd.gain_db,
+            dsd_oversampling: dsd.oversampling,
+            dsd_passthrough: true,
+            gpu: GpuConfig::default(),
         }
+    }
+}
+
+impl DspConfig {
+    /// The DSD part of the pipeline configuration.
+    pub fn dsd(&self) -> DsdConfig {
+        DsdConfig {
+            rate: self.dsd_rate,
+            modulator: self.dsd_modulator,
+            packing: self.dsd_packing,
+            gain_db: self.dsd_gain_db,
+            oversampling: self.dsd_oversampling,
+        }
+    }
+
+    /// Whether the chain is asked for DSD output.
+    pub fn dsd_output(&self) -> bool {
+        self.output_mode == OutputMode::Dsd && !self.bit_perfect
     }
 }
 
@@ -191,6 +247,8 @@ pub struct Settings {
     pub output: OutputConfig,
     /// DSP section.
     pub dsp: DspConfig,
+    /// Pipeline matrix (`[matrix]`): routing, per-output chains, crossovers.
+    pub matrix: MatrixConfig,
 }
 
 /// The whole file.
@@ -201,10 +259,14 @@ pub struct Config {
     pub output: OutputConfig,
     /// DSP.
     pub dsp: DspConfig,
+    /// Pipeline matrix.
+    pub matrix: MatrixConfig,
     /// HTTP server.
     pub server: ServerConfig,
     /// Encore.
     pub encore: EncoreConfig,
+    /// `cadenza endpoint` (the DAC-side network endpoint).
+    pub endpoint: EndpointConfig,
 }
 
 impl Config {
@@ -239,6 +301,7 @@ impl Config {
         Settings {
             output: self.output.clone(),
             dsp: self.dsp.clone(),
+            matrix: self.matrix.clone(),
         }
     }
 
@@ -246,6 +309,7 @@ impl Config {
     pub fn apply(&mut self, s: &Settings) {
         self.output = s.output.clone();
         self.dsp = s.dsp.clone();
+        self.matrix = s.matrix.clone();
     }
 }
 
@@ -293,5 +357,76 @@ mod tests {
             Config::default()
         );
         let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn v2_keys_round_trip_and_default_sensibly() {
+        let d = Config::default();
+        assert_eq!(d.dsp.output_mode, OutputMode::Pcm);
+        assert_eq!(d.dsp.dsd_rate, DsdRate::Dsd256);
+        assert_eq!(d.dsp.dsd_modulator, DsdModulator::Asdm7);
+        assert_eq!(d.dsp.dsd_gain_db, -3.0);
+        assert_eq!(d.dsp.headroom_db, None);
+        assert!(d.dsp.soft_clip && d.dsp.dsd_passthrough);
+        assert_eq!(d.dsp.gpu.mode, cadenza_dsp::GpuMode::Auto);
+        assert!(!d.matrix.enabled);
+        assert_eq!(d.endpoint.buffer_ms, 150);
+        // Every key the README documents parses, flat `gpu` / `gpu_device` included.
+        let c: Config = toml::from_str(
+            r#"
+[output]
+backend = "endpoint://Living room"
+[dsp]
+output_mode = "dsd"
+dsd_rate = "dsd512"
+dsd_modulator = "dsd7v2"
+dsd_packing = "native"
+dsd_gain_db = -4.5
+dsd_oversampling = "full"
+dsd_passthrough = false
+headroom_db = -2.0
+soft_clip = false
+dither = "lns15"
+filter = "poly-sinc-gauss-l-long"
+gpu = "cuda"
+gpu_device = 1
+[matrix]
+enabled = true
+preset = "2.1"
+[matrix.stereo]
+balance_db = 1.5
+[endpoint]
+name = "Kitchen"
+buffer_ms = 300
+"#,
+        )
+        .unwrap();
+        assert_eq!(c.dsp.output_mode, OutputMode::Dsd);
+        assert_eq!(c.dsp.dsd().rate, DsdRate::Dsd512);
+        assert_eq!(c.dsp.dsd().modulator, DsdModulator::Dsd7v2);
+        assert_eq!(c.dsp.dsd().packing, DsdPacking::Native);
+        assert_eq!(c.dsp.dsd().gain_db, -4.5);
+        assert_eq!(c.dsp.dsd().oversampling, DsdOversampling::Full);
+        assert!(!c.dsp.dsd_passthrough && !c.dsp.soft_clip);
+        assert_eq!(c.dsp.headroom_db, Some(-2.0));
+        assert_eq!(c.dsp.gpu.mode, cadenza_dsp::GpuMode::Cuda);
+        assert_eq!(c.dsp.gpu.device, 1);
+        assert_eq!(c.matrix.preset, "2.1");
+        assert_eq!(c.matrix.stereo.balance_db, 1.5);
+        assert_eq!(c.endpoint.name, "Kitchen");
+        assert!(c.dsp.dsd_output());
+        let text = toml::to_string_pretty(&c).unwrap();
+        assert!(text.contains("gpu = \"cuda\""), "{text}");
+        assert!(text.contains("output_mode = \"dsd\""), "{text}");
+        let back: Config = toml::from_str(&text).unwrap();
+        assert_eq!(c, back);
+        // JSON (the API) carries the same shape, `headroom_db: null` for automatic.
+        let j = serde_json::to_value(d.settings()).unwrap();
+        assert_eq!(j["dsp"]["headroom_db"], serde_json::Value::Null);
+        assert_eq!(j["dsp"]["gpu"], "auto");
+        assert_eq!(j["dsp"]["gpu_device"], 0);
+        assert_eq!(j["matrix"]["preset"], "stereo");
+        let s: Settings = serde_json::from_value(j).unwrap();
+        assert_eq!(s, d.settings());
     }
 }

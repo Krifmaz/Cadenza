@@ -51,6 +51,12 @@ Dual-licensed under MIT or Apache-2.0.
   instantly over Encore's event stream, streams the original files, and reports plays
   like Encore's own player.
 - **Signal path** report: every active stage with its parameters, as JSON.
+- **CUDA GPU offload (64-bit)** of the partitioned convolution behind the long-FIR
+  upsampler and room correction (feature `cuda`): our own Stockham FFT kernels compiled
+  at run time by the driver's NVRTC, `f64` throughout, filter spectra and the
+  frequency-delay line resident on the card. Needs only an NVIDIA driver (≥ 525), no CUDA
+  toolkit – and the same binary runs without a GPU (`gpu = auto | off | cuda`,
+  `gpu_device`; the signal path shows `CUDA (RTX 4060) · 64-bit` or the CPU fallback).
 
 ## Running
 
@@ -58,6 +64,7 @@ Dual-licensed under MIT or Apache-2.0.
 cargo build --release                     # cpal output (default feature)
 cargo build --release --features alsa     # + direct ALSA hw: devices (Linux)
 cargo build --release --features wasapi   # + WASAPI exclusive (Windows)
+cargo build --release --features cuda     # + CUDA offload (NVIDIA; no toolkit needed to build)
 
 cadenza devices                           # list output devices and what they support
 cadenza filters                           # list upsampling filters
@@ -96,6 +103,30 @@ url = "http://192.168.1.10:8080"
 username = "me"
 password = "secret"     # or cookie = "encore_session=…"
 ```
+
+## GPU offload (CUDA)
+
+Build with `--features cuda`. Nothing links against CUDA: `cudarc` loads `libcuda.so.1` /
+`nvcuda.dll` at run time, so the build needs **no CUDA toolkit** and the binary starts on
+machines without a GPU. At start-up Cadenza probes the driver and the chosen card and logs
+one line: `GPU: CUDA (RTX 4060) · 64-bit`, or `GPU: CUDA unavailable (…); using the CPU
+(64-bit)`. The kernels (`crates/cadenza-dsp/src/gpu/kernels.cu`) are compiled on the user's
+machine by the NVRTC that ships with the driver.
+
+Requirements: an NVIDIA card and **driver 525 or newer** (the CUDA 12 driver API; nothing
+else to install). Settings in `[dsp]`:
+
+| key          | values                | meaning                                              |
+|--------------|-----------------------|------------------------------------------------------|
+| `gpu`        | `auto` / `off` / `cuda` | `auto` uses a card when present; `cuda` warns when it cannot |
+| `gpu_device` | `0`, `1`, …           | which card, when there are several                   |
+
+What runs on the GPU: the partitioned convolution engine (FFT → multiply-accumulate over
+all partitions → inverse FFT, with the frequency-delay line kept on the device) that both
+the long-FIR upsampler and room-correction convolution use. Everything is `double` – no
+`f32` anywhere on the GPU path. The sigma-delta modulator is sequential and stays on the
+CPU. Device memory: a filter of *P* partitions at block *B* holds *P × B × 32* bytes of
+spectra plus the same for the delay line (a 16M-tap filter at block 16384: about 1 GiB).
 
 ## Architecture
 
