@@ -89,7 +89,9 @@ Dual-licensed under MIT or Apache-2.0.
 - **Outputs**: `null` (tests, headless boxes), `cpal` shared mode on every OS, **ALSA
   `hw:`** exclusive on Linux with native DSD and DoP (feature `alsa`), **WASAPI
   exclusive** on Windows with DoP (feature `wasapi`; native DSD only where a driver exposes
-  a subformat GUID, via `CADENZA_WASAPI_DSD_GUID` – Windows has no standard one), **CoreAudio
+  a subformat GUID, via `CADENZA_WASAPI_DSD_GUID` – Windows has no standard one), **ASIO**
+  on Windows with native DSD and DoP (feature `asio`; our own loader, no Steinberg SDK, see
+  below), **CoreAudio
   hog mode** on macOS with device rate/format switching, integer mode where offered and
   DoP (feature `coreaudio`). `cadenza devices` lists rates, bits, channels, DSD support
   (DoP / native layouts / top rate) and exclusive mode. "Auto" rate picks the highest
@@ -152,8 +154,8 @@ implemented and tested here; the notes say where we differ.
 | Convolution | yes | yes, any length, per channel | matched |
 | Parametric EQ | yes (pipeline setup) | 16 biquads global + per matrix output | matched |
 | Pipeline matrix / crossovers | yes | N→N up to 32 ch, LR/Butterworth/linear-phase FIR crossovers, delays, polarity, presets | matched |
-| Exclusive output | ASIO/WASAPI, CoreAudio hog, ALSA | WASAPI exclusive, CoreAudio hog + integer mode, ALSA hw: | matched; **no ASIO** |
-| Native DSD on Windows | via ASIO | DoP only (no standard WASAPI DSD GUID; opt-in driver GUID) | not matched without ASIO |
+| Exclusive output | ASIO/WASAPI, CoreAudio hog, ALSA | ASIO (own loader, no SDK), WASAPI exclusive, CoreAudio hog + integer mode, ALSA hw: | matched; ASIO tested against a fake driver only, not yet with a real one |
+| Native DSD on Windows | via ASIO | via ASIO (driver switched to DSD, 1-bit bytes in either bit order) and DoP; WASAPI: DoP, opt-in driver GUID | matched in code; not yet tested on a DAC |
 | Network endpoint | NAA | Cadenza endpoint (`cadenza endpoint`, mDNS, TCP, ack-paced, PCM + DSD) | matched; our own protocol, not NAA-compatible |
 | GPU offload | CUDA only (64-bit) | CUDA (64-bit, driver only – no toolkit) **and wgpu: Vulkan / Metal / DX12 on AMD, Intel, Apple Silicon and NVIDIA** (64-bit where the card has it, double-f32 ≈48-bit elsewhere); also builds and runs without a GPU; the upsampler's FFT polyphase core, the time-domain 44.1 ↔ 48 kHz stage and the room convolution run on it, verified against the CPU engine (CUDA through a CPU model of the exact kernels; wgpu on real Vulkan in CI with Mesa's software driver: 1.2–2.4e-15 relative in f64, 1–3e-14 in double-f32) and benchmarked (`cadenza bench`, row `upsampling (GPU)`) | exceeded on hardware: HQPlayer has no AMD / Intel / Apple GPU support. Not yet measured on real AMD / Intel / Apple cards, and the CUDA kernels are not yet run on an NVIDIA card since the rational stage was added (none here) |
 | 64-bit processing | yes | yes everywhere | matched |
@@ -193,9 +195,12 @@ to do it:
    real time needs about 37 ns). So the modulator stays one core per channel; the GPU's job is to take
    every filter off the CPU so those cores are free for it. HQPlayer has the same single-core limit.
    DSD2048 is already ours alone.
-3. **ASIO on Windows** – a thin runtime loader for the DAC driver's ASIO COM interface (no SDK bundled, the
-   FlexASIO approach), which brings native DSD on Windows with it. Also the WASAPI native-DSD GUID some
-   drivers accept, so DSD works without ASIO.
+3. **ASIO on Windows** – done in code: our own runtime loader for the DAC driver's ASIO COM interface (no
+   SDK bundled, the FlexASIO approach), PCM in every ASIO sample type, DoP, and native DSD (the driver is
+   switched to DSD and fed 1-bit bytes). The host is tested end to end against a fake driver that
+   implements the real interface; it has **not yet run against a real ASIO driver or DAC** (no Windows
+   machine here). The WASAPI native-DSD GUID stays opt-in (`CADENZA_WASAPI_DSD_GUID`): there is no
+   standard one to ship.
 4. **UPnP / OpenHome renderer and AirPlay receiver** in the player and the endpoint, so Audirvana,
    mconnect, BubbleUPnB and phones can play into Cadenza. Roon talks to HQPlayer only through the closed
    NAA protocol; Cadenza becomes a Roon zone through Encore's Roon extension instead.
@@ -234,6 +239,7 @@ and automatic device linking, every stage of the chain reported in the signal pa
 cargo build --release                     # cpal output (default feature)
 cargo build --release --features alsa     # + direct ALSA hw: devices, native DSD (Linux)
 cargo build --release --features wasapi   # + WASAPI exclusive, DoP (Windows)
+cargo build --release --features asio     # + ASIO drivers, native DSD and DoP (Windows)
 cargo build --release --features coreaudio # + CoreAudio hog mode, DoP (macOS)
 cargo build --release --features cuda     # + CUDA offload (NVIDIA; no toolkit needed to build)
 cargo build --release --features wgpu     # + GPU offload on AMD / Intel / Apple / NVIDIA (Vulkan, Metal, DX12)
@@ -262,7 +268,7 @@ The configuration lives in `~/.config/cadenza/config.toml` (platform equivalent 
 
 ```toml
 [output]
-backend = "cpal"        # null | cpal | alsa | wasapi | coreaudio | "endpoint://<name>"
+backend = "cpal"        # null | cpal | alsa | wasapi | asio | coreaudio | "endpoint://<name>"
 device = ""             # device name or ALSA "hw:1,0"; empty = default
 rate = "auto"           # "auto" | "source" | a number such as 352800 (PCM)
 bits = 24               # 16 | 24 | 32 (PCM)
@@ -366,6 +372,31 @@ so it runs on Debian bookworm/trixie and newer), and publishes a GitHub release 
 `cadenza-<version>-linux-x86_64.tar.gz`, `cadenza-<version>-linux-aarch64.tar.gz` (each holds
 just `cadenza`) and `SHA256SUMS`. Encore downloads the archive for its architecture, checks
 it against `SHA256SUMS` and runs `cadenza render --describe` before switching to it.
+
+## ASIO (Windows)
+
+Build with `--features asio` and set `backend = "asio"`; `device` is the driver's name as
+installed (`cadenza devices` lists them), or empty for the first one. No Steinberg SDK is
+used: Cadenza reads the installed drivers from `HKLM\SOFTWARE\ASIO`, creates the chosen
+one through COM and talks to it through its binary interface (the FlexASIO approach).
+Only 64-bit drivers are visible to the 64-bit program.
+
+- **PCM**: the driver's rate is set to the stream's; every ASIO sample type is written
+  (16/24/32-bit integers in either byte order, right-aligned 32-bit containers, 32/64-bit
+  float – 24-bit audio is exact in all of them).
+- **DoP**: on integer channels of 24 bits or more (a float path could alter the markers).
+- **Native DSD**: when the driver supports it, it is switched to DSD
+  (`kAsioSetIoFormat`), its "sample rate" becomes the DSD bit rate, and every buffer holds
+  bytes of 8 one-bit samples in the bit order its channels declare. Silence is the DSD
+  idle pattern. `cadenza devices` shows `native dsd_u8` and the top rate the driver
+  accepts.
+- The driver's reset request (its control panel changed the buffer size, the device was
+  replugged) reopens the stream; a driver that stops calling back is reported after 3 s.
+
+Tested here: the whole host – negotiation, buffers, callbacks, sample conversion, native
+DSD in both bit orders, pause, reset – against a fake driver implementing the real
+interface (`cargo test -p cadenza output::asio`). The Windows loader is compiled in CI.
+**Not yet tested with a real ASIO driver or DAC.**
 
 ## DSD
 

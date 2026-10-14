@@ -15,6 +15,10 @@ pub mod null;
 
 #[cfg(all(feature = "alsa", target_os = "linux"))]
 pub mod alsa_backend;
+// The ASIO host is platform independent (tested everywhere against a fake driver); only
+// its loader needs Windows.
+#[cfg(any(test, all(windows, feature = "asio")))]
+pub mod asio;
 #[cfg(all(feature = "coreaudio", target_os = "macos"))]
 pub mod coreaudio_backend;
 #[cfg(feature = "cpal")]
@@ -246,7 +250,7 @@ pub enum OutputError {
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(default)]
 pub struct DeviceInfo {
-    /// Backend id (`null`, `cpal`, `alsa`, `wasapi`, `coreaudio`, `endpoint`).
+    /// Backend id (`null`, `cpal`, `alsa`, `wasapi`, `asio`, `coreaudio`, `endpoint`).
     pub backend: String,
     /// The id to put in the configuration.
     pub id: String,
@@ -361,6 +365,8 @@ pub fn backends() -> Vec<&'static str> {
     v.push("alsa");
     #[cfg(all(feature = "wasapi", windows))]
     v.push("wasapi");
+    #[cfg(all(feature = "asio", windows))]
+    v.push("asio");
     #[cfg(all(feature = "coreaudio", target_os = "macos"))]
     v.push("coreaudio");
     v.push("endpoint");
@@ -399,6 +405,8 @@ pub fn list_devices() -> Vec<DeviceInfo> {
     out.extend(alsa_backend::list_devices());
     #[cfg(all(feature = "wasapi", windows))]
     out.extend(wasapi_backend::list_devices());
+    #[cfg(all(feature = "asio", windows))]
+    out.extend(asio::windows::list_devices());
     #[cfg(all(feature = "coreaudio", target_os = "macos"))]
     out.extend(coreaudio_backend::list_devices());
     out.extend(crate::endpoint::client::list_devices());
@@ -427,6 +435,8 @@ pub fn open_backend(backend: &str, device: &str) -> Result<Box<dyn Output>, Outp
         "alsa" => Ok(Box::new(alsa_backend::AlsaOutput::new(device)?)),
         #[cfg(all(feature = "wasapi", windows))]
         "wasapi" => Ok(Box::new(wasapi_backend::WasapiOutput::new(device)?)),
+        #[cfg(all(feature = "asio", windows))]
+        "asio" => Ok(Box::new(asio::windows::open(device)?)),
         #[cfg(all(feature = "coreaudio", target_os = "macos"))]
         "coreaudio" => Ok(Box::new(coreaudio_backend::CoreAudioOutput::new(device)?)),
         "endpoint" => Ok(Box::new(crate::endpoint::client::EndpointOutput::connect(
