@@ -50,7 +50,7 @@ jobs:
       - name: Build
         run: cargo build --release --features coreaudio,wgpu
       - name: Unit tests (output + endpoint, no device needed)
-        run: cargo test --release -p cadenza --features coreaudio --lib -- output:: endpoint::
+        run: "cargo test --release -p cadenza --features coreaudio --lib -- output:: endpoint::"
 
   windows:
     name: Windows · build (wasapi)
@@ -62,4 +62,4 @@ jobs:
       - name: Build
         run: cargo build --release --features wasapi,wgpu
       - name: Unit tests (output + endpoint, no device needed)
-        run: cargo test --release -p cadenza --features wasapi --lib -- output:: endpoint::
+        run: "cargo test --release -p cadenza --features wasapi --lib -- output:: endpoint::"
