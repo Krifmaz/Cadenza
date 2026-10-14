@@ -177,11 +177,18 @@ to do it:
    HQPlayer only offers fixed catalogue entries.
 9. **Noise shaping "auto"** – the remaining named shapers for parity, then a per-DAC automatic choice of
    shaper and dither from the output's measured noise floor.
-10. **Native desktop app for standalone use** – today a standalone Cadenza is `cadenza serve` plus its web
-    UI in a browser. A small native desktop app (Tauri, like Encore's) wraps the engine with its own window:
-    library folder, queue, device picker, every engine setting, signal path and meters, tray and media keys,
-    one installer per OS. No Encore server needed. HQPlayer's desktop UI is its weak spot, so this is where
-    a free program can look and feel better.
+10. **System-wide upsampler (standalone, no library, no player)** – Cadenza stays strictly an upsampler:
+    it takes the sound of any app or of the whole system and plays it into the DAC through the engine.
+    Two ways in, both with the existing engine settings page in a small tray window and nothing else:
+    * *Virtual output device* "Cadenza": pick it as the system or per-app output, Cadenza receives the
+      audio and plays it to the real DAC exclusively. macOS: a user-space HAL plugin (the BlackHole
+      approach, no kernel extension). Linux: a PipeWire sink. Windows: needs a signed kernel driver, so it
+      comes last (attestation signing through the Partner Center).
+    * *App capture*: grab one application's audio before the OS mixer touches it. macOS 14.2+ process
+      taps (public Core Audio API), Windows 10 2004+ process loopback (`ActivateAudioInterfaceAsync`),
+      PipeWire per-stream links on Linux. Available on every OS today without a driver.
+    Bit-perfect in: the virtual device follows the source rate (44.1/48 families) and the app's volume at
+    100 percent, so the OS has nothing to resample; the signal path shows when that is not the case.
 11. **Loopback verification** – play a test signal, capture it from an ADC or the DAC's monitor output, and
     show measured THD+N and a bit-perfect check. Proves the chain instead of trusting it.
 
