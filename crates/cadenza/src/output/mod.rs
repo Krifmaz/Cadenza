@@ -371,24 +371,21 @@ pub fn backends() -> Vec<&'static str> {
 /// compiled, CoreAudio hog mode on macOS if compiled, ALSA on Linux if compiled (and cpal
 /// is not), otherwise cpal, otherwise null.
 pub fn default_backend() -> &'static str {
-    #[cfg(all(feature = "wasapi", windows))]
-    {
-        return "wasapi";
+    if cfg!(all(feature = "wasapi", windows)) {
+        "wasapi"
+    } else if cfg!(all(feature = "coreaudio", target_os = "macos")) {
+        "coreaudio"
+    } else if cfg!(all(
+        feature = "alsa",
+        target_os = "linux",
+        not(feature = "cpal")
+    )) {
+        "alsa"
+    } else if cfg!(feature = "cpal") {
+        "cpal"
+    } else {
+        "null"
     }
-    #[cfg(all(feature = "coreaudio", target_os = "macos"))]
-    {
-        return "coreaudio";
-    }
-    #[cfg(all(feature = "alsa", target_os = "linux", not(feature = "cpal")))]
-    {
-        return "alsa";
-    }
-    #[cfg(feature = "cpal")]
-    {
-        return "cpal";
-    }
-    #[allow(unreachable_code)]
-    "null"
 }
 
 /// Every device of every compiled backend. Network endpoints found by mDNS so far are
