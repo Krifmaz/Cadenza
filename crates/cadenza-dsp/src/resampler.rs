@@ -101,7 +101,12 @@ pub fn pcm_output_rates_up_to(max: u32, include_modulator_rates: bool) -> Vec<u3
         .chain(RateFamily::F48.rates_up_to(max.min(MAX_PCM_RATE)))
         .collect();
     if include_modulator_rates {
-        rates.extend(DSD_MODULATOR_PCM_RATES.iter().copied().filter(|r| *r <= max));
+        rates.extend(
+            DSD_MODULATOR_PCM_RATES
+                .iter()
+                .copied()
+                .filter(|r| *r <= max),
+        );
     }
     rates.sort_unstable();
     rates.dedup();
@@ -113,11 +118,7 @@ pub fn pcm_output_rates_up_to(max: u32, include_modulator_rates: bool) -> Vec<u3
 /// for sources outside both families.
 pub fn preferred_output_rate(in_rate: u32, max: u32) -> u32 {
     match RateFamily::of(in_rate) {
-        Some(f) => f
-            .rates_up_to(max)
-            .last()
-            .copied()
-            .unwrap_or(in_rate),
+        Some(f) => f.rates_up_to(max).last().copied().unwrap_or(in_rate),
         None => pcm_output_rates_up_to(max, false)
             .last()
             .copied()
@@ -616,10 +617,24 @@ impl Resampler {
                     apodizing: false,
                     ..kind
                 };
-                let second = Self::stage(mid_rate, out_rate, channels, second_kind, attenuation_db, cache);
+                let second = Self::stage(
+                    mid_rate,
+                    out_rate,
+                    channels,
+                    second_kind,
+                    attenuation_db,
+                    cache,
+                );
                 vec![first, second]
             }
-            None => vec![Self::stage(in_rate, out_rate, channels, kind, attenuation_db, cache)],
+            None => vec![Self::stage(
+                in_rate,
+                out_rate,
+                channels,
+                kind,
+                attenuation_db,
+                cache,
+            )],
         };
         Ok(Self {
             in_rate,
@@ -779,12 +794,19 @@ impl Resampler {
         let expected = (self.input_frames * self.l as u64).div_ceil(self.m as u64);
         let mut carry = Vec::new();
         for s in &mut self.stages {
-            let mut out = if carry.is_empty() { Vec::new() } else { s.push(&carry) };
+            let mut out = if carry.is_empty() {
+                Vec::new()
+            } else {
+                s.push(&carry)
+            };
             out.extend(s.flush());
             carry = out;
         }
         let total = self.output_frames + (carry.len() / self.channels) as u64;
-        debug_assert!(total >= expected, "flush produced {total} < {expected} frames");
+        debug_assert!(
+            total >= expected,
+            "flush produced {total} < {expected} frames"
+        );
         let extra = total.saturating_sub(expected) as usize;
         carry.truncate(carry.len().saturating_sub(extra * self.channels));
         self.reset();
@@ -948,12 +970,22 @@ mod tests {
     fn cross_family_to_high_rate_is_cascaded_and_exact() {
         // 44.1 kHz → 384 kHz = ×1280/147: 160/147 time domain, then ×8 FFT.
         let cache = CoefficientCache::disabled();
-        let mut r =
-            Resampler::new(44100, 384000, 2, kind(1 << 14, Phase::Linear), 120.0, &cache).unwrap();
+        let mut r = Resampler::new(
+            44100,
+            384000,
+            2,
+            kind(1 << 14, Phase::Linear),
+            120.0,
+            &cache,
+        )
+        .unwrap();
         assert_eq!(r.ratio(), (1280, 147));
         let stages = r.stages();
         assert_eq!(stages.len(), 2, "{}", r.describe());
-        assert_eq!((stages[0].l, stages[0].m, stages[0].out_rate), (160, 147, 48000));
+        assert_eq!(
+            (stages[0].l, stages[0].m, stages[0].out_rate),
+            (160, 147, 48000)
+        );
         assert_eq!((stages[1].l, stages[1].m), (8, 1));
         assert!(matches!(stages[1].engine, Engine::FftPolyphase { .. }));
         assert!(r.describe().contains("→"));
@@ -966,7 +998,10 @@ mod tests {
             y.extend(r.push(chunk));
         }
         y.extend(r.flush());
-        assert_eq!(y.len() as u64, 2 * (x.len() as u64 / 2 * 1280).div_ceil(147));
+        assert_eq!(
+            y.len() as u64,
+            2 * (x.len() as u64 / 2 * 1280).div_ceil(147)
+        );
         let left: Vec<f64> = y.iter().step_by(2).copied().collect();
         let ideal = sine(1000.0, 384000, 1.0, 0.5);
         let margin = 384000 / 4;
@@ -986,15 +1021,29 @@ mod tests {
     #[test]
     fn x32_to_1536k_builds_and_uses_the_cascade() {
         let cache = CoefficientCache::disabled();
-        let r = Resampler::new(44100, MAX_PCM_RATE, 2, kind(1 << 12, Phase::Linear), 120.0, &cache)
-            .unwrap();
+        let r = Resampler::new(
+            44100,
+            MAX_PCM_RATE,
+            2,
+            kind(1 << 12, Phase::Linear),
+            120.0,
+            &cache,
+        )
+        .unwrap();
         assert_eq!(r.ratio(), (5120, 147));
         let s = r.stages();
         assert_eq!(s.len(), 2);
         assert_eq!(s[0].out_rate, 48000);
         assert_eq!(s[1].l, 32);
-        let r = Resampler::new(48000, 1_411_200, 2, kind(1 << 12, Phase::Linear), 120.0, &cache)
-            .unwrap();
+        let r = Resampler::new(
+            48000,
+            1_411_200,
+            2,
+            kind(1 << 12, Phase::Linear),
+            120.0,
+            &cache,
+        )
+        .unwrap();
         let s = r.stages();
         assert_eq!(s.len(), 2);
         assert_eq!((s[0].l, s[0].m, s[0].out_rate), (7, 5, 67200));

@@ -27,6 +27,13 @@ pub trait BlockConvolver {
     /// Samples between an input block entering and its output leaving (one block for
     /// overlap-save engines).
     fn latency(&self) -> usize;
+    /// Forget all history (seek / end of stream); the filter stays loaded.
+    fn reset(&mut self);
+    /// `true` when this engine runs on a GPU (the signal path marks the `gpu` stage active
+    /// only when a chain actually holds one).
+    fn on_gpu(&self) -> bool {
+        false
+    }
 }
 
 /// The spectra of one impulse response cut into partitions of `block` samples.
@@ -367,9 +374,21 @@ impl Convolver {
 
 impl BlockConvolver for Convolver {
     fn process_block(&mut self, input: &[f64], out: &mut [f64]) {
-        assert_eq!(input.len(), self.block(), "process_block wants exactly one block");
-        assert_eq!(out.len(), self.block(), "process_block wants exactly one block");
-        assert_eq!(self.engine.pending(), 0, "process_block after a partial push");
+        assert_eq!(
+            input.len(),
+            self.block(),
+            "process_block wants exactly one block"
+        );
+        assert_eq!(
+            out.len(),
+            self.block(),
+            "process_block wants exactly one block"
+        );
+        assert_eq!(
+            self.engine.pending(),
+            0,
+            "process_block after a partial push"
+        );
         let mut tmp = Vec::with_capacity(self.block());
         self.push(input, &mut tmp);
         out.copy_from_slice(&tmp);
@@ -377,6 +396,10 @@ impl BlockConvolver for Convolver {
 
     fn latency(&self) -> usize {
         self.block()
+    }
+
+    fn reset(&mut self) {
+        Convolver::reset(self);
     }
 }
 
@@ -565,7 +588,11 @@ mod tests {
     fn channels_run_in_parallel_with_identical_results() {
         let h: Vec<f64> = (0..300).map(|i| (-(i as f64) / 40.0).exp()).collect();
         let inputs: Vec<Vec<f64>> = (0..4)
-            .map(|c| (0..1000).map(|i| ((i * (c + 1)) as f64 * 0.05).sin()).collect())
+            .map(|c| {
+                (0..1000)
+                    .map(|i| ((i * (c + 1)) as f64 * 0.05).sin())
+                    .collect()
+            })
             .collect();
         let mut convs: Vec<Convolver> = (0..4).map(|_| Convolver::with_block(&h, 128)).collect();
         let mut outs = vec![Vec::new(); 4];

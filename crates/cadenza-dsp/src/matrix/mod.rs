@@ -37,6 +37,7 @@
 
 pub mod crossover;
 
+pub(crate) use crossover::DENORMAL_FLOOR;
 pub use crossover::{freq_label, CrossoverFilter, CrossoverKind};
 
 use crate::convolution::{choose_block, Convolver, SpectralFilter};

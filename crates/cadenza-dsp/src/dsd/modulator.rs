@@ -16,10 +16,18 @@
 //!
 //! **Design point.** Lee's `H∞ = 1.5` gives the lowest noise but a 1-bit loop of order 5
 //! or 7 is then only stable to about 0.55 full scale (measured here on a 1 kHz tone and
-//! on DC, the worst case). Cadenza uses `H∞ = 1.35` for the 5th-order loops (≈ 112 dB
-//! SNR in 20 kHz at DSD64 for a −6 dBFS tone, stable to 0.72) and `H∞ = 1.28` for the
-//! 7th-order loops (≈ 117 dB, stable to 0.72) so that the default `dsd_gain_db = -3`
-//! (0 dBFS → 0.708) sits inside the stable range at every DSD rate.
+//! on DC, the worst case). The design point depends on the oversampling ratio
+//! ([`DsdModulator::h_inf`]): the 5th-order loops use `H∞ = 1.35` at DSD64 (≈ 110 dB SNR
+//! in 20 kHz for a −6 dBFS tone, stable to 0.72) and `H∞ = 1.28` from DSD128 up (where
+//! the SNR is ≥ 118 dB anyway and the tamer loop stays clear of the reset guard on
+//! sustained full-scale DC and on a full-scale DC step); the 7th-order loops use
+//! `H∞ = 1.28` at DSD64 (≈ 117 dB, stable to 0.72) and `H∞ = 1.25` from DSD128 up.
+//! Measured over a second each of +0.708 and −0.708 DC (a ±0.708 step between them) and
+//! 1 kHz / 20 kHz / 40 Hz tones at that level, at every rate in both families, none of the
+//! guards engages (the sweep also showed that the neighbouring values 1.32/1.30 for order 5
+//! and 1.28 for order 7 each still trip one reset at some rate, so the chosen values carry
+//! a margin), hence the default `dsd_gain_db = -3` (0 dBFS → 0.708) sits inside the stable
+//! range at every DSD rate.
 //!
 //! **Stability guard.** Above its stable limit the loop filter state winds up and the
 //! output turns into a stuck or chaotic pattern. Two guards keep it well behaved at any
@@ -87,7 +95,12 @@ struct Dither {
 impl SigmaDelta {
     /// A modulator of `kind` running at `rate` Hz (the DSD rate).
     pub fn new(kind: DsdModulator, rate: u32) -> Self {
-        let ntf = Arc::new(Ntf::for_rate(kind.order(), rate, NTF_BAND_HZ, kind.h_inf()));
+        let ntf = Arc::new(Ntf::for_rate(
+            kind.order(),
+            rate,
+            NTF_BAND_HZ,
+            kind.h_inf(super::oversampling_ratio(rate)),
+        ));
         Self::with_ntf(kind, rate, ntf)
     }
 
@@ -318,10 +331,18 @@ mod tests {
             let window = rate as usize / 8000;
             for chunk in bits[bits.len() / 2..].chunks(window) {
                 let ones: u32 = chunk.iter().map(|b| b.count_ones()).sum();
-                assert!(ones > 0 && ones < chunk.len() as u32 * 8, "{}: stuck output", kind.id());
+                assert!(
+                    ones > 0 && ones < chunk.len() as u32 * 8,
+                    "{}: stuck output",
+                    kind.id()
+                );
             }
             assert!(m.w_hist.iter().all(|w| w.is_finite()));
-            assert!(m.clips() > 0, "{}: the clipper must be what keeps −0.3 dBFS stable", kind.id());
+            assert!(
+                m.clips() > 0,
+                "{}: the clipper must be what keeps −0.3 dBFS stable",
+                kind.id()
+            );
             // Afterwards a −6 dBFS tone still gets its full SNR: the loop recovered.
             let pcm_rate = rate / 8;
             let nfft = 1 << 16;
@@ -334,27 +355,39 @@ mod tests {
     }
 
     #[test]
-    fn stable_at_the_input_limit_on_dc_and_tone_at_every_rate() {
-        // DC is the worst case for a 1-bit loop; the clipper threshold must sit inside the
-        // loop's own stable range at every DSD rate, with the default −3 dB gain
-        // (0 dBFS → 0.708) below the threshold.
+    fn stable_at_the_default_gain_on_dc_and_tones_at_every_rate() {
+        // Sustained DC is the worst case for a 1-bit loop: a second of ±0.708 (0 dBFS at
+        // the default −3 dB gain) plus a bass, a mid and a top-of-band tone at that level
+        // must engage neither guard at any rate in either family (~100 s in release: the
+        // rates up to DSD2048 add up to 4 G modulator samples).
+        const LEVEL: f64 = 0.708;
         for kind in DsdModulator::catalog() {
-            assert!(kind.input_limit() > 0.708, "{}: default gain must not clip", kind.id());
-            for rate in [DsdRate::Dsd64, DsdRate::Dsd256, DsdRate::Dsd1024] {
-                let hz = rate.hz(44_100);
-                let mut m = SigmaDelta::new(*kind, hz);
-                let mut bits = Vec::new();
-                m.process(&vec![kind.input_limit(); 200_000], &mut bits);
-                m.process(&vec![-kind.input_limit(); 200_000], &mut bits);
-                m.process(&tone(kind.input_limit(), 1000.0, hz, 400_000), &mut bits);
-                assert_eq!(
-                    m.guard_engagements(),
-                    0,
-                    "{} at {}: {} resets at the input limit",
-                    kind.id(),
-                    rate.label(),
-                    m.resets()
-                );
+            assert!(
+                kind.input_limit() > LEVEL,
+                "{}: default gain must not clip",
+                kind.id()
+            );
+            for rate in DsdRate::catalog() {
+                for base in [44_100, 48_000] {
+                    let hz = rate.hz(base);
+                    let second = hz as usize;
+                    let mut m = SigmaDelta::new(*kind, hz);
+                    let mut bits = Vec::new();
+                    m.process(&vec![LEVEL; second], &mut bits);
+                    m.process(&vec![-LEVEL; second], &mut bits);
+                    for f in [1000.0, 20_000.0, 40.0] {
+                        m.process(&tone(LEVEL, f, hz, second / 8), &mut bits);
+                    }
+                    assert_eq!(
+                        m.guard_engagements(),
+                        0,
+                        "{} at {} ({base} family): {} resets, {} clips at the default gain",
+                        kind.id(),
+                        rate.label(),
+                        m.resets(),
+                        m.clips()
+                    );
+                }
             }
         }
     }
@@ -365,7 +398,11 @@ mod tests {
         let mut m = SigmaDelta::new(DsdModulator::Asdm7, rate);
         let mut bits = Vec::new();
         m.process(&tone(0.708, 1000.0, rate, rate as usize / 10), &mut bits);
-        assert_eq!(m.guard_engagements(), 0, "0 dBFS − 3 dB must not engage any guard");
+        assert_eq!(
+            m.guard_engagements(),
+            0,
+            "0 dBFS − 3 dB must not engage any guard"
+        );
         m.process(&tone(0.999, 1000.0, rate, rate as usize / 10), &mut bits);
         assert!(m.clips() > 0);
         // The reset guard catches what the clipper lets through (here: forced overload).

@@ -617,6 +617,9 @@ fn play(
     };
     let silence = vec![silence_word; chunk_frames * format.channels as usize];
     let mut paused_device = false;
+    // Underrun *events* already counted into `counters` (the jitter buffer counts events;
+    // this loop writes many silence chunks per event and must not count each one).
+    let mut underruns_seen = 0u64;
     loop {
         if st.stop.load(Ordering::Relaxed) {
             break;
@@ -647,8 +650,16 @@ fn play(
                 Some(c) => Some(c),
                 None => {
                     if b.underruns() > 0 && !b.running() && b.queued_frames() == 0 {
-                        // Just ran dry: play one chunk of silence, then wait for refill.
-                        counters.underruns.fetch_add(1, Ordering::Relaxed);
+                        // Ran dry: play one chunk of silence, then wait for refill. The
+                        // event count follows the jitter buffer's, so the stats and the
+                        // sender's acks agree.
+                        let u = b.underruns();
+                        if u > underruns_seen {
+                            counters
+                                .underruns
+                                .fetch_add(u - underruns_seen, Ordering::Relaxed);
+                            underruns_seen = u;
+                        }
                         drop(b);
                         let _ = out.write(&silence);
                         clock_ack(&st);

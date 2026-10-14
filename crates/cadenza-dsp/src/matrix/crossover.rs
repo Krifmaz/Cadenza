@@ -226,6 +226,9 @@ pub fn fir_band(taps: usize, hp: Option<f64>, lp: Option<f64>, rate: f64) -> Vec
     h
 }
 
+/// Filter-state magnitude below which the state is flushed to zero (see [`Section::tick`]).
+pub(crate) const DENORMAL_FLOOR: f64 = 1e-290;
+
 /// One first- or second-order section (transposed direct form II).
 #[derive(Clone, Copy, Debug, PartialEq)]
 struct Section {
@@ -276,6 +279,15 @@ impl Section {
         let y = self.b0 * x + self.z1;
         self.z1 = self.b1 * x - self.a1 * y + self.z2;
         self.z2 = self.b2 * x - self.a2 * y;
+        // Denormal guard: during digital silence the states decay towards f64 subnormals,
+        // where x86 cores slow down 10–100× per multiply; Rust does not set FTZ/DAZ. Far
+        // below −5000 dBFS, so inaudible by any measure.
+        if self.z1.abs() < DENORMAL_FLOOR {
+            self.z1 = 0.0;
+        }
+        if self.z2.abs() < DENORMAL_FLOOR {
+            self.z2 = 0.0;
+        }
         y
     }
 

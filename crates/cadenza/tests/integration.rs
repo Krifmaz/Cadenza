@@ -300,3 +300,99 @@ fn transport_commands_pause_seek_and_stop() {
     e.shutdown();
     let _ = std::fs::remove_dir_all(dir);
 }
+
+#[test]
+fn dsd_output_mode_modulates_to_dop_and_reports_the_chain() {
+    use cadenza_dsp::dsd::{DsdModulator, DsdRate, OutputMode};
+    let dir = temp_dir("dsd");
+    let wav = dir.join("tone.wav");
+    let frames = write_sine_wav(&wav, 44100, 16, 0.25, 1000.0);
+
+    let mut s = settings(RateSetting::Auto, 24, "sinc-l-4k", "tpdf", false);
+    s.dsp.output_mode = OutputMode::Dsd;
+    s.dsp.dsd_rate = DsdRate::Dsd64;
+    s.dsp.dsd_modulator = DsdModulator::Asdm5;
+    let e = engine(s);
+    let runs = e.status().runs_finished;
+    e.play_queue(vec![Track::from_arg(wav.to_str().unwrap())], 0, 0.0);
+
+    // Catch the signal path while the track plays.
+    let mut path = None;
+    let deadline = std::time::Instant::now() + Duration::from_secs(60);
+    while std::time::Instant::now() < deadline {
+        let st = e.status();
+        if let Some(p) = &st.signal_path {
+            path = Some(p.clone());
+        }
+        if st.runs_finished > runs {
+            break;
+        }
+        std::thread::sleep(Duration::from_millis(5));
+    }
+    let st = e.wait_until_finished(runs, Duration::from_secs(60));
+    assert_eq!(
+        st.runs_finished,
+        runs + 1,
+        "playback did not finish in time"
+    );
+    assert_eq!(st.error, None);
+
+    // The null output was opened for DSD64 over DoP: 24-bit frames at 2.8224 MHz / 16.
+    let f = st.output_format.expect("output opened");
+    assert!(f.is_dsd(), "{f:?}");
+    assert_eq!(f.rate, 2_822_400 / 16);
+    assert_eq!(f.bits, 24);
+    assert_eq!(f.channels, 2);
+    // 64 DSD bits per source sample, 16 per DoP frame: 4 DoP frames per source frame.
+    assert!(
+        st.output_frames >= (frames * 4) as u64,
+        "{} DoP frames for {frames} source frames",
+        st.output_frames
+    );
+    let p = path.expect("signal path published while playing");
+    assert!(!p.bit_perfect);
+    let ids: Vec<&str> = p
+        .stages
+        .iter()
+        .filter(|s| s.active)
+        .map(|s| s.id.as_str())
+        .collect();
+    assert!(ids.contains(&"modulator"), "{ids:?}");
+    assert!(ids.contains(&"resampler"), "{ids:?}");
+    assert!(
+        !ids.contains(&"dither"),
+        "the quantiser is bypassed in DSD mode: {ids:?}"
+    );
+    assert!(
+        p.label.contains("ASDM5") && p.label.contains("DSD64"),
+        "{}",
+        p.label
+    );
+    assert_eq!(p.output.bits, 1);
+    assert_eq!(p.output.rate, 2_822_400);
+    e.shutdown();
+    let _ = std::fs::remove_dir_all(dir);
+}
+
+#[test]
+fn matrix_preset_changes_the_output_channel_count() {
+    let dir = temp_dir("matrix");
+    let wav = dir.join("tone.wav");
+    let frames = write_sine_wav(&wav, 48000, 16, 0.25, 440.0);
+
+    let mut s = settings(RateSetting::Source, 24, "sinc-l-4k", "tpdf", false);
+    s.matrix.enabled = true;
+    s.matrix.preset = "2.1".into();
+    let e = engine(s);
+    let runs = e.status().runs_finished;
+    e.play_queue(vec![Track::from_arg(wav.to_str().unwrap())], 0, 0.0);
+    let st = e.wait_until_finished(runs, Duration::from_secs(60));
+    assert_eq!(st.runs_finished, runs + 1);
+    assert_eq!(st.error, None);
+    let f = st.output_format.unwrap();
+    assert_eq!(f.channels, 3, "2.1 = L, R and a sub");
+    assert_eq!(f.rate, 48_000);
+    assert_eq!(st.output_frames, frames as u64);
+    e.shutdown();
+    let _ = std::fs::remove_dir_all(dir);
+}

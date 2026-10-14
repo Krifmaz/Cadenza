@@ -88,6 +88,17 @@ pub fn heartbeat_state(client: &Client, s: &Status) -> Value {
             "rates": rates,
             "bits": s.settings.output.bits,
             "output": output,
+            "output_mode": s.settings.dsp.output_mode.id(),
+            "dsd": {
+                "rate": s.settings.dsp.dsd_rate.id(),
+                "modulator": s.settings.dsp.dsd_modulator.id(),
+                "packing": s.settings.dsp.dsd_packing.id(),
+                "device": s.output_dsd,
+            },
+            "headroom_db": s.settings.dsp.headroom_db,
+            "gpu": s.settings.dsp.gpu.mode.id(),
+            "matrix": if s.settings.matrix.enabled { json!(s.settings.matrix.preset) } else { Value::Null },
+            "exclusive": s.output_exclusive,
             "error": s.error,
         },
     })
@@ -127,6 +138,15 @@ mod tests {
         assert_eq!(v["engine"]["name"], "Cadenza");
         assert_eq!(v["engine"]["rate"], "auto");
         assert_eq!(v["engine"]["rates"].as_array().unwrap().len(), 4);
+        // v2: the DSD / headroom / GPU / matrix settings and the device's DSD capabilities.
+        assert_eq!(v["engine"]["output_mode"], "pcm");
+        assert_eq!(v["engine"]["dsd"]["rate"], "dsd256");
+        assert_eq!(v["engine"]["dsd"]["modulator"], "asdm7");
+        assert_eq!(v["engine"]["dsd"]["device"]["dop"], false);
+        assert_eq!(v["engine"]["headroom_db"], Value::Null);
+        assert_eq!(v["engine"]["gpu"], "auto");
+        assert_eq!(v["engine"]["matrix"], Value::Null);
+        assert_eq!(v["engine"]["exclusive"], false);
         assert!(v["engine"]["filters"].as_array().unwrap().len() > 10);
         assert_eq!(v["signal"]["transport"], "original");
     }

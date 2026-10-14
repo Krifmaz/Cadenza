@@ -126,7 +126,12 @@ impl Packer {
             p.extend_from_slice(bytes);
         }
         let per = self.bytes_per_frame();
-        let frames = self.pending.iter().map(|p| p.len() / per).min().unwrap_or(0);
+        let frames = self
+            .pending
+            .iter()
+            .map(|p| p.len() / per)
+            .min()
+            .unwrap_or(0);
         out.reserve(frames * self.channels);
         for f in 0..frames {
             let i = f * per;

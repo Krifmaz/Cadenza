@@ -351,7 +351,8 @@ mod tests {
         }
         // Continuous with unit slope at the knee.
         let eps = 1e-7;
-        let slope = (soft_clip(SOFT_CLIP_KNEE + eps) - soft_clip(SOFT_CLIP_KNEE - eps)) / (2.0 * eps);
+        let slope =
+            (soft_clip(SOFT_CLIP_KNEE + eps) - soft_clip(SOFT_CLIP_KNEE - eps)) / (2.0 * eps);
         assert!((slope - 1.0).abs() < 1e-5, "slope at knee {slope}");
         assert!((gain_to_db(SOFT_CLIP_KNEE) + 0.5).abs() < 1e-9);
     }
@@ -379,7 +380,11 @@ mod tests {
             .collect();
         let mut m = TruePeakMeter::new(1);
         m.push(&x);
-        assert!((m.true_peak_db() + 6.02).abs() < 0.05, "{}", m.true_peak_db());
+        assert!(
+            (m.true_peak_db() + 6.02).abs() < 0.05,
+            "{}",
+            m.true_peak_db()
+        );
         // Stereo: channels are independent.
         let st: Vec<f64> = x.iter().flat_map(|v| [*v, 0.25 * v]).collect();
         let mut m2 = TruePeakMeter::new(2);
@@ -398,7 +403,11 @@ mod tests {
         h.process(&mut y);
         assert_eq!(h.clip_count(), 0);
         assert!(!h.clip_engaged());
-        assert!((h.true_peak_db() - (gain_to_db(1.1) - 3.0)).abs() < 0.05, "{}", h.true_peak_db());
+        assert!(
+            (h.true_peak_db() - (gain_to_db(1.1) - 3.0)).abs() < 0.05,
+            "{}",
+            h.true_peak_db()
+        );
         for (a, b) in x.iter().zip(&y) {
             assert!((a * db_to_gain(-3.0) - b).abs() < 1e-15);
         }
@@ -413,7 +422,10 @@ mod tests {
         assert!(y.iter().all(|v| v.abs() < 1.0));
         let touched = x.iter().zip(&y).filter(|(a, b)| a != b).count() as u64;
         assert_eq!(touched, h.clip_count());
-        assert!(x.iter().zip(&y).all(|(a, b)| a.abs() > SOFT_CLIP_KNEE || a == b));
+        assert!(x
+            .iter()
+            .zip(&y)
+            .all(|(a, b)| a.abs() > SOFT_CLIP_KNEE || a == b));
         assert!(h.detail().contains("engaged"), "{}", h.detail());
         assert!(!h.is_transparent());
         let r = h.report();

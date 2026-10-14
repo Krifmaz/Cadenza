@@ -208,6 +208,13 @@ impl BlockConvolver for ReferenceConvolver {
     fn latency(&self) -> usize {
         self.block
     }
+
+    fn reset(&mut self) {
+        self.frame.fill(0.0);
+        self.fdl.fill(0.0);
+        self.head = 0;
+        self.count = 0;
+    }
 }
 
 #[cfg(test)]

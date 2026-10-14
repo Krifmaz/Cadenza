@@ -99,7 +99,10 @@ impl Ntf {
     /// (`f_band / f_modulator`) and maximum out-of-band gain `h_inf`.
     pub fn design(order: usize, band: f64, h_inf: f64) -> Self {
         assert!((1..=8).contains(&order), "order must be 1..=8, got {order}");
-        assert!(band > 0.0 && band < 0.25, "band must be in (0, 0.25), got {band}");
+        assert!(
+            band > 0.0 && band < 0.25,
+            "band must be in (0, 0.25), got {band}"
+        );
         assert!(h_inf > 1.0, "h_inf must exceed 1, got {h_inf}");
         let zeros: Vec<Complex<f64>> = legendre_roots(order)
             .iter()
@@ -205,7 +208,13 @@ mod tests {
     #[test]
     fn legendre_roots_match_the_tables() {
         let r5 = legendre_roots(5);
-        let want = [-0.906_179_845_9, -0.538_469_310_1, 0.0, 0.538_469_310_1, 0.906_179_845_9];
+        let want = [
+            -0.906_179_845_9,
+            -0.538_469_310_1,
+            0.0,
+            0.538_469_310_1,
+            0.906_179_845_9,
+        ];
         for (a, b) in r5.iter().zip(want) {
             assert!((a - b).abs() < 1e-9, "{a} vs {b}");
         }
@@ -221,13 +230,24 @@ mod tests {
             assert_eq!(ntf.b.len(), order + 1);
             assert_eq!(ntf.a.len(), order + 1);
             assert!((ntf.b[0] - 1.0).abs() < 1e-12 && (ntf.a[0] - 1.0).abs() < 1e-12);
-            assert!((ntf.max_gain() - 1.5).abs() < 1e-6, "gain {}", ntf.max_gain());
+            assert!(
+                (ntf.max_gain() - 1.5).abs() < 1e-6,
+                "gain {}",
+                ntf.max_gain()
+            );
             assert!(ntf.poles.iter().all(|p| p.norm() < 1.0));
             // Deep in-band attenuation and a real DC null.
-            assert!(ntf.magnitude(0.0) < 1e-6, "DC null {:e}", ntf.magnitude(0.0));
+            assert!(
+                ntf.magnitude(0.0) < 1e-6,
+                "DC null {:e}",
+                ntf.magnitude(0.0)
+            );
             assert!(ntf.magnitude(1000.0 / 2_822_400.0) < 1e-5);
             let noise = ntf.predicted_noise_dbfs();
-            assert!(noise < -110.0, "order {order}: predicted noise {noise:.1} dBFS");
+            assert!(
+                noise < -110.0,
+                "order {order}: predicted noise {noise:.1} dBFS"
+            );
         }
     }
 

@@ -10,7 +10,7 @@
 //! unchanged rate also count as untouched.
 
 use crate::cache::CoefficientCache;
-use crate::convolution::{Convolver, SpectralFilter};
+use crate::convolution::{BlockConvolver, SpectralFilter};
 use crate::dither::{DitherKind, Quantizer};
 use crate::dsd::{DsdConfig, DsdStage, OutputMode};
 use crate::eq::{Band, Equalizer};
@@ -21,6 +21,7 @@ use crate::matrix::{MatrixConfig, MatrixError, MatrixStage};
 use crate::resampler::{ResampleError, Resampler};
 use crate::signal_path::{rate_label, Endpoint, SignalPath, Stage};
 use crate::volume::Volume;
+use rayon::prelude::*;
 use serde_json::json;
 use std::sync::Arc;
 
@@ -135,33 +136,92 @@ pub enum PipelineError {
     Matrix(#[from] MatrixError),
 }
 
+/// One channel of the room-convolution stage: a [`BlockConvolver`] (CPU engine, or the
+/// CUDA engine when the backend has one) behind a small block adapter that gathers whole
+/// blocks from the stream and keeps the flush/truncate semantics of
+/// [`Convolver::push`] / [`Convolver::flush`].
+struct ChannelConvolver {
+    engine: Box<dyn BlockConvolver + Send>,
+    block: usize,
+    /// Input samples not yet forming a whole block.
+    pending: Vec<f64>,
+    out_block: Vec<f64>,
+}
+
+impl ChannelConvolver {
+    fn new(engine: Box<dyn BlockConvolver + Send>, block: usize) -> Self {
+        Self {
+            engine,
+            block,
+            pending: Vec::with_capacity(block),
+            out_block: vec![0.0; block],
+        }
+    }
+
+    /// Process `input`, appending whatever complete blocks are ready to `out`.
+    fn push(&mut self, mut input: &[f64], out: &mut Vec<f64>) {
+        while !input.is_empty() {
+            let take = (self.block - self.pending.len()).min(input.len());
+            self.pending.extend_from_slice(&input[..take]);
+            input = &input[take..];
+            if self.pending.len() == self.block {
+                self.engine
+                    .process_block(&self.pending, &mut self.out_block);
+                out.extend_from_slice(&self.out_block);
+                self.pending.clear();
+            }
+        }
+    }
+
+    /// Push zeros until every input sample has produced its output (the filter tail is
+    /// *not* included: the stream length stays equal to the input length), then reset.
+    fn flush(&mut self, out: &mut Vec<f64>) {
+        let pending = self.pending.len();
+        if pending > 0 {
+            let zeros = vec![0.0; self.block - pending];
+            self.push(&zeros, out);
+            out.truncate(out.len() - zeros.len());
+        }
+        self.reset();
+    }
+
+    fn reset(&mut self) {
+        self.pending.clear();
+        self.engine.reset();
+    }
+}
+
 struct ConvolutionStage {
-    convolvers: Vec<Convolver>,
+    convolvers: Vec<ChannelConvolver>,
     split: Vec<Vec<f64>>,
+    /// `true` when at least one channel runs on the GPU engine.
+    on_gpu: bool,
 }
 
 impl ConvolutionStage {
-    fn new(spec: &ConvolutionSpec, channels: usize) -> Result<Self, PipelineError> {
+    fn new(
+        spec: &ConvolutionSpec,
+        channels: usize,
+        gpu: &GpuBackend,
+    ) -> Result<Self, PipelineError> {
         if spec.channels.is_empty() || spec.channels.iter().any(|c| c.is_empty()) {
             return Err(PipelineError::Convolution(
                 "impulse response is empty".into(),
             ));
         }
-        let convolvers = if spec.channels.len() == 1 {
+        let filters: Vec<Arc<SpectralFilter>> = if spec.channels.len() == 1 {
             let filter = Arc::new(SpectralFilter::new(
                 &spec.channels[0],
                 crate::convolution::choose_block(spec.channels[0].len()),
             ));
-            (0..channels)
-                .map(|_| Convolver::from_filter(Arc::clone(&filter)))
-                .collect()
+            vec![filter; channels]
         } else if spec.channels.len() == channels {
             let block = crate::convolution::choose_block(
                 spec.channels.iter().map(|c| c.len()).max().unwrap_or(1),
             );
             spec.channels
                 .iter()
-                .map(|h| Convolver::with_block(h, block))
+                .map(|h| Arc::new(SpectralFilter::new(h, block)))
                 .collect()
         } else {
             return Err(PipelineError::Convolution(format!(
@@ -169,10 +229,23 @@ impl ConvolutionStage {
                 spec.channels.len()
             )));
         };
+        let convolvers: Vec<ChannelConvolver> = filters
+            .into_iter()
+            .map(|f| {
+                let block = f.block();
+                ChannelConvolver::new(gpu.convolver(f), block)
+            })
+            .collect();
+        let on_gpu = convolvers.iter().any(|c| c.engine.on_gpu());
         Ok(Self {
             convolvers,
             split: vec![Vec::new(); channels],
+            on_gpu,
         })
+    }
+
+    fn block(&self) -> usize {
+        self.convolvers[0].block
     }
 
     fn run(&mut self, interleaved: &[f64], flush: bool) -> Vec<f64> {
@@ -183,7 +256,25 @@ impl ConvolutionStage {
             buf.extend(interleaved.iter().skip(c).step_by(ch).take(frames));
         }
         let mut outs: Vec<Vec<f64>> = vec![Vec::new(); ch];
-        crate::convolution::process_channels(&mut self.convolvers, &self.split, &mut outs, flush);
+        let run = |(conv, (inp, out)): (&mut ChannelConvolver, (&Vec<f64>, &mut Vec<f64>))| {
+            conv.push(inp, out);
+            if flush {
+                conv.flush(out);
+            }
+        };
+        // Channels in parallel on the rayon pool for the CPU engine; one device stream at
+        // a time for the GPU (whole blocks only, never a half-finished partition).
+        if ch > 1 && !self.on_gpu {
+            self.convolvers
+                .par_iter_mut()
+                .zip(self.split.par_iter().zip(outs.par_iter_mut()))
+                .for_each(run);
+        } else {
+            self.convolvers
+                .iter_mut()
+                .zip(self.split.iter().zip(outs.iter_mut()))
+                .for_each(run);
+        }
         let n = outs[0].len();
         let mut joined = vec![0.0; n * ch];
         for (c, out) in outs.iter().enumerate() {
@@ -195,7 +286,7 @@ impl ConvolutionStage {
     }
 
     fn reset(&mut self) {
-        self.convolvers.iter_mut().for_each(Convolver::reset);
+        self.convolvers.iter_mut().for_each(ChannelConvolver::reset);
     }
 }
 
@@ -246,6 +337,26 @@ impl Pipeline {
         let eq = (!bp && config.eq_enabled && !config.eq.is_empty())
             .then(|| Equalizer::new(input.rate, ch, &config.eq))
             .filter(|e| !e.is_identity());
+        // DSD output: the PCM chain runs to the modulator's input rate instead.
+        let dsd_mode = !bp && config.output_mode == OutputMode::Dsd;
+        let pcm_rate = if bp {
+            input.rate
+        } else if dsd_mode {
+            DsdStage::pcm_input_rate(&config.dsd, crate::dsd::family_base(input.rate))
+        } else {
+            config.output_rate.unwrap_or(input.rate)
+        };
+        // Compute backend: probed (and logged) once per `gpu` setting, only when there is
+        // a convolution engine to run. Today the room convolution runs on it; the
+        // resampler's engine is still the CPU one (see the README roadmap).
+        let has_convolution = !bp && config.convolution.is_some();
+        let gpu = if pcm_rate != input.rate || has_convolution {
+            GpuBackend::detect(&config.gpu)
+        } else {
+            GpuBackend::Cpu {
+                reason: "nothing to convolve".into(),
+            }
+        };
         let convolution = match (&config.convolution, bp) {
             (Some(spec), false) => {
                 if let Some(r) = spec.rate {
@@ -257,7 +368,7 @@ impl Pipeline {
                         );
                     }
                 }
-                Some(ConvolutionStage::new(spec, ch)?)
+                Some(ConvolutionStage::new(spec, ch, &gpu)?)
             }
             _ => None,
         };
@@ -272,15 +383,6 @@ impl Pipeline {
             .as_ref()
             .map(MatrixStage::output_channels)
             .unwrap_or(ch);
-        // DSD output: the PCM chain runs to the modulator's input rate instead.
-        let dsd_mode = !bp && config.output_mode == OutputMode::Dsd;
-        let pcm_rate = if bp {
-            input.rate
-        } else if dsd_mode {
-            DsdStage::pcm_input_rate(&config.dsd, crate::dsd::family_base(input.rate))
-        } else {
-            config.output_rate.unwrap_or(input.rate)
-        };
         let resampler = if pcm_rate != input.rate {
             Some(Resampler::new(
                 input.rate,
@@ -302,22 +404,17 @@ impl Pipeline {
         // Headroom + true-peak meter + soft clipper: the last guard whenever the chain
         // processes anything (never in a bit-perfect chain, so it stays bit-perfect).
         // In DSD mode `dsd_gain_db` is the headroom, so the automatic −3 dB is not stacked.
-        let headroom_db = config
-            .headroom_db
-            .unwrap_or_else(|| if dsd_mode { 0.0 } else { default_headroom_db(resampler.is_some()) });
+        let headroom_db = config.headroom_db.unwrap_or_else(|| {
+            if dsd_mode {
+                0.0
+            } else {
+                default_headroom_db(resampler.is_some())
+            }
+        });
         let processing =
             resampler.is_some() || convolution.is_some() || eq.is_some() || matrix.is_some();
         let headroom = (!bp && (headroom_db != 0.0 || processing))
             .then(|| Headroom::new(out_ch, headroom_db, config.soft_clip));
-        // Compute backend: probed (and logged) once per `gpu` setting, only when there is
-        // a convolution engine to run.
-        let gpu = if resampler.is_some() || convolution.is_some() {
-            GpuBackend::detect(&config.gpu)
-        } else {
-            GpuBackend::Cpu {
-                reason: "nothing to convolve".into(),
-            }
-        };
         Ok(Self {
             input,
             config,
@@ -402,6 +499,12 @@ impl Pipeline {
     pub fn gpu(&self) -> &GpuBackend {
         &self.gpu
     }
+    /// `true` when a stage of this chain actually runs on the GPU (today: the room
+    /// convolution when the backend is CUDA). A detected card with nothing to run on it
+    /// is *not* "in use" and the signal path says so.
+    pub fn gpu_in_use(&self) -> bool {
+        self.convolution.as_ref().is_some_and(|c| c.on_gpu)
+    }
 
     /// Change the volume without rebuilding (ignored in bit-perfect mode).
     pub fn set_volume(&mut self, volume: Volume) {
@@ -429,7 +532,7 @@ impl Pipeline {
         let conv = self
             .convolution
             .as_ref()
-            .map(|c| c.convolvers[0].block() as f64 / self.input.rate as f64)
+            .map(|c| c.block() as f64 / self.input.rate as f64)
             .unwrap_or(0.0);
         conv + self
             .matrix
@@ -441,7 +544,11 @@ impl Pipeline {
                 .as_ref()
                 .map(Resampler::latency_seconds)
                 .unwrap_or(0.0)
-            + self.dsd.as_ref().map(DsdStage::latency_seconds).unwrap_or(0.0)
+            + self
+                .dsd
+                .as_ref()
+                .map(DsdStage::latency_seconds)
+                .unwrap_or(0.0)
     }
 
     /// Run interleaved `f64` frames through the chain; returns interleaved integers at the
@@ -645,7 +752,7 @@ impl Pipeline {
             }),
         }
 
-        stages.push(self.gpu.stage(&self.config.gpu));
+        stages.push(self.gpu.stage(&self.config.gpu, self.gpu_in_use()));
 
         match &self.headroom {
             Some(h) => stages.push(Stage {
@@ -914,6 +1021,90 @@ mod tests {
     }
 
     #[test]
+    fn convolution_block_adapter_matches_the_streaming_convolver_and_reports_the_backend() {
+        use crate::convolution::Convolver;
+        // Two different impulses (one per channel), long enough for several partitions,
+        // fed in ragged chunks: the block adapter around the backend's `BlockConvolver`
+        // must reproduce the CPU streaming convolver sample for sample, including the
+        // flush/truncate semantics (stream length == input length) and a reset.
+        let h0: Vec<f64> = (0..700)
+            .map(|i| ((i * 7) % 13) as f64 / 13.0 - 0.5)
+            .collect();
+        let h1: Vec<f64> = (0..650)
+            .map(|i| ((i * 5) % 11) as f64 / 11.0 - 0.5)
+            .collect();
+        let spec = Arc::new(ConvolutionSpec {
+            name: "pair".into(),
+            rate: None,
+            channels: vec![h0.clone(), h1.clone()],
+        });
+        let gpu = GpuBackend::detect(&GpuConfig::default());
+        let mut stage = ConvolutionStage::new(&spec, 2, &gpu).unwrap();
+        let block = stage.block();
+        let mut reference = [
+            Convolver::with_block(&h0, block),
+            Convolver::with_block(&h1, block),
+        ];
+        let n = 5000;
+        let pcm: Vec<f64> = (0..2 * n)
+            .map(|i| ((i * 37) % 101) as f64 / 101.0 - 0.5)
+            .collect();
+        for round in 0..2 {
+            let mut got = Vec::new();
+            let mut pos = 0;
+            for (k, len) in [1usize, 333, 64, 1000, 7, 2000, 5000].iter().enumerate() {
+                let end = (pos + 2 * len).min(pcm.len());
+                let last = k == 6 || end == pcm.len();
+                got.extend(stage.run(&pcm[pos..end], last));
+                pos = end;
+                if last {
+                    break;
+                }
+            }
+            assert_eq!(got.len(), 2 * n, "round {round}: stream length");
+            let mut want = [Vec::new(), Vec::new()];
+            for c in 0..2 {
+                let inp: Vec<f64> = pcm.iter().skip(c).step_by(2).copied().collect();
+                reference[c].push(&inp, &mut want[c]);
+                reference[c].flush(&mut want[c]);
+            }
+            for f in 0..n {
+                for c in 0..2 {
+                    assert!(
+                        (got[2 * f + c] - want[c][f]).abs() < 1e-12,
+                        "round {round} frame {f} ch {c}: {} vs {}",
+                        got[2 * f + c],
+                        want[c][f]
+                    );
+                }
+            }
+            stage.reset();
+        }
+        // The `gpu` stage is honest about what this chain runs on: on a machine without a
+        // CUDA device the backend is the CPU, nothing is "in use" and the stage is inactive;
+        // `used` is only ever true when a convolver actually sits on the card.
+        assert_eq!(stage.on_gpu, gpu.is_gpu());
+        let st = gpu.stage(&GpuConfig::default(), stage.on_gpu);
+        assert_eq!(st.active, gpu.is_gpu());
+        assert_eq!(st.params["used"], gpu.is_gpu());
+        if !gpu.is_gpu() {
+            assert!(st.detail.starts_with("CPU · 64-bit"), "{}", st.detail);
+        }
+        // A pipeline without a convolution stage never claims the GPU, whatever was detected.
+        let cfg = PipelineConfig {
+            output_rate: Some(96_000),
+            filter: FilterKind::sinc(Phase::Linear, false, 1 << 12),
+            ..Default::default()
+        };
+        let p = Pipeline::new(input(48000, 24), cfg, &CoefficientCache::disabled()).unwrap();
+        assert!(!p.gpu_in_use());
+        let path = p.signal_path();
+        let g = path.stages.iter().find(|s| s.id == "gpu").unwrap();
+        assert!(!g.active);
+        assert_eq!(g.params["used"], false);
+    }
+
+    #[test]
     fn dsd_output_mode_runs_the_modulator_and_reports_it() {
         use crate::dsd::packing::unpack_dop;
         use crate::dsd::{DsdModulator, DsdRate, OutputMode};
@@ -956,7 +1147,10 @@ mod tests {
         assert_eq!(path.output.format, "DSD64");
         assert_eq!(path.output.rate, 2_822_400);
         assert_eq!(path.output.bits, 1);
-        assert_eq!(path.label, "FLAC 16/44.1 → 352.8k (sinc-l-4k) → ASDM5 → DSD64 (DoP)");
+        assert_eq!(
+            path.label,
+            "FLAC 16/44.1 → 352.8k (sinc-l-4k) → ASDM5 → DSD64 (DoP)"
+        );
         let ids: Vec<&str> = path.stages.iter().map(|s| s.id.as_str()).collect();
         assert!(ids.contains(&"dsd-oversampler") && ids.contains(&"modulator"));
         let m = path.stages.iter().find(|s| s.id == "modulator").unwrap();
@@ -989,9 +1183,15 @@ mod tests {
         let mut out = p.process(&pcm);
         out.extend(p.flush());
         let scale = (1u64 << 31) as f64;
-        let peak = out.iter().map(|v| (*v as f64 / scale).abs()).fold(0.0, f64::max);
+        let peak = out
+            .iter()
+            .map(|v| (*v as f64 / scale).abs())
+            .fold(0.0, f64::max);
         let peak_db = 20.0 * peak.log10();
-        assert!((peak_db - (20.0 * 0.9f64.log10() - 3.0)).abs() < 0.05, "peak {peak_db} dB");
+        assert!(
+            (peak_db - (20.0 * 0.9f64.log10() - 3.0)).abs() < 0.05,
+            "peak {peak_db} dB"
+        );
         let path = p.signal_path();
         let hr = path.stages.iter().find(|s| s.id == "headroom").unwrap();
         assert!(hr.active);
@@ -1029,7 +1229,12 @@ mod tests {
         };
         let p = Pipeline::new(input(44100, 16), cfg, &CoefficientCache::disabled()).unwrap();
         assert!(p.headroom().is_none() && p.bit_perfect());
-        let hr = p.signal_path().stages.into_iter().find(|s| s.id == "headroom").unwrap();
+        let hr = p
+            .signal_path()
+            .stages
+            .into_iter()
+            .find(|s| s.id == "headroom")
+            .unwrap();
         assert!(!hr.active);
     }
 

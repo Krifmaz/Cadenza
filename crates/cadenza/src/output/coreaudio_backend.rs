@@ -199,7 +199,9 @@ fn output_channels(device: AudioObjectID) -> Option<u32> {
     if unsafe { AudioObjectGetPropertyDataSize(device, &a, 0, ptr::null(), &mut size) } != 0 {
         return None;
     }
-    let mut raw = vec![0u8; size as usize];
+    // An AudioBufferList holds u32s and pointers: allocate it 8-byte aligned (a `Vec<u64>`
+    // guarantees that; a `Vec<u8>` would not and the reference below would be misaligned).
+    let mut raw = vec![0u64; (size as usize).div_ceil(size_of::<u64>()).max(1)];
     if unsafe {
         AudioObjectGetPropertyData(
             device,
@@ -213,7 +215,11 @@ fn output_channels(device: AudioObjectID) -> Option<u32> {
     {
         return None;
     }
-    // SAFETY: the HAL filled an AudioBufferList with mNumberBuffers trailing AudioBuffers.
+    if (size as usize) < size_of::<AudioBufferList>() {
+        return None;
+    }
+    // SAFETY: the HAL filled an AudioBufferList (8-byte aligned, see above) with
+    // mNumberBuffers trailing AudioBuffers inside the `size` bytes it reported.
     let list = unsafe { &*(raw.as_ptr() as *const AudioBufferList) };
     let n = list.mNumberBuffers as usize;
     let buffers = unsafe { std::slice::from_raw_parts(list.mBuffers.as_ptr(), n) };
@@ -265,6 +271,19 @@ fn pick_physical(
     rate: u32,
     bits: u32,
 ) -> Option<AudioStreamBasicDescription> {
+    pick_physical_with(formats, rate, bits, true)
+}
+
+/// [`pick_physical`] with the float fallback optional. DoP needs an *integer* physical
+/// format: through the HAL's float → integer conversion the 0x05/0xFA markers survive only
+/// if that conversion happens to be bit-exact, which is not guaranteed, and a corrupted DoP
+/// stream is full-scale noise at the DAC.
+fn pick_physical_with(
+    formats: &[RangedDescription],
+    rate: u32,
+    bits: u32,
+    allow_float: bool,
+) -> Option<AudioStreamBasicDescription> {
     let at_rate = |f: &RangedDescription| {
         f.format.mFormatID == K_FORMAT_LINEAR_PCM
             && f.format.mFormatFlags & FLAG_IS_NON_INTERLEAVED == 0
@@ -277,11 +296,15 @@ fn pick_physical(
             && f.format.mBitsPerChannel == bits
     });
     let chosen = int.or_else(|| {
-        formats.iter().find(|f| {
-            at_rate(f)
-                && f.format.mFormatFlags & FLAG_IS_FLOAT != 0
-                && f.format.mBitsPerChannel == 32
-        })
+        allow_float
+            .then(|| {
+                formats.iter().find(|f| {
+                    at_rate(f)
+                        && f.format.mFormatFlags & FLAG_IS_FLOAT != 0
+                        && f.format.mBitsPerChannel == 32
+                })
+            })
+            .flatten()
     })?;
     let mut d = chosen.format;
     d.mSampleRate = rate as f64;
@@ -337,11 +360,17 @@ pub fn list_devices() -> Vec<DeviceInfo> {
             // Float-only device: we convert, so every depth "works" but is not integer mode.
             bits = vec![16, 24, 32];
         }
+        // DoP needs an integer physical format (24 or 32 bits) at f_dsd / 16.
         let dop_max = DsdRate::catalog()
             .iter()
             .filter(|r| r.dop_possible())
             .flat_map(|r| [r.hz(44_100), r.hz(48_000)])
-            .filter(|hz| rates.contains(&(hz / 16)))
+            .filter(|hz| {
+                rates.contains(&(hz / 16))
+                    && integer_depths(&formats, hz / 16)
+                        .iter()
+                        .any(|b| matches!(b, 24 | 32))
+            })
             .max();
         out.push(DeviceInfo {
             backend: "coreaudio".into(),
@@ -497,6 +526,17 @@ impl CoreAudioOutput {
         self.integer_mode
     }
 
+    /// `true` when the stream offers a 24- or 32-bit *integer* physical format at `rate`
+    /// (what DoP needs).
+    fn supports_integer(&self, rate: u32) -> bool {
+        let Some(stream) = output_streams(self.device).first().copied() else {
+            return false;
+        };
+        integer_depths(&physical_formats(stream), rate)
+            .iter()
+            .any(|b| matches!(b, 24 | 32))
+    }
+
     fn hog(&mut self, on: bool) -> Result<(), OutputError> {
         // kAudioDevicePropertyHogMode is a pid_t: -1 = free, our pid = hogged by us.
         let want: i32 = if on { std::process::id() as i32 } else { -1 };
@@ -545,8 +585,9 @@ impl Output for CoreAudioOutput {
             .first()
             .ok_or_else(|| OutputError::NoDevice(self.device_name.clone()))?;
         let formats = physical_formats(stream);
-        let physical =
-            pick_physical(&formats, format.rate, format.bits).ok_or(OutputError::Unsupported {
+        // DoP: integer physical format only (see `pick_physical_with`).
+        let physical = pick_physical_with(&formats, format.rate, format.bits, !format.is_dsd())
+            .ok_or(OutputError::Unsupported {
                 device: self.device_name.clone(),
                 format,
             })?;
@@ -579,6 +620,15 @@ impl Output for CoreAudioOutput {
         let actual: AudioStreamBasicDescription =
             get(stream, K_STREAM_PHYSICAL_FORMAT, K_SCOPE_GLOBAL)?;
         self.integer_mode = actual.mFormatFlags & FLAG_IS_SIGNED_INTEGER != 0;
+        if format.is_dsd() && !self.integer_mode {
+            // The switch to an integer format was refused: DoP markers would not survive
+            // the HAL's float conversion. Give the device back rather than play noise.
+            self.close();
+            return Err(OutputError::Unsupported {
+                device: self.device_name.clone(),
+                format,
+            });
+        }
         let store_bits = actual.mBytesPerFrame * 8 / actual.mChannelsPerFrame.max(1);
         {
             let mut r = self.ring.0.lock().unwrap();
@@ -637,7 +687,7 @@ impl Output for CoreAudioOutput {
             .iter()
             .filter(|r| r.dop_possible())
             .flat_map(|r| [r.hz(44_100), r.hz(48_000)])
-            .filter(|hz| rates.contains(&(hz / 16)) && self.supports(hz / 16, 24))
+            .filter(|hz| rates.contains(&(hz / 16)) && self.supports_integer(hz / 16))
             .max();
         DsdCaps::dop_only(max)
     }

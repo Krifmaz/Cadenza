@@ -4,7 +4,9 @@ mod cli;
 
 use cadenza::config::{Config, RateSetting, Settings};
 use cadenza::engine::{Engine, EngineOptions, Event, Track};
-use cadenza_dsp::CoefficientCache;
+use cadenza_dsp::dsd::{DsdModulator, DsdOversampling, DsdPacking, DsdRate, OutputMode};
+use cadenza_dsp::gpu::GpuMode;
+use cadenza_dsp::{CoefficientCache, FilterKind};
 use clap::Parser;
 use cli::{Cli, Commands, Overrides};
 use std::sync::Arc;
@@ -61,7 +63,12 @@ fn main() {
                 let i = k.describe(in_rate, out_rate, cadenza_dsp::fir::DEFAULT_ATTENUATION_DB);
                 println!(
                     "{:<24} {:>9} {:>10.0} {:>9.0} {:>10.4}  {}",
-                    i.id, i.taps_at_rate, i.transition_hz, i.stopband_db, i.latency_seconds, i.label
+                    i.id,
+                    i.taps_at_rate,
+                    i.transition_hz,
+                    i.stopband_db,
+                    i.latency_seconds,
+                    i.label
                 );
             }
             println!("\nAny tap count works too: sinc-l-300000, sinc-ma-2m. Phase: l=linear m=minimum, a=apodizing.");
@@ -86,6 +93,57 @@ fn main() {
             );
             print!("{}", toml::to_string_pretty(&config).unwrap_or_default());
             Ok(())
+        }
+        Commands::Bench {
+            filter,
+            rate,
+            in_rate,
+            seconds,
+            channels,
+            no_dsd,
+            dsd_upsampling,
+            dsd_full,
+            json,
+        } => bench(
+            &config,
+            filter,
+            rate,
+            in_rate,
+            seconds,
+            channels,
+            !no_dsd,
+            dsd_upsampling,
+            dsd_full,
+            json,
+        ),
+        Commands::Endpoint {
+            name,
+            listen,
+            backend,
+            device,
+            buffer_ms,
+            no_mdns,
+        } => {
+            let mut ep = config.endpoint.clone();
+            if let Some(n) = name {
+                ep.name = n;
+            }
+            if let Some(l) = listen {
+                ep.listen = l;
+            }
+            if let Some(b) = backend {
+                ep.backend = b;
+            }
+            if let Some(d) = device {
+                ep.device = d;
+            }
+            if let Some(ms) = buffer_ms {
+                ep.buffer_ms = ms;
+            }
+            if no_mdns {
+                ep.mdns = false;
+            }
+            cadenza::endpoint::run(ep)
         }
     };
     if let Err(e) = result {
@@ -125,10 +183,151 @@ fn apply_overrides(config: &mut Config, o: &Overrides) {
     if let Some(c) = &o.convolution {
         config.dsp.convolution = c.clone();
     }
+    if let Some(m) = &o.output_mode {
+        match OutputMode::parse(m) {
+            Some(mode) => config.dsp.output_mode = mode,
+            None => eprintln!("ignoring unknown output mode {m:?} (pcm | dsd)"),
+        }
+    }
+    if let Some(r) = &o.dsd_rate {
+        match DsdRate::parse(r) {
+            Some(rate) => config.dsp.dsd_rate = rate,
+            None => eprintln!("ignoring unknown DSD rate {r:?} (dsd64 … dsd2048)"),
+        }
+    }
+    if let Some(m) = &o.dsd_modulator {
+        match DsdModulator::parse(m) {
+            Some(k) => config.dsp.dsd_modulator = k,
+            None => {
+                eprintln!("ignoring unknown DSD modulator {m:?} (asdm5, asdm7, dsd5v2, dsd7v2)")
+            }
+        }
+    }
+    if let Some(p) = &o.dsd_packing {
+        match DsdPacking::parse(p) {
+            Some(k) => config.dsp.dsd_packing = k,
+            None => eprintln!("ignoring unknown DSD packing {p:?} (dop | native)"),
+        }
+    }
+    if let Some(g) = o.dsd_gain {
+        config.dsp.dsd_gain_db = g;
+    }
+    if let Some(m) = &o.dsd_oversampling {
+        match DsdOversampling::parse(m) {
+            Some(k) => config.dsp.dsd_oversampling = k,
+            None => eprintln!("ignoring unknown DSD oversampling {m:?} (staged | full)"),
+        }
+    }
+    if let Some(h) = &o.headroom {
+        let h = h.trim();
+        if h.eq_ignore_ascii_case("auto") || h.is_empty() {
+            config.dsp.headroom_db = None;
+        } else {
+            match h.parse::<f64>() {
+                Ok(db) => config.dsp.headroom_db = Some(db),
+                Err(_) => eprintln!("ignoring headroom {h:?} (dB or auto)"),
+            }
+        }
+    }
+    if let Some(g) = &o.gpu {
+        match g.parse::<GpuMode>() {
+            Ok(mode) => config.dsp.gpu.mode = mode,
+            Err(_) => eprintln!("ignoring unknown gpu mode {g:?} (auto | off | cuda)"),
+        }
+    }
+    if let Some(m) = &o.matrix {
+        let m = m.trim().to_ascii_lowercase();
+        if m == "off" || m == "none" {
+            config.matrix.enabled = false;
+        } else if m == "custom" || cadenza_dsp::matrix::preset_ids().contains(&m.as_str()) {
+            config.matrix.enabled = true;
+            config.matrix.preset = m;
+        } else {
+            eprintln!(
+                "ignoring unknown matrix preset {m:?} ({}, custom, off)",
+                cadenza_dsp::matrix::preset_ids().join(", ")
+            );
+        }
+    }
+}
+
+/// Parse `705600`, `705.6` (kHz) or `44.1k`.
+fn parse_rate(s: &str) -> Option<u32> {
+    let t = s.trim().to_ascii_lowercase();
+    let t = t.trim_end_matches("hz").trim_end_matches('k').trim();
+    let v: f64 = t.parse().ok()?;
+    let hz = if v < 1000.0 { v * 1000.0 } else { v };
+    (hz > 0.0).then_some(hz.round() as u32)
+}
+
+#[allow(clippy::too_many_arguments)]
+fn bench(
+    config: &Config,
+    filter: Option<String>,
+    rate: Option<String>,
+    in_rate: Option<u32>,
+    seconds: f64,
+    channels: usize,
+    dsd: bool,
+    dsd_upsampling: bool,
+    dsd_full: bool,
+    json: bool,
+) -> anyhow::Result<()> {
+    let filter_id = filter.unwrap_or_else(|| config.dsp.filter.clone());
+    let filter = FilterKind::parse(&filter_id)
+        .ok_or_else(|| anyhow::anyhow!("unknown filter {filter_id:?} (see `cadenza filters`)"))?;
+    let out_rate = match rate {
+        Some(r) => parse_rate(&r).ok_or_else(|| anyhow::anyhow!("bad rate {r:?}"))?,
+        None => 705_600,
+    };
+    let in_rate = in_rate.unwrap_or_else(|| {
+        cadenza_dsp::resampler::RateFamily::of(out_rate)
+            .map(cadenza_dsp::resampler::RateFamily::base)
+            .unwrap_or(44_100)
+    });
+    anyhow::ensure!(
+        out_rate > in_rate,
+        "the output rate must be above the source rate"
+    );
+    let options = cadenza::bench::BenchOptions {
+        filter,
+        in_rate,
+        out_rate,
+        channels: channels.clamp(1, 32),
+        seconds: seconds.clamp(0.1, 60.0),
+        attenuation_db: config.dsp.attenuation_db,
+        gpu: config.dsp.gpu,
+        dsd,
+        modulator: config.dsp.dsd_modulator,
+        dsd_upsampling,
+        dsd_full,
+        cache: CoefficientCache::default_location(),
+    };
+    if !json {
+        eprintln!(
+            "Benchmarking {} {} → {} Hz, {} ch, {:.1} s of audio per row ({})…",
+            filter.id(),
+            in_rate,
+            out_rate,
+            options.channels,
+            options.seconds,
+            cadenza_dsp::gpu::Backend::detect(&config.dsp.gpu).label()
+        );
+    }
+    let rows = cadenza::bench::run(&options);
+    if json {
+        println!("{}", serde_json::to_string_pretty(&rows)?);
+    } else {
+        print!("{}", cadenza::bench::table(&rows));
+    }
+    Ok(())
 }
 
 fn devices() {
-    println!("{:<8} {:<40} {:<36} RATES / BITS", "BACKEND", "ID", "NAME");
+    println!(
+        "{:<9} {:<40} {:<32} RATES / BITS · CHANNELS · DSD · MODE",
+        "BACKEND", "ID", "NAME"
+    );
     for d in cadenza::output::list_devices() {
         let rates: Vec<String> = d
             .rates
@@ -136,26 +335,39 @@ fn devices() {
             .map(|r| cadenza_dsp::signal_path::rate_label(*r))
             .collect();
         println!(
-            "{:<8} {:<40} {:<36} {} kHz · {} bit{}{}",
+            "{:<9} {:<40} {:<32} {} kHz · {} bit · {} · {}{}{}",
             d.backend,
-            d.id,
-            d.name.chars().take(36).collect::<String>(),
+            d.id.chars().take(40).collect::<String>(),
+            d.name.chars().take(32).collect::<String>(),
             if rates.is_empty() {
                 "?".to_string()
             } else {
                 rates.join("/")
             },
-            d.bits
-                .iter()
-                .map(|b| b.to_string())
-                .collect::<Vec<_>>()
-                .join("/"),
-            if d.exclusive { " · exclusive" } else { "" },
+            if d.bits.is_empty() {
+                "?".to_string()
+            } else {
+                d.bits
+                    .iter()
+                    .map(|b| b.to_string())
+                    .collect::<Vec<_>>()
+                    .join("/")
+            },
+            match d.channels {
+                Some(c) => format!("{c} ch"),
+                None => "? ch".to_string(),
+            },
+            d.dsd.summary(),
+            if d.exclusive {
+                " · exclusive"
+            } else {
+                " · shared"
+            },
             if d.default { " · default" } else { "" },
         );
     }
     println!(
-        "\nCompiled backends: {}",
+        "\nCompiled backends: {} (endpoint://<name> streams to a `cadenza endpoint` on the network)",
         cadenza::output::backends().join(", ")
     );
 }
@@ -236,4 +448,57 @@ fn serve(config: Config, path: std::path::PathBuf) -> anyhow::Result<()> {
         cadenza::encore::start(Arc::new(config.encore.clone()), engine.clone());
     }
     runtime.block_on(cadenza::api::serve(&config.server.listen, engine))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn overrides_cover_every_v2_setting() {
+        let mut c = Config::default();
+        let o = Overrides {
+            output_mode: Some("dsd".into()),
+            dsd_rate: Some("dsd512".into()),
+            dsd_modulator: Some("dsd5v2".into()),
+            dsd_packing: Some("native".into()),
+            dsd_gain: Some(-4.0),
+            dsd_oversampling: Some("full".into()),
+            headroom: Some("-2.5".into()),
+            gpu: Some("off".into()),
+            matrix: Some("2.1".into()),
+            dither: Some("ns9".into()),
+            ..Default::default()
+        };
+        apply_overrides(&mut c, &o);
+        assert_eq!(c.dsp.output_mode, OutputMode::Dsd);
+        assert_eq!(c.dsp.dsd_rate, DsdRate::Dsd512);
+        assert_eq!(c.dsp.dsd_modulator, DsdModulator::Dsd5v2);
+        assert_eq!(c.dsp.dsd_packing, DsdPacking::Native);
+        assert_eq!(c.dsp.dsd_gain_db, -4.0);
+        assert_eq!(c.dsp.dsd_oversampling, DsdOversampling::Full);
+        assert_eq!(c.dsp.headroom_db, Some(-2.5));
+        assert_eq!(c.dsp.gpu.mode, GpuMode::Off);
+        assert!(c.matrix.enabled);
+        assert_eq!(c.matrix.preset, "2.1");
+        assert_eq!(c.dsp.dither, "ns9");
+        let o = Overrides {
+            headroom: Some("auto".into()),
+            matrix: Some("off".into()),
+            dsd_rate: Some("dsd9000".into()),
+            ..Default::default()
+        };
+        apply_overrides(&mut c, &o);
+        assert_eq!(c.dsp.headroom_db, None);
+        assert!(!c.matrix.enabled);
+        assert_eq!(
+            c.dsp.dsd_rate,
+            DsdRate::Dsd512,
+            "unknown values are ignored"
+        );
+        assert_eq!(parse_rate("705.6"), Some(705_600));
+        assert_eq!(parse_rate("1536000"), Some(1_536_000));
+        assert_eq!(parse_rate("44.1k"), Some(44_100));
+        assert_eq!(parse_rate("x"), None);
+    }
 }

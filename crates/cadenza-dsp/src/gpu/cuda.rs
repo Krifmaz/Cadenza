@@ -335,6 +335,14 @@ impl BlockConvolver for Convolver {
     fn latency(&self) -> usize {
         self.block
     }
+
+    fn reset(&mut self) {
+        Convolver::reset(self);
+    }
+
+    fn on_gpu(&self) -> bool {
+        true
+    }
 }
 
 #[cfg(test)]

@@ -50,7 +50,9 @@ impl BenchResult {
 /// default on-disk coefficient cache. Returns seconds-of-audio-per-second in
 /// [`BenchResult::realtime_factor`].
 pub fn run(filter: FilterKind, out_rate: u32) -> Result<BenchResult, ResampleError> {
-    let in_rate = RateFamily::of(out_rate).map(RateFamily::base).unwrap_or(44_100);
+    let in_rate = RateFamily::of(out_rate)
+        .map(RateFamily::base)
+        .unwrap_or(44_100);
     run_with(
         filter,
         in_rate,

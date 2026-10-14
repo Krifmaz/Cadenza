@@ -82,7 +82,9 @@ impl DsdToPcm {
         }
         let r_cic = r / FIR_DECIMATION;
         if r_cic > 1 << 12 {
-            return Err(DsdError::Rate(format!("CIC decimation {r_cic} is too large")));
+            return Err(DsdError::Rate(format!(
+                "CIC decimation {r_cic} is too large"
+            )));
         }
         let h = design_filter(r_cic);
         let prime = Self::prime(r_cic, h.len());
@@ -162,7 +164,10 @@ impl DsdToPcm {
     pub fn push(&mut self, planar: &[&[u8]], out: &mut Vec<f64>) {
         assert_eq!(planar.len(), self.channels, "channel count mismatch");
         let n = planar[0].len();
-        assert!(planar.iter().all(|p| p.len() == n), "channels differ in length");
+        assert!(
+            planar.iter().all(|p| p.len() == n),
+            "channels differ in length"
+        );
         self.input_frames += 8 * n as u64;
         let r = self.r_cic;
         let scale = self.cic_scale;
@@ -307,9 +312,14 @@ mod tests {
             let nfft = 1 << 16;
             let db = magnitude_db(&h, nfft);
             let bin = |f: f64| (f * nfft as f64).round() as usize; // f relative to CIC rate
-            // Combined CIC + compensation + FIR response in the passband, to 20 kHz at 352.8k.
+                                                                   // Combined CIC + compensation + FIR response in the passband, to 20 kHz at 352.8k.
             let r = r_cic as f64;
-            for (b, d) in db.iter().enumerate().take(bin(20_000.0 / (4.0 * 352_800.0)) + 1).skip(1) {
+            for (b, d) in db
+                .iter()
+                .enumerate()
+                .take(bin(20_000.0 / (4.0 * 352_800.0)) + 1)
+                .skip(1)
+            {
                 let f = b as f64 / nfft as f64; // cycles per CIC-output sample
                 let fd = f / r; // cycles per DSD sample
                 let cic = ((PI * fd * r).sin() / (r * (PI * fd).sin())).abs().powi(5);
@@ -317,7 +327,12 @@ mod tests {
                 assert!(total.abs() < 0.01, "R={r_cic} bin {b}: {total:.4} dB");
             }
             // Stopband from 38 kHz (relative to 352.8k) up to the CIC-rate Nyquist.
-            for (b, d) in db.iter().enumerate().take(nfft / 2 + 1).skip(bin(STOPBAND / 4.0)) {
+            for (b, d) in db
+                .iter()
+                .enumerate()
+                .take(nfft / 2 + 1)
+                .skip(bin(STOPBAND / 4.0))
+            {
                 assert!(*d < -150.0, "R={r_cic} bin {b}: {d:.1} dB");
             }
         }
@@ -390,6 +405,10 @@ mod tests {
         assert_eq!(out.len(), 4096 * 8 / 8 * 2);
         let mid = &out[out.len() / 2 - 200..out.len() / 2 + 200];
         assert!(mid.iter().step_by(2).all(|v| (v - 1.0).abs() < 1e-6));
-        assert!(mid.iter().skip(1).step_by(2).all(|v| (v + 1.0).abs() < 1e-6));
+        assert!(mid
+            .iter()
+            .skip(1)
+            .step_by(2)
+            .all(|v| (v + 1.0).abs() < 1e-6));
     }
 }

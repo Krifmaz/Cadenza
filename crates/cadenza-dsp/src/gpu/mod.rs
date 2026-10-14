@@ -161,7 +161,7 @@ impl Backend {
         }
         let backend = match Self::probe(config) {
             Ok(b) => {
-                log::info!("GPU: {} · 64-bit", b.label());
+                log::info!("GPU: {} available", b.label());
                 b
             }
             Err(e) => {
@@ -221,19 +221,28 @@ impl Backend {
         }
     }
 
-    /// The signal path stage for the compute backend (id `gpu`).
-    pub fn stage(&self, config: &GpuConfig) -> Stage {
+    /// The signal path stage for the compute backend (id `gpu`). `used` says whether a
+    /// convolution engine of this chain actually runs on the device: the stage is active
+    /// (and the UI badge green) only then – a detected card that no stage of the current
+    /// chain uses is reported as `available, not used by this chain yet`.
+    pub fn stage(&self, config: &GpuConfig, used: bool) -> Stage {
+        let used = used && self.is_gpu();
         let detail = match self {
-            Backend::Cuda { .. } => self.label(),
+            Backend::Cuda { .. } if used => format!("{} · room convolution", self.label()),
+            Backend::Cuda { .. } => {
+                format!("{} · available, not used by this chain yet", self.label())
+            }
             Backend::Cpu { reason } if config.mode == GpuMode::Off => self.label(),
             Backend::Cpu { reason } => format!("{} · {reason}", self.label()),
         };
+        let mut params = self.report(config);
+        params["used"] = json!(used);
         Stage {
             id: "gpu".into(),
             name: "Compute".into(),
             detail,
-            params: self.report(config),
-            active: self.is_gpu(),
+            params,
+            active: used,
         }
     }
 
@@ -330,6 +339,9 @@ impl BlockConvolver for Convolver {
     fn latency(&self) -> usize {
         match *self {}
     }
+    fn reset(&mut self) {
+        match *self {}
+    }
 }
 
 #[cfg(test)]
@@ -394,7 +406,7 @@ mod tests {
         }
 
         // The stage and report say CPU and carry the reason.
-        let stage = backend.stage(&config);
+        let stage = backend.stage(&config, true);
         assert_eq!(stage.id, "gpu");
         assert!(!stage.active);
         assert!(
@@ -418,10 +430,13 @@ mod tests {
             }
         );
         assert_eq!(
-            off.stage(&GpuConfig {
-                mode: GpuMode::Off,
-                device: 0
-            })
+            off.stage(
+                &GpuConfig {
+                    mode: GpuMode::Off,
+                    device: 0
+                },
+                true
+            )
             .detail,
             "CPU · 64-bit"
         );
@@ -487,10 +502,19 @@ mod tests {
         assert_eq!(cuda.device_short_name().unwrap(), "RTX 4060");
         assert_eq!(short_device_name("Tesla T4"), "T4");
         assert_eq!(short_device_name("NVIDIA"), "NVIDIA");
-        let stage = cuda.stage(&GpuConfig::default());
+        let stage = cuda.stage(&GpuConfig::default(), true);
         assert!(stage.active);
-        assert_eq!(stage.detail, "CUDA (RTX 4060) · 64-bit");
+        assert_eq!(stage.detail, "CUDA (RTX 4060) · 64-bit · room convolution");
         assert_eq!(stage.params["compute_capability"], "8.9");
         assert_eq!(stage.params["precision"], "f64");
+        assert_eq!(stage.params["used"], true);
+        // Detected but not driving any engine of this chain: honest, and not active.
+        let idle = cuda.stage(&GpuConfig::default(), false);
+        assert!(!idle.active);
+        assert_eq!(
+            idle.detail,
+            "CUDA (RTX 4060) · 64-bit · available, not used by this chain yet"
+        );
+        assert_eq!(idle.params["used"], false);
     }
 }

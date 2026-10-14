@@ -171,7 +171,8 @@ impl FirSpec {
             // ω = (2α/N)·√(A·ln10/10), and the transition spans ±ω.
             Window::Gaussian => {
                 let alpha = gaussian_alpha(self.attenuation_db);
-                let omega = (2.0 * alpha / n) * (self.attenuation_db * std::f64::consts::LN_10 / 10.0).sqrt();
+                let omega = (2.0 * alpha / n)
+                    * (self.attenuation_db * std::f64::consts::LN_10 / 10.0).sqrt();
                 omega / PI
             }
             // Main lobe of a 3-term cosine window: nulls at ±3/N.
@@ -344,7 +345,11 @@ pub fn dolph_chebyshev_window(n: usize, attenuation_db: f64) -> Vec<f64> {
                 let c = theta.cos();
                 (c.abs(), c < 0.0)
             };
-            let half = if negative { (PI - theta) / 2.0 } else { theta / 2.0 };
+            let half = if negative {
+                (PI - theta) / 2.0
+            } else {
+                theta / 2.0
+            };
             let excess = beta_minus_1 * c - 2.0 * half.sin().powi(2); // |x| − 1
             let v = if excess > 0.0 {
                 // |x| > 1: cosh(M·acosh(1 + ε)), acosh(1+ε) = ln1p(ε + √(ε(2+ε))).
@@ -866,7 +871,10 @@ impl FilterKind {
 
     /// The catalogue described for the reference ×16 conversion.
     pub fn catalog_info() -> Vec<FilterInfo> {
-        Self::catalog().iter().map(FilterKind::describe_default).collect()
+        Self::catalog()
+            .iter()
+            .map(FilterKind::describe_default)
+            .collect()
     }
 }
 
@@ -969,7 +977,10 @@ mod tests {
             );
             let worst = db[null_bin * 2..].iter().cloned().fold(f64::MIN, f64::max);
             let side = peak - worst;
-            assert!((side - a).abs() < 1.0, "n={n}: sidelobes at −{side:.2} dB, wanted −{a}");
+            assert!(
+                (side - a).abs() < 1.0,
+                "n={n}: sidelobes at −{side:.2} dB, wanted −{a}"
+            );
         }
     }
 
@@ -991,8 +1002,12 @@ mod tests {
                 "{window:?}: stopband {atten:.1} dB < {want:.1} (transition {:.3e})",
                 spec.transition_width()
             );
-            let max_ripple = 20.0 * (1.0 + 10f64.powf(-spec.attenuation_db / 20.0)).log10() * 4.0 + 1e-6;
-            assert!(ripple < max_ripple.max(1e-4), "{window:?}: passband ripple {ripple} dB");
+            let max_ripple =
+                20.0 * (1.0 + 10f64.powf(-spec.attenuation_db / 20.0)).log10() * 4.0 + 1e-6;
+            assert!(
+                ripple < max_ripple.max(1e-4),
+                "{window:?}: passband ripple {ripple} dB"
+            );
         }
     }
 
@@ -1019,10 +1034,16 @@ mod tests {
             let front = energy(&min[..tenth]) / energy(&min);
             let front_lin = energy(&lin[..tenth]) / energy(&lin);
             assert!(front > 0.9, "{window:?}: min-phase front energy {front}");
-            assert!(front_lin < 0.01, "{window:?}: linear-phase front energy {front_lin}");
+            assert!(
+                front_lin < 0.01,
+                "{window:?}: linear-phase front energy {front_lin}"
+            );
 
             let (ripple, atten) = measure(&min, &spec, 1 << 16);
-            assert!(ripple < 0.05, "{window:?}: min-phase passband ripple {ripple} dB");
+            assert!(
+                ripple < 0.05,
+                "{window:?}: min-phase passband ripple {ripple} dB"
+            );
             assert!(atten >= 100.0, "{window:?}: min-phase stopband {atten} dB");
         }
     }
@@ -1035,19 +1056,32 @@ mod tests {
             assert_eq!(FilterKind::parse(&k.id()), Some(*k), "{}", k.id());
             let info = k.describe_default();
             assert_eq!(info.id, k.id());
-            assert!(info.transition_hz > 0.0 && info.stopband_db >= 70.0, "{}", k.id());
+            assert!(
+                info.transition_hz > 0.0 && info.stopband_db >= 70.0,
+                "{}",
+                k.id()
+            );
             assert!(info.latency_seconds >= 0.0);
         }
         assert_eq!(FilterKind::parse("sinc-ma-1m").unwrap().taps, 1 << 20);
         assert_eq!(FilterKind::parse("sinc-l-65536").unwrap().taps, 65536);
-        assert_eq!(FilterKind::parse("sinc-xtr-l-16m").unwrap().family, Family::SincXtr);
+        assert_eq!(
+            FilterKind::parse("sinc-xtr-l-16m").unwrap().family,
+            Family::SincXtr
+        );
         assert_eq!(FilterKind::parse("sinc-xtr-l-16m").unwrap().taps, 1 << 24);
         assert_eq!(
             FilterKind::parse("poly-sinc-gauss-la-long").unwrap(),
             FilterKind::new(Family::PolySincGauss, Phase::Linear, true, GAUSS_LONG)
         );
-        assert_eq!(FilterKind::parse("closed-form-m-1m").unwrap().family, Family::ClosedForm);
-        assert_eq!(FilterKind::parse("poly-sinc-ext3-l-8k").unwrap().family, Family::PolySincExt3);
+        assert_eq!(
+            FilterKind::parse("closed-form-m-1m").unwrap().family,
+            Family::ClosedForm
+        );
+        assert_eq!(
+            FilterKind::parse("poly-sinc-ext3-l-8k").unwrap().family,
+            Family::PolySincExt3
+        );
         assert!(FilterKind::parse("sinc-x-64k").is_none());
         assert!(FilterKind::parse("sinc-l-7").is_none());
         assert!(FilterKind::parse("sinc-l-32m").is_none());
@@ -1072,17 +1106,30 @@ mod tests {
         assert_eq!(at32.taps_at_rate, (1 << 21) + 1);
         for info in [&at2, &at32] {
             let rel = (info.transition_hz - at16.transition_hz).abs() / at16.transition_hz;
-            assert!(rel < 1e-3, "transition {} vs {}", info.transition_hz, at16.transition_hz);
+            assert!(
+                rel < 1e-3,
+                "transition {} vs {}",
+                info.transition_hz,
+                at16.transition_hz
+            );
         }
     }
 
     #[test]
     fn sinc_xtr_is_specified_as_promised() {
-        let xtr = FilterKind::parse("sinc-xtr-l-16m").unwrap().describe_default();
+        let xtr = FilterKind::parse("sinc-xtr-l-16m")
+            .unwrap()
+            .describe_default();
         assert!(xtr.stopband_db >= 200.0);
-        assert!(xtr.transition_percent < 0.5, "transition {}%", xtr.transition_percent);
+        assert!(
+            xtr.transition_percent < 0.5,
+            "transition {}%",
+            xtr.transition_percent
+        );
         assert_eq!(xtr.bytes, ((1 << 24) + 1) * 8);
-        let spec = FilterKind::parse("sinc-xtr-m-8m").unwrap().spec_for_ratio(16, 1, 150.0);
+        let spec = FilterKind::parse("sinc-xtr-m-8m")
+            .unwrap()
+            .spec_for_ratio(16, 1, 150.0);
         assert_eq!(spec.taps, (1 << 23) + 1);
         assert_eq!(spec.attenuation_db, 200.0);
         assert!(spec.cache_key().starts_with("sinc-minimum-8388609-"));

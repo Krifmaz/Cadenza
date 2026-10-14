@@ -93,7 +93,7 @@ impl DsdStage {
             kind.order(),
             dsd_rate,
             super::modulator::NTF_BAND_HZ,
-            kind.h_inf(),
+            kind.h_inf(config.rate.multiple()),
         ));
         let modulators = (0..channels)
             .map(|_| SigmaDelta::with_ntf(kind, dsd_rate, Arc::clone(&ntf)))
@@ -145,11 +145,18 @@ impl DsdStage {
     }
     /// `DSD256 (DoP)` style label of what leaves the stage.
     pub fn output_label(&self) -> String {
-        format!("{} ({})", self.config.rate.label(), self.config.packing.label())
+        format!(
+            "{} ({})",
+            self.config.rate.label(),
+            self.config.packing.label()
+        )
     }
     /// Guard engagements (clips, state clamps, resets) over all channels so far.
     pub fn guard_engagements(&self) -> u64 {
-        self.modulators.iter().map(SigmaDelta::guard_engagements).sum()
+        self.modulators
+            .iter()
+            .map(SigmaDelta::guard_engagements)
+            .sum()
     }
     /// Latency in seconds: the short stage's group delay (the modulator adds none).
     pub fn latency_seconds(&self) -> f64 {
@@ -171,7 +178,14 @@ impl DsdStage {
         let gain = self.gain;
         for (c, buf) in self.planar.iter_mut().enumerate() {
             buf.clear();
-            buf.extend(interleaved.iter().skip(c).step_by(ch).take(frames).map(|v| v * gain));
+            buf.extend(
+                interleaved
+                    .iter()
+                    .skip(c)
+                    .step_by(ch)
+                    .take(frames)
+                    .map(|v| v * gain),
+            );
         }
         let Self {
             interpolator,
@@ -270,7 +284,9 @@ impl DsdStage {
                     rate_label(self.dsd_rate)
                 ),
                 params: json!({ "mode": "full", "factor": 1, "out_rate": self.dsd_rate }),
-                active: false,
+                // Active: it describes what the chain does (the long FIR runs to the DSD
+                // rate), even though no separate short stage exists in this mode.
+                active: true,
             }),
         }
         let guards = self.guard_engagements();
@@ -340,14 +356,31 @@ mod tests {
     fn input_rate_rules() {
         let c = DsdConfig::default(); // DSD256 staged
         assert_eq!(DsdStage::pcm_input_rate(&c, 44_100), 1_411_200);
-        let c = DsdConfig { rate: DsdRate::Dsd1024, ..Default::default() };
+        let c = DsdConfig {
+            rate: DsdRate::Dsd1024,
+            ..Default::default()
+        };
         assert_eq!(DsdStage::pcm_input_rate(&c, 44_100), 2_822_400);
-        let c = DsdConfig { rate: DsdRate::Dsd1024, oversampling: DsdOversampling::Full, ..Default::default() };
+        let c = DsdConfig {
+            rate: DsdRate::Dsd1024,
+            oversampling: DsdOversampling::Full,
+            ..Default::default()
+        };
         assert_eq!(DsdStage::pcm_input_rate(&c, 48_000), 49_152_000);
         assert!(DsdStage::new(352_800, 44_100, 2, DsdConfig::default()).is_err());
-        let c = DsdConfig { rate: DsdRate::Dsd2048, ..Default::default() };
-        assert!(DsdStage::new(DsdStage::pcm_input_rate(&c, 44_100), 44_100, 2, c).is_err(), "DSD2048 over DoP");
-        let c = DsdConfig { rate: DsdRate::Dsd2048, packing: DsdPacking::Native, ..Default::default() };
+        let c = DsdConfig {
+            rate: DsdRate::Dsd2048,
+            ..Default::default()
+        };
+        assert!(
+            DsdStage::new(DsdStage::pcm_input_rate(&c, 44_100), 44_100, 2, c).is_err(),
+            "DSD2048 over DoP"
+        );
+        let c = DsdConfig {
+            rate: DsdRate::Dsd2048,
+            packing: DsdPacking::Native,
+            ..Default::default()
+        };
         let s = DsdStage::new(DsdStage::pcm_input_rate(&c, 44_100), 44_100, 2, c).unwrap();
         assert_eq!(s.dsd_rate(), 90_316_800);
         assert_eq!(s.device_frame_rate(), 2_822_400);
@@ -355,7 +388,12 @@ mod tests {
 
     #[test]
     fn staged_dsd64_dop_stream_is_valid_and_clean() {
-        let c = DsdConfig { rate: DsdRate::Dsd64, modulator: DsdModulator::Asdm7, gain_db: 0.0, ..Default::default() };
+        let c = DsdConfig {
+            rate: DsdRate::Dsd64,
+            modulator: DsdModulator::Asdm7,
+            gain_db: 0.0,
+            ..Default::default()
+        };
         let pcm_rate = DsdStage::pcm_input_rate(&c, 44_100);
         assert_eq!(pcm_rate, 352_800);
         let mut s = DsdStage::new(pcm_rate, 44_100, 2, c).unwrap();
@@ -380,7 +418,10 @@ mod tests {
         let planar = unpack_dop(&words, 2).expect("DoP markers alternate");
         let (snr_l, level_l) = tone_snr_db(&planar[0], 2_822_400, hz, 20_000.0, nfft);
         let (snr_r, _) = tone_snr_db(&planar[1], 2_822_400, hz, 20_000.0, nfft);
-        assert!(snr_l > 110.0 && snr_r > 110.0, "SNR {snr_l:.1} / {snr_r:.1} dB");
+        assert!(
+            snr_l > 110.0 && snr_r > 110.0,
+            "SNR {snr_l:.1} / {snr_r:.1} dB"
+        );
         assert!((level_l + 6.02).abs() < 0.05, "level {level_l:.2} dBFS");
         assert_eq!(s.guard_engagements(), 0);
         let stages = s.stages();
@@ -414,7 +455,11 @@ mod tests {
         // Average bit density ≈ 50 % for a symmetric tone.
         let ones: u32 = words.iter().map(|w| w.count_ones()).sum();
         assert!((ones as f64 / (words.len() * 32) as f64 - 0.5).abs() < 0.02);
-        assert_eq!(s.guard_engagements(), 0, "0 dBFS at −3 dB gain is inside the stable range");
+        assert_eq!(
+            s.guard_engagements(),
+            0,
+            "0 dBFS at −3 dB gain is inside the stable range"
+        );
         assert!(s.stages()[0].detail.contains("64× (full)"));
     }
 

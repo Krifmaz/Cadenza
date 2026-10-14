@@ -198,7 +198,10 @@ impl<R: Read + Seek> DsdReader<R> {
 
     /// Read up to `max_frames` frames (whole bytes, at least one) as planar MSB-first
     /// bytes, one `Vec` per channel. `Ok(None)` at the end.
-    pub fn read_frames(&mut self, max_frames: usize) -> Result<Option<Vec<Vec<u8>>>, DsdDecodeError> {
+    pub fn read_frames(
+        &mut self,
+        max_frames: usize,
+    ) -> Result<Option<Vec<Vec<u8>>>, DsdDecodeError> {
         let ch = self.info.channels as usize;
         let remaining_bytes = self.info.frames.saturating_sub(self.pos).div_ceil(8);
         if remaining_bytes == 0 {
@@ -223,7 +226,8 @@ impl<R: Read + Seek> DsdReader<R> {
                 while collected < want {
                     let g = byte_pos / bs as u64;
                     let off = (byte_pos % bs as u64) as usize;
-                    let got = self.read_at(self.info.data_offset + g * (bs * ch) as u64, &mut group)?;
+                    let got =
+                        self.read_at(self.info.data_offset + g * (bs * ch) as u64, &mut group)?;
                     if got == 0 {
                         break;
                     }
@@ -232,7 +236,13 @@ impl<R: Read + Seek> DsdReader<R> {
                     let n = (bs - off).min(want - collected);
                     for (c, p) in planar.iter_mut().enumerate() {
                         let block = &group[c * bs + off..c * bs + off + n];
-                        p.extend(block.iter().map(|b| if self.info.lsb_first { b.reverse_bits() } else { *b }));
+                        p.extend(block.iter().map(|b| {
+                            if self.info.lsb_first {
+                                b.reverse_bits()
+                            } else {
+                                *b
+                            }
+                        }));
                     }
                     collected += n;
                     byte_pos += n as u64;
@@ -289,10 +299,14 @@ fn parse_dsf<R: Read + Seek>(src: &mut R) -> Result<DsdInfo, DsdDecodeError> {
     let frames = u64le(&fmt[32..]);
     let block_size = u32le(&fmt[40..]) as usize;
     if version != 1 || format_id != 0 {
-        return Err(bad(format!("DSF format version {version} / id {format_id}")));
+        return Err(bad(format!(
+            "DSF format version {version} / id {format_id}"
+        )));
     }
     if !matches!(bits, 1 | 8) || block_size == 0 {
-        return Err(bad(format!("DSF bits per sample {bits}, block {block_size}")));
+        return Err(bad(format!(
+            "DSF bits per sample {bits}, block {block_size}"
+        )));
     }
     if fmt_size > 52 {
         src.seek(SeekFrom::Current((fmt_size - 52) as i64))?;
@@ -385,7 +399,9 @@ fn parse_dff<R: Read + Seek>(src: &mut R) -> Result<DsdInfo, DsdDecodeError> {
                     let here = src.stream_position()?;
                     if matches!(&h[0..4], b"DIAR" | b"DITI") && sz >= 4 {
                         let n = u32be(&read_exact(src, 4)?) as usize;
-                        let text = String::from_utf8_lossy(&read_exact(src, n.min((sz - 4) as usize))?).to_string();
+                        let text =
+                            String::from_utf8_lossy(&read_exact(src, n.min((sz - 4) as usize))?)
+                                .to_string();
                         if &h[0..4] == b"DIAR" {
                             tags.artist = Some(text);
                         } else {
@@ -432,7 +448,11 @@ fn read_id3<R: Read + Seek>(src: &mut R, at: u64) -> Result<Tags, DsdDecodeError
     let mut tags = Tags::default();
     let mut i = if h[5] & 0x40 != 0 && body.len() >= 4 {
         // Extended header.
-        let ext = if major == 4 { syncsafe(&body[0..4]) as usize } else { u32be(&body[0..4]) as usize + 4 };
+        let ext = if major == 4 {
+            syncsafe(&body[0..4]) as usize
+        } else {
+            u32be(&body[0..4]) as usize + 4
+        };
         ext.min(body.len())
     } else {
         0
@@ -442,7 +462,11 @@ fn read_id3<R: Read + Seek>(src: &mut R, at: u64) -> Result<Tags, DsdDecodeError
         if id[0] == 0 {
             break;
         }
-        let fsize = if major == 4 { syncsafe(&body[i + 4..i + 8]) as usize } else { u32be(&body[i + 4..i + 8]) as usize };
+        let fsize = if major == 4 {
+            syncsafe(&body[i + 4..i + 8]) as usize
+        } else {
+            u32be(&body[i + 4..i + 8]) as usize
+        };
         let start = i + 10;
         let end = (start + fsize).min(body.len());
         if matches!(id, b"TIT2" | b"TPE1" | b"TALB") && end > start {
@@ -475,7 +499,13 @@ fn decode_id3_text(b: &[u8]) -> String {
             };
             let units: Vec<u16> = bytes
                 .chunks_exact(2)
-                .map(|c| if be { u16::from_be_bytes([c[0], c[1]]) } else { u16::from_le_bytes([c[0], c[1]]) })
+                .map(|c| {
+                    if be {
+                        u16::from_be_bytes([c[0], c[1]])
+                    } else {
+                        u16::from_le_bytes([c[0], c[1]])
+                    }
+                })
                 .collect();
             String::from_utf16_lossy(&units)
         }
@@ -507,7 +537,9 @@ impl DsdDecoder {
     pub fn open(source: &Source) -> Result<Self, DsdDecodeError> {
         let src: Box<dyn ReadSeek> = match source {
             Source::Path { path } => Box::new(std::fs::File::open(path)?),
-            Source::Url { url, headers } => Box::new(super::source::HttpSource::open(url, headers)?),
+            Source::Url { url, headers } => {
+                Box::new(super::source::HttpSource::open(url, headers)?)
+            }
         };
         Self::from_reader(src)
     }
@@ -516,7 +548,11 @@ impl DsdDecoder {
     pub fn from_reader(src: Box<dyn ReadSeek>) -> Result<Self, DsdDecodeError> {
         let reader = DsdReader::new(src)?;
         let pcm_rate = DsdToPcm::natural_pcm_rate(reader.info().rate);
-        let converter = DsdToPcm::new(reader.info().rate, pcm_rate, reader.info().channels as usize)?;
+        let converter = DsdToPcm::new(
+            reader.info().rate,
+            pcm_rate,
+            reader.info().channels as usize,
+        )?;
         Ok(Self {
             reader,
             converter,
@@ -561,7 +597,9 @@ impl DsdDecoder {
     }
     /// Duration.
     pub fn duration(&self) -> Option<std::time::Duration> {
-        Some(std::time::Duration::from_secs_f64(self.reader.info().duration()))
+        Some(std::time::Duration::from_secs_f64(
+            self.reader.info().duration(),
+        ))
     }
 
     /// Next chunk of interleaved PCM at [`DsdDecoder::pcm_rate`]; `Ok(None)` at the end.
@@ -614,7 +652,13 @@ impl DsdDecoder {
 
 /// Write a DSF file from planar MSB-first bytes (equal lengths). `lsb_first` selects the
 /// standard 1-bit (LSB-first) layout; `false` writes the 8-bit (MSB-first) variant.
-pub fn write_dsf(path: &Path, rate: u32, planar: &[Vec<u8>], lsb_first: bool, tags: &Tags) -> io::Result<()> {
+pub fn write_dsf(
+    path: &Path,
+    rate: u32,
+    planar: &[Vec<u8>],
+    lsb_first: bool,
+    tags: &Tags,
+) -> io::Result<()> {
     let ch = planar.len();
     assert!(ch > 0 && planar.iter().all(|p| p.len() == planar[0].len()));
     let bytes = planar[0].len();
@@ -627,12 +671,29 @@ pub fn write_dsf(path: &Path, rate: u32, planar: &[Vec<u8>], lsb_first: bool, ta
     f.write_all(b"DSD ")?;
     f.write_all(&28u64.to_le_bytes())?;
     f.write_all(&(total as u64).to_le_bytes())?;
-    f.write_all(&(if id3.is_empty() { 0u64 } else { (28 + 52 + 12 + data_len) as u64 }).to_le_bytes())?;
+    f.write_all(
+        &(if id3.is_empty() {
+            0u64
+        } else {
+            (28 + 52 + 12 + data_len) as u64
+        })
+        .to_le_bytes(),
+    )?;
     f.write_all(b"fmt ")?;
     f.write_all(&52u64.to_le_bytes())?;
     f.write_all(&1u32.to_le_bytes())?; // version
     f.write_all(&0u32.to_le_bytes())?; // DSD raw
-    f.write_all(&(match ch { 1 => 1u32, 2 => 2, 3 => 3, 4 => 5, 5 => 6, _ => 7 }).to_le_bytes())?;
+    f.write_all(
+        &(match ch {
+            1 => 1u32,
+            2 => 2,
+            3 => 3,
+            4 => 5,
+            5 => 6,
+            _ => 7,
+        })
+        .to_le_bytes(),
+    )?;
     f.write_all(&(ch as u32).to_le_bytes())?;
     f.write_all(&rate.to_le_bytes())?;
     f.write_all(&(if lsb_first { 1u32 } else { 8 }).to_le_bytes())?;
@@ -661,7 +722,11 @@ pub fn write_dsf(path: &Path, rate: u32, planar: &[Vec<u8>], lsb_first: bool, ta
 
 fn build_id3(tags: &Tags) -> Vec<u8> {
     let mut frames = Vec::new();
-    for (id, v) in [(b"TIT2", &tags.title), (b"TPE1", &tags.artist), (b"TALB", &tags.album)] {
+    for (id, v) in [
+        (b"TIT2", &tags.title),
+        (b"TPE1", &tags.artist),
+        (b"TALB", &tags.album),
+    ] {
         if let Some(t) = v {
             let body: Vec<u8> = std::iter::once(3u8).chain(t.bytes()).collect();
             frames.extend_from_slice(id);
@@ -675,7 +740,12 @@ fn build_id3(tags: &Tags) -> Vec<u8> {
     }
     let n = frames.len() as u32;
     let mut out = b"ID3\x03\x00\x00".to_vec();
-    out.extend_from_slice(&[(n >> 21) as u8 & 0x7F, (n >> 14) as u8 & 0x7F, (n >> 7) as u8 & 0x7F, n as u8 & 0x7F]);
+    out.extend_from_slice(&[
+        (n >> 21) as u8 & 0x7F,
+        (n >> 14) as u8 & 0x7F,
+        (n >> 7) as u8 & 0x7F,
+        n as u8 & 0x7F,
+    ]);
     out.extend(frames);
     out
 }
@@ -755,7 +825,11 @@ mod tests {
 
     fn pattern(ch: usize, bytes: usize) -> Vec<Vec<u8>> {
         (0..ch)
-            .map(|c| (0..bytes).map(|i| ((i * 7 + c * 131 + 3) % 251) as u8).collect())
+            .map(|c| {
+                (0..bytes)
+                    .map(|i| ((i * 7 + c * 131 + 3) % 251) as u8)
+                    .collect()
+            })
             .collect()
     }
 
@@ -774,7 +848,10 @@ mod tests {
             let mut r = DsdReader::new(std::fs::File::open(&path).unwrap()).unwrap();
             let info = r.info().clone();
             assert_eq!(info.container, DsdContainer::Dsf);
-            assert_eq!((info.rate, info.channels, info.frames), (2_822_400, 2, 80_000));
+            assert_eq!(
+                (info.rate, info.channels, info.frames),
+                (2_822_400, 2, 80_000)
+            );
             assert_eq!(info.tags, tags);
             assert_eq!(info.track_info().label(), "DSF 1/2822.4");
             let mut got = vec![Vec::new(); 2];
@@ -808,7 +885,10 @@ mod tests {
         let mut r = DsdReader::new(std::fs::File::open(&path).unwrap()).unwrap();
         let info = r.info().clone();
         assert_eq!(info.container, DsdContainer::Dff);
-        assert_eq!((info.rate, info.channels, info.frames), (5_644_800, 2, 7001 * 8));
+        assert_eq!(
+            (info.rate, info.channels, info.frames),
+            (5_644_800, 2, 7001 * 8)
+        );
         assert_eq!(info.tags, tags);
         let mut got = vec![Vec::new(); 2];
         while let Some(p) = r.read_frames(1000 * 8).unwrap() {
@@ -846,7 +926,10 @@ mod tests {
         for c in 0..2 {
             let mut m = SigmaDelta::new(DsdModulator::Asdm7, rate);
             let x: Vec<f64> = (0..n)
-                .map(|i| amp * (2.0 * PI * hz * i as f64 / rate as f64).sin() * if c == 0 { 1.0 } else { -1.0 })
+                .map(|i| {
+                    amp * (2.0 * PI * hz * i as f64 / rate as f64).sin()
+                        * if c == 0 { 1.0 } else { -1.0 }
+                })
                 .collect();
             let mut bits = Vec::new();
             m.process(&x, &mut bits);

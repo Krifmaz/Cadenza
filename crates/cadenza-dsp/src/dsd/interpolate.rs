@@ -27,9 +27,16 @@ pub struct ShortInterpolator {
 impl ShortInterpolator {
     /// Interpolate from `in_rate` by `l`, keeping everything below `passband_hz` (the
     /// source Nyquist; clamped to `0.45 × in_rate`).
-    pub fn new(in_rate: u32, l: usize, passband_hz: f64, channels: usize) -> Result<Self, DsdError> {
+    pub fn new(
+        in_rate: u32,
+        l: usize,
+        passband_hz: f64,
+        channels: usize,
+    ) -> Result<Self, DsdError> {
         if !(2..=16).contains(&l) {
-            return Err(DsdError::Invalid(format!("short stage factor {l} must be 2…16")));
+            return Err(DsdError::Invalid(format!(
+                "short stage factor {l} must be 2…16"
+            )));
         }
         if in_rate == 0 || channels == 0 {
             return Err(DsdError::Invalid("rate or channel count is zero".into()));
@@ -39,8 +46,8 @@ impl ShortInterpolator {
         let stop = in_rate as f64 - pass;
         let cutoff = 0.5 * (pass + stop) / out_rate;
         let transition = (stop - pass) / out_rate;
-        let mut taps = ((ATTENUATION_DB - 8.0) / (2.285 * 2.0 * std::f64::consts::PI * transition)).ceil()
-            as usize
+        let mut taps = ((ATTENUATION_DB - 8.0) / (2.285 * 2.0 * std::f64::consts::PI * transition))
+            .ceil() as usize
             + 1;
         taps = taps.div_ceil(l).max(8) * l;
         let h = windowed_sinc(taps, cutoff, kaiser_beta(ATTENUATION_DB));
@@ -135,7 +142,12 @@ mod tests {
         for (b, d) in db.iter().enumerate().take(bin(22_050.0) + 1) {
             assert!((d - gain0).abs() < 1e-4, "passband bin {b}: {}", d - gain0);
         }
-        for (b, d) in db.iter().enumerate().take(nfft / 2 + 1).skip(bin(352_800.0 - 22_050.0)) {
+        for (b, d) in db
+            .iter()
+            .enumerate()
+            .take(nfft / 2 + 1)
+            .skip(bin(352_800.0 - 22_050.0))
+        {
             assert!(d - gain0 < -145.0, "stopband bin {b}: {}", d - gain0);
         }
     }

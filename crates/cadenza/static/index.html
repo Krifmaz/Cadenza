@@ -10,36 +10,44 @@
   body { margin: 0; background: var(--bg); color: var(--text); font: 15px/1.5 system-ui, -apple-system, "Segoe UI", sans-serif; }
   main { max-width: 1100px; margin: 0 auto; padding: 20px 16px 60px; display: grid; gap: 16px; grid-template-columns: minmax(0, 1fr) minmax(0, 1fr); }
   @media (max-width: 820px) { main { grid-template-columns: 1fr; } }
-  header { grid-column: 1 / -1; display: flex; align-items: baseline; gap: 12px; }
+  header { grid-column: 1 / -1; display: flex; align-items: baseline; gap: 12px; flex-wrap: wrap; }
   h1 { margin: 0; font-size: 22px; letter-spacing: .5px; }
-  h2 { margin: 0 0 10px; font-size: 15px; text-transform: uppercase; letter-spacing: 1px; color: var(--muted); }
+  h2 { margin: 0 0 10px; font-size: 15px; text-transform: uppercase; letter-spacing: 1px; color: var(--muted); display: flex; align-items: center; gap: 8px; }
   .card { background: var(--panel); border: 1px solid var(--line); border-radius: 14px; padding: 16px; min-width: 0; }
   .muted { color: var(--muted); } .small { font-size: 13px; }
   .np-title { font-size: 20px; font-weight: 650; }
   .row { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; }
-  button, select, input[type=text], input[type=number] { background: var(--panel2); color: var(--text); border: 1px solid var(--line); border-radius: 9px; padding: 8px 12px; font: inherit; }
+  button, select, input[type=text], input[type=number], textarea { background: var(--panel2); color: var(--text); border: 1px solid var(--line); border-radius: 9px; padding: 8px 12px; font: inherit; max-width: 100%; }
+  textarea { width: 100%; min-height: 110px; font: 12px/1.4 ui-monospace, SFMono-Regular, Menlo, monospace; }
   button { cursor: pointer; } button:hover { border-color: var(--accent); }
   button.primary { background: var(--accent); border-color: var(--accent); color: #0c0c11; font-weight: 650; }
   input[type=range] { width: 100%; accent-color: var(--accent); }
+  select:disabled, input:disabled, textarea:disabled { opacity: .5; }
+  option:disabled { color: var(--muted); }
   .seek { display: flex; align-items: center; gap: 10px; font-variant-numeric: tabular-nums; font-size: 13px; color: var(--muted); }
   .chain { display: flex; flex-direction: column; gap: 6px; }
   .stage { background: var(--panel2); border: 1px solid var(--line); border-radius: 10px; padding: 8px 12px; }
   .stage.off { opacity: .45; }
+  .stage.hot { border-color: var(--accent); }
   .stage b { display: block; }
   .arrow { text-align: center; color: var(--muted); line-height: 1; }
-  .badge { display: inline-block; padding: 2px 8px; border-radius: 99px; font-size: 12px; font-weight: 650; border: 1px solid var(--line); }
+  .badge { display: inline-block; padding: 2px 8px; border-radius: 99px; font-size: 12px; font-weight: 650; border: 1px solid var(--line); text-transform: none; letter-spacing: 0; }
   .badge.ok { color: var(--ok); border-color: var(--ok); } .badge.warn { color: var(--warn); border-color: var(--warn); }
-  label.field { display: grid; gap: 4px; margin-bottom: 10px; } label.field span { font-size: 13px; color: var(--muted); }
+  label.field { display: grid; gap: 4px; margin-bottom: 10px; min-width: 0; } label.field span { font-size: 13px; color: var(--muted); }
   .switch { display: flex; gap: 8px; align-items: center; margin-bottom: 10px; }
+  .hint { font-size: 12px; color: var(--muted); margin: -6px 0 10px; }
   table { width: 100%; border-collapse: collapse; font-size: 13px; } td, th { padding: 4px; text-align: left; } td input, td select { width: 100%; padding: 4px 6px; }
   .queue div { padding: 6px 8px; border-radius: 8px; cursor: pointer; } .queue div:hover { background: var(--panel2); } .queue .cur { color: var(--accent); font-weight: 650; }
   .err { color: #ff7b7b; }
   .wide { grid-column: 1 / -1; }
+  .grid2 { display: grid; grid-template-columns: 1fr 1fr; gap: 0 12px; } @media (max-width: 480px) { .grid2 { grid-template-columns: 1fr; } }
+  .ep { display: flex; justify-content: space-between; align-items: center; gap: 8px; padding: 6px 8px; border-radius: 8px; border: 1px solid var(--line); margin-bottom: 6px; }
+  code { background: var(--panel2); padding: 1px 5px; border-radius: 5px; font-size: 12px; }
 </style>
 </head>
 <body>
 <main>
-  <header><h1>Cadenza</h1><span class="muted small" id="output"></span></header>
+  <header><h1>Cadenza</h1><span class="muted small" id="output"></span><span class="badge" id="gpu-badge" style="margin-left:auto"></span></header>
 
   <section class="card">
     <h2>Now playing</h2>
@@ -68,22 +76,78 @@
   <section class="card">
     <h2>Output</h2>
     <label class="field"><span>Device</span><select id="device"></select></label>
+    <div class="hint" id="device-caps"></div>
+    <label class="field"><span>Output mode</span><select id="output_mode"></select></label>
     <div class="row">
-      <label class="field" style="flex:1"><span>Rate</span><select id="rate"></select></label>
-      <label class="field" style="flex:1"><span>Bits</span><select id="bits"><option>16</option><option>24</option><option>32</option></select></label>
+      <label class="field" style="flex:1"><span>PCM rate</span><select id="rate"></select></label>
+      <label class="field" style="flex:1"><span>PCM bits</span><select id="bits"><option>16</option><option>24</option><option>32</option></select></label>
     </div>
-    <label class="switch"><input type="checkbox" id="bitperfect"> <b>Bit-perfect</b> <span class="muted small">send the file untouched – no upsampling, dither, EQ or volume</span></label>
+    <label class="switch"><input type="checkbox" id="bitperfect"> <b>Bit-perfect</b> <span class="muted small">send the file untouched – no upsampling, dither, EQ, matrix or volume</span></label>
   </section>
 
   <section class="card">
-    <h2>DSP</h2>
-    <label class="field"><span>Upsampling filter</span><select id="filter"></select></label>
-    <label class="field"><span>Dither / noise shaping</span><select id="dither"></select></label>
+    <h2>Upsampling</h2>
+    <label class="field"><span>Filter</span><select id="filter"></select></label>
+    <div class="hint" id="filter-info"></div>
+    <div class="row">
+      <label class="field" style="flex:1"><span>Headroom (dB; empty = auto −3 dB when upsampling)</span><input type="number" id="headroom_db" step="0.5" min="-30" max="0" placeholder="auto"></label>
+      <label class="switch" style="flex:1;margin-top:18px"><input type="checkbox" id="soft_clip"> <b>Soft clipper</b> <span class="muted small">last guard</span></label>
+    </div>
     <label class="field"><span>Convolution (impulse response file, WAV or text; empty = off)</span><input type="text" id="convolution" placeholder="/path/to/room.wav"></label>
   </section>
 
+  <section class="card">
+    <h2>DSD <span class="badge" id="dsd-badge"></span></h2>
+    <div class="grid2">
+      <label class="field"><span>Rate</span><select id="dsd_rate"></select></label>
+      <label class="field"><span>Modulator</span><select id="dsd_modulator"></select></label>
+      <label class="field"><span>Packing</span><select id="dsd_packing"></select></label>
+      <label class="field"><span>Gain before the modulator (dB)</span><input type="number" id="dsd_gain_db" step="0.5" min="-30" max="6"></label>
+      <label class="field"><span>Oversampling</span><select id="dsd_oversampling"></select></label>
+    </div>
+    <div class="hint" id="dsd-hint"></div>
+    <label class="switch"><input type="checkbox" id="dsd_passthrough"> <b>DSD pass-through</b> <span class="muted small">DSF/DFF bits go to a DSD output untouched when the output mode is DSD (or bit-perfect) and the rate matches; in PCM mode they are converted to 352.8/384 kHz PCM</span></label>
+  </section>
+
+  <section class="card">
+    <h2>Noise shaping</h2>
+    <label class="field"><span>Dither / noise shaper (PCM output)</span><select id="dither"></select></label>
+    <div class="hint" id="dither-info"></div>
+  </section>
+
+  <section class="card">
+    <h2>Matrix <label class="small badge" style="cursor:pointer"><input type="checkbox" id="matrix_enabled"> on</label></h2>
+    <label class="field"><span>Preset</span><select id="matrix_preset"></select></label>
+    <div class="hint" id="matrix-info"></div>
+    <div class="grid2">
+      <label class="switch"><input type="checkbox" id="m_mono"> <b>Mono</b></label>
+      <label class="switch"><input type="checkbox" id="m_swap"> <b>Swap L/R</b></label>
+      <label class="field"><span>Balance (dB, + attenuates left)</span><input type="number" id="m_balance" step="0.5" min="-24" max="24"></label>
+      <label class="field"><span>Mid/side</span><select id="m_mid_side"><option value="off">off</option><option value="encode">encode</option><option value="decode">decode</option></select></label>
+    </div>
+    <details id="matrix-custom"><summary class="small muted">Custom outputs (JSON: name, inputs dB, gain_db, delay_ms, delay_samples, invert, lowpass/highpass {kind, freq, slope_db}, eq)</summary>
+      <textarea id="matrix_outputs" spellcheck="false"></textarea>
+      <div class="row" style="margin-top:6px"><button id="matrix-save">Apply outputs</button><span class="small muted" id="crossover-kinds"></span></div>
+    </details>
+  </section>
+
+  <section class="card">
+    <h2>GPU</h2>
+    <div class="row">
+      <label class="field" style="flex:1"><span>Offload</span><select id="gpu"></select></label>
+      <label class="field" style="width:110px"><span>Device</span><input type="number" id="gpu_device" min="0" max="15"></label>
+    </div>
+    <div class="hint" id="gpu-info"></div>
+  </section>
+
+  <section class="card">
+    <h2>Endpoint</h2>
+    <div id="endpoints" class="small"></div>
+    <div class="hint">Run <code>cadenza endpoint</code> on the box next to the DAC; it appears here (mDNS <code>_cadenza-endpoint._tcp</code>) and as a device above. The final PCM or DSD words stream to it over TCP, paced by its DAC clock.</div>
+  </section>
+
   <section class="card wide">
-    <h2>Parametric EQ <label class="small" style="text-transform:none;letter-spacing:0;margin-left:8px"><input type="checkbox" id="eq_enabled"> on</label></h2>
+    <h2>Parametric EQ <label class="small badge" style="cursor:pointer"><input type="checkbox" id="eq_enabled"> on</label></h2>
     <table><thead><tr><th>Type</th><th>Frequency (Hz)</th><th>Gain (dB)</th><th>Q</th><th></th></tr></thead><tbody id="eq"></tbody></table>
     <div class="row" style="margin-top:8px"><button id="eq-add">Add band</button><button class="primary" id="eq-save">Apply EQ</button></div>
   </section>
@@ -92,6 +156,7 @@
 const $ = (id) => document.getElementById(id);
 const esc = (s) => String(s ?? '').replace(/[&<>"']/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
 const dur = (s) => { s = Math.max(0, Math.round(s || 0)); return `${Math.floor(s / 60)}:${String(s % 60).padStart(2, '0')}`; };
+const khz = (r) => r >= 1e6 ? (r / 1e6).toFixed(4).replace(/0+$/, '').replace(/\.$/, '') + ' MHz' : (r / 1000) + ' kHz';
 const api = async (method, path, body) => {
   const r = await fetch(path, { method, headers: body ? { 'Content-Type': 'application/json' } : {}, body: body ? JSON.stringify(body) : undefined });
   const j = await r.json().catch(() => ({}));
@@ -99,7 +164,18 @@ const api = async (method, path, body) => {
   return j;
 };
 let status = null, dragging = false, eqBands = [], loaded = false;
+let options = null, filters = [], dithers = [], devices = [];
 const EQ_TYPES = ['peaking', 'low-shelf', 'high-shelf', 'low-pass', 'high-pass', 'notch'];
+const opts = (list, val = 'id', label = 'label') => list.map(o => `<option value="${esc(o[val])}">${esc(o[label] ?? o[val])}</option>`).join('');
+
+function formatLabel(f) {
+  if (!f) return '';
+  if (f.encoding && f.encoding.kind === 'dsd') {
+    const r = (options?.dsd_rates || []).find(x => x.hz_44 === f.encoding.rate || x.hz_48 === f.encoding.rate);
+    return `${r ? r.label : khz(f.encoding.rate)} (${f.encoding.packing === 'dop' ? 'DoP' : 'native'}) · ${f.channels} ch`;
+  }
+  return `${khz(f.rate)} / ${f.bits}-bit · ${f.channels} ch`;
+}
 
 function paint(s) {
   status = s;
@@ -107,7 +183,7 @@ function paint(s) {
   $('title').textContent = t ? (t.title || 'Untitled') : 'Nothing playing';
   $('sub').textContent = t ? [t.artist, t.album].filter(Boolean).join(' · ') : '';
   $('fmt').textContent = s.source_format || '';
-  $('output').textContent = s.output ? `${s.output}${s.output_format ? ' · ' + (s.output_format.rate / 1000) + ' kHz / ' + s.output_format.bits + '-bit' : ''}` : '';
+  $('output').textContent = s.output ? `${s.output}${s.output_format ? ' · ' + formatLabel(s.output_format) : ''}${s.output_exclusive ? ' · exclusive' : ''}` : '';
   $('toggle').textContent = s.state === 'playing' ? '⏸' : '▶';
   if (!dragging) {
     $('seek').value = s.duration ? (s.position / s.duration) * 1000 : 0;
@@ -121,34 +197,126 @@ function paint(s) {
   $('bp').className = 'badge ' + (p ? (p.bit_perfect ? 'ok' : 'warn') : '');
   $('bp').textContent = p ? (p.bit_perfect ? 'bit-perfect' : 'processed') : '';
   if (p) {
-    const ep = (e, name) => `<div class="stage"><b>${name}</b><span class="small muted">${esc(e.label || [e.format, e.rate ? (e.rate / 1000) + ' kHz' : '', e.bits ? e.bits + '-bit' : '', e.channels ? e.channels + ' ch' : ''].filter(Boolean).join(' · '))}</span></div>`;
-    $('chain').innerHTML = [ep(p.input, 'Source'), ...p.stages.map(st => `<div class="stage ${st.active ? '' : 'off'}"><b>${esc(st.name)}${st.active ? '' : ' (bypassed)'}</b><span class="small muted">${esc(st.detail)}</span></div>`), ep(p.output, 'Output · ' + esc(s.output || ''))].join('<div class="arrow">↓</div>')
+    const ep = (e, name) => `<div class="stage"><b>${name}</b><span class="small muted">${esc(e.label || [e.format, e.rate ? khz(e.rate) : '', e.bits ? e.bits + '-bit' : '', e.channels ? e.channels + ' ch' : ''].filter(Boolean).join(' · '))}</span></div>`;
+    const hot = (st) => st.active && (st.id === 'modulator' || st.id === 'gpu' || (st.id === 'headroom' && /engaged/.test(st.detail)));
+    $('chain').innerHTML = [ep(p.input, 'Source'), ...p.stages.map(st => `<div class="stage ${st.active ? '' : 'off'} ${hot(st) ? 'hot' : ''}"><b>${esc(st.name)}${st.active ? '' : ' (bypassed)'}</b><span class="small muted">${esc(st.detail)}</span></div>`), ep(p.output, 'Output · ' + esc(s.output || ''))].join('<div class="arrow">↓</div>')
       + `<div class="small muted" style="margin-top:6px">${esc(p.label)}${p.latency_seconds ? ` · latency ${(p.latency_seconds * 1000).toFixed(0)} ms` : ''}</div>`;
   } else $('chain').innerHTML = '<span class="muted">Stopped.</span>';
+  paintDeviceCaps();
+  paintGpuBadge();
   if (!loaded) loadSettings(s.settings);
+}
+
+function paintDeviceCaps() {
+  const d = status?.output_dsd;
+  if (!status?.output) { $('device-caps').textContent = ''; return; }
+  const parts = [];
+  parts.push(status.output_exclusive ? 'exclusive' : 'shared mode');
+  if (status.output_rates?.length) parts.push(`PCM up to ${khz(Math.max(...status.output_rates))}`);
+  if (d) {
+    if (!d.dop && !(d.native || []).length) parts.push('no DSD');
+    else parts.push(`DSD: ${[d.dop ? 'DoP' : '', (d.native || []).length ? 'native ' + d.native.join('/') : ''].filter(Boolean).join(' · ')}${d.max_rate ? ' · up to ' + dsdLabel(d.max_rate) : ''}`);
+  }
+  $('device-caps').textContent = parts.join(' · ');
+  fillDsdRates();
+}
+function dsdLabel(hz) { const r = (options?.dsd_rates || []).find(x => x.hz_44 === hz || x.hz_48 === hz); return r ? r.label : khz(hz); }
+
+function fillDsdRates() {
+  if (!options) return;
+  const d = status?.output_dsd, want = $('dsd_rate').dataset.want || $('dsd_rate').value;
+  const max = d?.max_rate ? (options.dsd_rates.find(x => x.hz_44 === d.max_rate || x.hz_48 === d.max_rate)?.multiple ?? 1e9) : null;
+  const dop = $('dsd_packing').value === 'dop';
+  $('dsd_rate').innerHTML = options.dsd_rates.map(r => {
+    const tooHigh = max !== null && r.multiple > max;
+    const noDop = dop && !r.dop_possible;
+    const why = tooHigh ? `your device stops at ${dsdLabel(d.max_rate)}` : noDop ? 'native only – DoP cannot carry it' : '';
+    return `<option value="${r.id}" ${why ? 'disabled' : ''}>${r.label} · ${khz(r.hz_44)} / ${khz(r.hz_48)}${why ? ' — ' + why : ''}</option>`;
+  }).join('');
+  $('dsd_rate').value = want;
+  if (!$('dsd_rate').value) $('dsd_rate').value = want;
+  const dsd = status?.settings?.dsp?.output_mode === 'dsd';
+  $('dsd-badge').className = 'badge ' + (dsd ? 'ok' : '');
+  $('dsd-badge').textContent = dsd ? 'active' : 'PCM mode';
+  const r = options.dsd_rates.find(x => x.id === $('dsd_rate').value);
+  const over = $('dsd_oversampling').value;
+  $('dsd-hint').textContent = r ? (over === 'full'
+    ? `full: the long filter runs to ${r.multiple}× (${khz(r.hz_44)} / ${khz(r.hz_48)} PCM in 64-bit float) and the modulator takes it directly – very heavy, run cadenza bench --dsd-upsampling --dsd-full.`
+    : `staged: long filter to ${khz(r.hz_44 / (r.multiple <= 256 ? 8 : 16))} / ${khz(r.hz_48 / (r.multiple <= 256 ? 8 : 16))}, then a ×${r.multiple <= 256 ? 8 : 16} polyphase stage, then the ${$('dsd_modulator').selectedOptions[0]?.textContent || ''}.`) : '';
+}
+
+function filterInfo() {
+  const f = filters.find(x => x.id === $('filter').value);
+  $('filter-info').textContent = f ? `${f.family} · ${f.taps_at_rate?.toLocaleString()} taps at ×${Math.round(f.out_rate / f.in_rate)} · transition ${Math.round(f.transition_hz)} Hz (${(f.transition_percent ?? 0).toFixed(3)} %) · stopband ${Math.round(f.stopband_db)} dB · latency ${((f.latency_seconds || 0) * 1000).toFixed(1)} ms · ${f.window} window` : '';
+}
+function ditherInfo() {
+  const d = dithers.find(x => x.id === $('dither').value);
+  $('dither-info').textContent = d ? [d.order ? `order ${d.order}` : '', d.designed_per_rate ? 'designed for the actual output rate (44.1 and 48 families)' : (d.design_rate ? `designed for ${khz(d.design_rate)}` : '')].filter(Boolean).join(' · ') : '';
+}
+function matrixInfo() {
+  const p = (options?.matrix_presets || []).find(x => x.id === $('matrix_preset').value);
+  $('matrix-info').textContent = p ? `${p.description} (${p.input_channels} → ${p.output_channels} ch)` : ($('matrix_preset').value === 'custom' ? 'custom: define the outputs below' : '');
+  $('matrix-custom').open = $('matrix_preset').value === 'custom';
+}
+function gpuInfo() {
+  const g = options?.gpu;
+  if (!g) return;
+  $('gpu-info').textContent = `${g.label}${g.reason ? ' · ' + g.reason : ''}${g.compute_capability ? ' · compute ' + g.compute_capability : ''} · precision ${g.precision}${options.gpu_compiled_in ? '' : ' · this build has no CUDA (build with --features cuda)'}`;
+  paintGpuBadge();
+}
+// The badge is green only when a stage of the *current* chain actually runs on the GPU
+// (signal path stage `gpu` active); a detected but idle card shows the label in grey.
+function paintGpuBadge() {
+  const g = options?.gpu;
+  if (!g) return;
+  const st = status?.signal_path?.stages?.find(x => x.id === 'gpu');
+  $('gpu-badge').textContent = st ? st.detail : g.label;
+  $('gpu-badge').className = 'badge ' + (st?.active ? 'ok' : '');
+}
+function paintEndpoints() {
+  const eps = devices.filter(d => d.backend === 'endpoint');
+  $('endpoints').innerHTML = eps.length ? eps.map(d => `<div class="ep"><span><b>${esc(d.name)}</b> <span class="muted">${esc(d.id)}${d.dsd?.dop || d.dsd?.native?.length ? ' · DSD' : ''}</span></span><button data-ep="${esc(d.id)}">Use as output</button></div>`).join('') : '<span class="muted">No endpoint found on the network yet.</span>';
 }
 
 function loadSettings(set) {
   loaded = true;
-  $('bitperfect').checked = !!set.dsp.bit_perfect;
-  $('filter').value = set.dsp.filter;
-  $('dither').value = set.dsp.dither;
-  $('convolution').value = set.dsp.convolution || '';
-  $('bits').value = String(set.output.bits);
-  $('eq_enabled').checked = set.dsp.eq_enabled !== false;
-  eqBands = (set.dsp.eq || []).map(b => ({ ...b }));
+  const d = set.dsp, o = set.output, m = set.matrix || {};
+  $('bitperfect').checked = !!d.bit_perfect;
+  $('output_mode').value = d.output_mode || 'pcm';
+  $('filter').value = d.filter; filterInfo();
+  $('dither').value = d.dither; ditherInfo();
+  $('convolution').value = d.convolution || '';
+  $('headroom_db').value = d.headroom_db ?? '';
+  $('soft_clip').checked = d.soft_clip !== false;
+  $('bits').value = String(o.bits);
+  $('dsd_modulator').value = d.dsd_modulator; $('dsd_packing').value = d.dsd_packing; $('dsd_oversampling').value = d.dsd_oversampling;
+  $('dsd_gain_db').value = d.dsd_gain_db ?? -3; $('dsd_passthrough').checked = d.dsd_passthrough !== false;
+  $('dsd_rate').dataset.want = d.dsd_rate; fillDsdRates();
+  $('gpu').value = d.gpu || 'auto'; $('gpu_device').value = d.gpu_device ?? 0;
+  $('matrix_enabled').checked = !!m.enabled; $('matrix_preset').value = m.preset || 'stereo'; matrixInfo();
+  const st = m.stereo || {};
+  $('m_mono').checked = !!st.mono; $('m_swap').checked = !!st.swap; $('m_balance').value = st.balance_db ?? 0; $('m_mid_side').value = st.mid_side || 'off';
+  if (document.activeElement !== $('matrix_outputs')) $('matrix_outputs').value = JSON.stringify(m.outputs || [], null, 1);
+  $('eq_enabled').checked = d.eq_enabled !== false;
+  eqBands = (d.eq || []).map(b => ({ ...b }));
   paintEq();
-  const rate = String(set.output.rate ?? 'auto');
-  fillRates(rate);
-  $('device').dataset.want = `${set.output.backend}|${set.output.device}`;
+  fillRates(String(o.rate ?? 'auto'));
+  $('device').dataset.want = `${o.backend}|${o.device}`;
   if ($('device').options.length) $('device').value = $('device').dataset.want;
-  for (const id of ['filter', 'dither', 'bits']) $(id).disabled = false;
   lockDsp();
 }
-function lockDsp() { for (const id of ['filter', 'dither', 'convolution']) $(id).disabled = $('bitperfect').checked; }
+function lockDsp() {
+  const bp = $('bitperfect').checked, dsd = $('output_mode').value === 'dsd';
+  for (const id of ['filter', 'convolution', 'headroom_db', 'soft_clip', 'output_mode', 'matrix_enabled', 'matrix_preset', 'gpu', 'gpu_device']) $(id).disabled = bp;
+  for (const id of ['dither', 'bits']) $(id).disabled = bp || dsd;
+  $('rate').disabled = bp || dsd;
+  for (const id of ['dsd_rate', 'dsd_modulator', 'dsd_packing', 'dsd_gain_db', 'dsd_oversampling']) $(id).disabled = bp || !dsd;
+  for (const id of ['m_mono', 'm_swap', 'm_balance', 'm_mid_side', 'matrix_outputs']) $(id).disabled = bp || !$('matrix_enabled').checked;
+}
 function fillRates(cur) {
-  const rates = [...new Set([44100, 48000, 88200, 96000, 176400, 192000, 352800, 384000, 705600, 768000, ...(status?.output_rates || [])])].sort((a, b) => a - b);
-  $('rate').innerHTML = '<option value="auto">Auto (highest multiple of the source)</option><option value="source">Same as the source</option>' + rates.map(r => `<option value="${r}">${r / 1000} kHz</option>`).join('');
+  const rates = [...new Set([...(options?.pcm_rates || [44100, 48000, 88200, 96000, 176400, 192000, 352800, 384000, 705600, 768000]), ...(status?.output_rates || [])])].sort((a, b) => a - b);
+  const sup = new Set(status?.output_rates || []);
+  $('rate').innerHTML = '<option value="auto">Auto (highest multiple of the source)</option><option value="source">Same as the source</option>' + rates.map(r => `<option value="${r}" ${sup.size && !sup.has(r) ? 'disabled' : ''}>${khz(r)}${sup.size && !sup.has(r) ? ' — not supported by this device' : ''}</option>`).join('');
   $('rate').value = cur;
   if (!$('rate').value) $('rate').value = 'auto';
 }
@@ -162,11 +330,12 @@ function paintEq() {
 }
 
 async function save(patch) {
-  try { await api('PUT', '/api/settings', patch); } catch (e) { $('error').textContent = e.message; }
+  try { $('error').textContent = ''; await api('PUT', '/api/settings', patch); } catch (e) { $('error').textContent = e.message; }
 }
 async function control(action, value) {
   try { paint(await api('POST', '/api/control', value === undefined ? { action } : { action, value })); } catch (e) { $('error').textContent = e.message; }
 }
+const num = (id) => Number($(id).value);
 
 document.querySelectorAll('[data-a]').forEach(b => b.onclick = () => control(b.dataset.a));
 $('seek').oninput = () => { dragging = true; $('pos').textContent = dur((status?.duration || 0) * $('seek').value / 1000); };
@@ -174,12 +343,29 @@ $('seek').onchange = () => { dragging = false; control('seek', (status?.duration
 $('vol').onchange = () => control('volume', Number($('vol').value));
 $('queue').onclick = (e) => { const d = e.target.closest('[data-i]'); if (d) control('play_index', Number(d.dataset.i)); };
 $('bitperfect').onchange = () => { lockDsp(); save({ dsp: { bit_perfect: $('bitperfect').checked } }); };
-$('filter').onchange = () => save({ dsp: { filter: $('filter').value } });
-$('dither').onchange = () => save({ dsp: { dither: $('dither').value } });
+$('output_mode').onchange = () => { lockDsp(); fillDsdRates(); save({ dsp: { output_mode: $('output_mode').value } }); };
+$('filter').onchange = () => { filterInfo(); save({ dsp: { filter: $('filter').value } }); };
+$('dither').onchange = () => { ditherInfo(); save({ dsp: { dither: $('dither').value } }); };
 $('convolution').onchange = () => save({ dsp: { convolution: $('convolution').value.trim() } });
-$('bits').onchange = () => save({ output: { bits: Number($('bits').value) } });
+$('headroom_db').onchange = () => save({ dsp: { headroom_db: $('headroom_db').value === '' ? null : num('headroom_db') } });
+$('soft_clip').onchange = () => save({ dsp: { soft_clip: $('soft_clip').checked } });
+$('bits').onchange = () => save({ output: { bits: num('bits') } });
 $('rate').onchange = () => save({ output: { rate: /^\d+$/.test($('rate').value) ? Number($('rate').value) : $('rate').value } });
 $('device').onchange = () => { const [backend, ...rest] = $('device').value.split('|'); save({ output: { backend, device: rest.join('|') } }); };
+$('endpoints').onclick = (e) => { const b = e.target.closest('[data-ep]'); if (b) { $('device').value = 'endpoint|' + b.dataset.ep; save({ output: { backend: 'endpoint', device: b.dataset.ep } }); } };
+$('dsd_rate').onchange = () => { $('dsd_rate').dataset.want = $('dsd_rate').value; fillDsdRates(); save({ dsp: { dsd_rate: $('dsd_rate').value } }); };
+$('dsd_modulator').onchange = () => { fillDsdRates(); save({ dsp: { dsd_modulator: $('dsd_modulator').value } }); };
+$('dsd_packing').onchange = () => { fillDsdRates(); save({ dsp: { dsd_packing: $('dsd_packing').value } }); };
+$('dsd_gain_db').onchange = () => save({ dsp: { dsd_gain_db: num('dsd_gain_db') } });
+$('dsd_oversampling').onchange = () => { fillDsdRates(); save({ dsp: { dsd_oversampling: $('dsd_oversampling').value } }); };
+$('dsd_passthrough').onchange = () => save({ dsp: { dsd_passthrough: $('dsd_passthrough').checked } });
+$('gpu').onchange = () => save({ dsp: { gpu: $('gpu').value } });
+$('gpu_device').onchange = () => save({ dsp: { gpu_device: num('gpu_device') } });
+$('matrix_enabled').onchange = () => { lockDsp(); save({ matrix: { enabled: $('matrix_enabled').checked } }); };
+$('matrix_preset').onchange = () => { matrixInfo(); save({ matrix: { preset: $('matrix_preset').value } }); };
+const stereo = () => ({ mono: $('m_mono').checked, swap: $('m_swap').checked, balance_db: num('m_balance'), mid_side: $('m_mid_side').value });
+for (const id of ['m_mono', 'm_swap', 'm_balance', 'm_mid_side']) $(id).onchange = () => save({ matrix: { stereo: stereo() } });
+$('matrix-save').onclick = () => { try { save({ matrix: { preset: 'custom', outputs: JSON.parse($('matrix_outputs').value || '[]') } }); $('matrix_preset').value = 'custom'; } catch (e) { $('error').textContent = 'matrix outputs: ' + e.message; } };
 $('eq_enabled').onchange = () => save({ dsp: { eq_enabled: $('eq_enabled').checked } });
 $('eq').oninput = (e) => { const tr = e.target.closest('tr[data-i]'); const k = e.target.dataset.k; if (!tr || !k) return; const v = e.target.value; eqBands[+tr.dataset.i][k] = k === 'kind' ? v : Number(v); };
 $('eq').onclick = (e) => { const b = e.target.closest('[data-rm]'); if (b) { eqBands.splice(+b.dataset.rm, 1); paintEq(); } };
@@ -188,10 +374,19 @@ $('eq-save').onclick = () => save({ dsp: { eq: eqBands, eq_enabled: $('eq_enable
 
 (async () => {
   try {
-    const [filters, dithers, devices] = await Promise.all([api('GET', '/api/filters'), api('GET', '/api/dithers'), api('GET', '/api/devices')]);
-    $('filter').innerHTML = filters.map(f => `<option value="${esc(f.id)}">${esc(f.label)}</option>`).join('');
-    $('dither').innerHTML = dithers.map(d => `<option value="${esc(d.id)}">${esc(d.label)}</option>`).join('');
-    $('device').innerHTML = devices.map(d => `<option value="${esc(d.backend + '|' + d.id)}">${esc(d.backend)} · ${esc(d.name)}</option>`).join('');
+    [filters, dithers, devices, options] = await Promise.all([api('GET', '/api/filters'), api('GET', '/api/dithers'), api('GET', '/api/devices'), api('GET', '/api/options')]);
+    const fams = [...new Set(filters.map(f => f.family))];
+    $('filter').innerHTML = fams.map(fam => `<optgroup label="${esc(fam)}">${opts(filters.filter(f => f.family === fam))}</optgroup>`).join('');
+    $('dither').innerHTML = opts(dithers);
+    $('device').innerHTML = devices.map(d => `<option value="${esc(d.backend + '|' + d.id)}">${esc(d.backend)} · ${esc(d.name)}${d.exclusive ? ' · exclusive' : ''}${d.dsd && (d.dsd.dop || (d.dsd.native || []).length) ? ' · DSD' : ''}</option>`).join('');
+    $('output_mode').innerHTML = opts(options.output_modes);
+    $('dsd_modulator').innerHTML = options.dsd_modulators.map(m => `<option value="${m.id}">${esc(m.label)} · order ${m.order}${m.dithered ? ' · dithered' : ''}</option>`).join('');
+    $('dsd_packing').innerHTML = opts(options.dsd_packings);
+    $('dsd_oversampling').innerHTML = opts(options.dsd_oversampling, 'id', 'id');
+    $('gpu').innerHTML = opts(options.gpu_modes);
+    $('matrix_preset').innerHTML = opts(options.matrix_presets) + '<option value="custom">custom</option>';
+    $('crossover-kinds').textContent = 'crossover kinds: ' + options.crossover_kinds.map(k => `${k.id} (${k.slopes.join('/')} dB/oct)`).join(', ');
+    gpuInfo(); paintEndpoints();
     paint(await api('GET', '/api/status'));
     if ($('device').dataset.want) $('device').value = $('device').dataset.want;
   } catch (e) { $('error').textContent = e.message; }

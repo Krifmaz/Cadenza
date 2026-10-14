@@ -165,6 +165,10 @@ pub enum Commands {
         /// Also time the long filter feeding each DSD rate (staged: to f_dsd/8 or /16).
         #[arg(long)]
         dsd_upsampling: bool,
+        /// With --dsd-upsampling: run the long filter to the DSD rate itself
+        /// (`dsd_oversampling = full`, e.g. 1024× = 45.1584 MHz PCM). Very heavy.
+        #[arg(long)]
+        dsd_full: bool,
         /// Print JSON instead of a table.
         #[arg(long)]
         json: bool,

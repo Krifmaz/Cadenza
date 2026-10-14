@@ -70,7 +70,9 @@ impl OutputMode {
 }
 
 /// DSD output rate as a multiple of the 44.1 or 48 kHz family base.
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash, PartialOrd, Ord, Serialize, Deserialize)]
+#[derive(
+    Clone, Copy, Debug, Default, PartialEq, Eq, Hash, PartialOrd, Ord, Serialize, Deserialize,
+)]
 #[serde(rename_all = "lowercase")]
 pub enum DsdRate {
     /// 2.8224 / 3.072 MHz.
@@ -214,11 +216,17 @@ impl DsdModulator {
     pub fn dithered(self) -> bool {
         matches!(self, DsdModulator::Dsd5v2 | DsdModulator::Dsd7v2)
     }
-    /// Maximum out-of-band NTF gain the loop is designed to (see [`modulator`]).
-    pub fn h_inf(self) -> f64 {
-        match self.order() {
-            5 => 1.35,
-            _ => 1.28,
+    /// Maximum out-of-band NTF gain the loop is designed to at the oversampling ratio
+    /// `osr` (64 for DSD64 … 2048 for DSD2048; see [`modulator`]). The design point is
+    /// chosen per rate: the aggressive value only where the SNR margin needs it (DSD64),
+    /// a more conservative loop above it where sustained full-scale DC would otherwise
+    /// trip the reset guard and the SNR is far above the requirement anyway.
+    pub fn h_inf(self, osr: u32) -> f64 {
+        match (self.order(), osr) {
+            (5, ..=64) => 1.35,
+            (5, _) => 1.28,
+            (_, ..=64) => 1.28,
+            (_, _) => 1.25,
         }
     }
     /// Input level (full scale = 1) above which the loop would lose stability and the
@@ -350,9 +358,39 @@ pub fn family_base(pcm_rate: u32) -> u32 {
     }
 }
 
+/// The oversampling ratio of a DSD bit rate in Hz relative to its family base
+/// (`2_822_400 → 64`, `98_304_000 → 2048`).
+pub fn oversampling_ratio(dsd_rate_hz: u32) -> u32 {
+    dsd_rate_hz / family_base(dsd_rate_hz)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn h_inf_depends_on_the_oversampling_ratio() {
+        assert_eq!(oversampling_ratio(2_822_400), 64);
+        assert_eq!(oversampling_ratio(3_072_000), 64);
+        assert_eq!(oversampling_ratio(98_304_000), 2048);
+        for rate in DsdRate::catalog() {
+            for base in [44_100, 48_000] {
+                assert_eq!(oversampling_ratio(rate.hz(base)), rate.multiple());
+            }
+        }
+        assert_eq!(DsdModulator::Asdm5.h_inf(64), 1.35);
+        assert_eq!(DsdModulator::Dsd5v2.h_inf(128), 1.28);
+        assert_eq!(DsdModulator::Asdm7.h_inf(64), 1.28);
+        assert_eq!(DsdModulator::Dsd7v2.h_inf(512), 1.25);
+        // The design point never gets more aggressive as the rate goes up.
+        for kind in DsdModulator::catalog() {
+            let h: Vec<f64> = DsdRate::catalog()
+                .iter()
+                .map(|r| kind.h_inf(r.multiple()))
+                .collect();
+            assert!(h.windows(2).all(|w| w[1] <= w[0]), "{}: {h:?}", kind.id());
+        }
+    }
 
     #[test]
     fn rates_ids_and_families() {
@@ -362,7 +400,10 @@ mod tests {
         assert_eq!(DsdRate::Dsd2048.hz(48_000), 98_304_000);
         assert_eq!(DsdRate::parse("DSD512"), Some(DsdRate::Dsd512));
         assert_eq!(DsdRate::parse("128"), Some(DsdRate::Dsd128));
-        assert_eq!(DsdRate::from_hz(11_289_600), Some((DsdRate::Dsd256, 44_100)));
+        assert_eq!(
+            DsdRate::from_hz(11_289_600),
+            Some((DsdRate::Dsd256, 44_100))
+        );
         assert_eq!(DsdRate::Dsd256.dop_frame_rate(44_100), 705_600);
         assert!(!DsdRate::Dsd2048.dop_possible());
         assert_eq!(family_base(176_400), 44_100);
@@ -379,9 +420,10 @@ mod tests {
         let c: DsdConfig = serde_json::from_str("{}").unwrap();
         assert_eq!(c, DsdConfig::default());
         assert_eq!(c.gain_db, -3.0);
-        let c: DsdConfig =
-            serde_json::from_str(r#"{"rate":"dsd512","modulator":"dsd7v2","packing":"native","oversampling":"full"}"#)
-                .unwrap();
+        let c: DsdConfig = serde_json::from_str(
+            r#"{"rate":"dsd512","modulator":"dsd7v2","packing":"native","oversampling":"full"}"#,
+        )
+        .unwrap();
         assert_eq!(c.rate, DsdRate::Dsd512);
         assert_eq!(c.modulator, DsdModulator::Dsd7v2);
         assert_eq!(c.packing, DsdPacking::Native);

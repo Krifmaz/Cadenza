@@ -14,8 +14,7 @@ use cadenza_dsp::dsd::{DsdConfig, DsdPacking, DsdRate, OutputMode, Packer};
 use cadenza_dsp::pipeline::PipelineError;
 use cadenza_dsp::signal_path::{Endpoint, SignalPath, Stage};
 use cadenza_dsp::{
-    CoefficientCache, ConvolutionSpec, DitherKind, FilterKind, Pipeline,
-    PipelineConfig, Volume,
+    CoefficientCache, ConvolutionSpec, DitherKind, FilterKind, Pipeline, PipelineConfig, Volume,
 };
 use serde_json::json;
 use std::sync::mpsc::{Receiver, RecvTimeoutError, TryRecvError};
@@ -361,10 +360,7 @@ impl Worker {
         old_dsp.muted = false;
         let chain_changed = old_dsp != dsp || old.matrix != self.settings.matrix;
         // A DSD pass-through chain depends on the volume too (any gain means re-modulating).
-        let passthrough_affected = self
-            .chain
-            .as_ref()
-            .is_some_and(Chain::is_passthrough)
+        let passthrough_affected = self.chain.as_ref().is_some_and(Chain::is_passthrough)
             && old.dsp.volume_db != self.settings.dsp.volume_db;
         if let Some(c) = &mut self.chain {
             c.set_volume(self.volume);
@@ -573,7 +569,11 @@ impl Worker {
     /// Whether a DSD source can go to the device untouched: DSD output wanted (or
     /// bit-perfect), pass-through allowed, nothing that would alter the samples, and the
     /// device takes the source rate (in the configured packing or DoP).
-    fn passthrough_target(&self, decoder: &TrackDecoder, channels: u32) -> Option<(DsdRate, DsdPacking)> {
+    fn passthrough_target(
+        &self,
+        decoder: &TrackDecoder,
+        channels: u32,
+    ) -> Option<(DsdRate, DsdPacking)> {
         let s = &self.settings;
         let src = decoder.dsd_rate()?;
         if !s.dsp.dsd_passthrough || !(s.dsp.bit_perfect || s.dsp.output_mode == OutputMode::Dsd) {
@@ -589,7 +589,8 @@ impl Worker {
         }
         let (rate, family) = DsdRate::from_hz(src)?;
         let out = self.output.as_ref()?;
-        let (got_rate, packing) = output::choose_dsd(out.as_ref(), family, rate, s.dsp.dsd_packing, channels)?;
+        let (got_rate, packing) =
+            output::choose_dsd(out.as_ref(), family, rate, s.dsp.dsd_packing, channels)?;
         (got_rate == rate).then_some((rate, packing))
     }
 
@@ -668,7 +669,11 @@ impl Worker {
                     active: true,
                 }],
                 bit_perfect: true,
-                label: format!("{} {} → {out_label} · bit-perfect", src_info.codec, rate.label()),
+                label: format!(
+                    "{} {} → {out_label} · bit-perfect",
+                    src_info.codec,
+                    rate.label()
+                ),
                 latency_seconds: 0.0,
                 input: input_ep,
                 output: output_ep,
@@ -683,7 +688,13 @@ impl Worker {
         if s.dsp.dsd_output() {
             let family = cadenza_dsp::dsd::family_base(input.rate);
             let out = self.output.as_ref().unwrap();
-            match output::choose_dsd(out.as_ref(), family, s.dsp.dsd_rate, s.dsp.dsd_packing, channels) {
+            match output::choose_dsd(
+                out.as_ref(),
+                family,
+                s.dsp.dsd_rate,
+                s.dsp.dsd_packing,
+                channels,
+            ) {
                 Some((rate, packing)) => {
                     if rate != s.dsp.dsd_rate || packing != s.dsp.dsd_packing {
                         log::warn!(
@@ -702,7 +713,10 @@ impl Worker {
                     });
                 }
                 None => {
-                    let msg = format!("{} does not accept DSD; playing PCM instead", self.output_name);
+                    let msg = format!(
+                        "{} does not accept DSD; playing PCM instead",
+                        self.output_name
+                    );
                     log::warn!("{msg}");
                     self.error = Some(msg);
                 }
@@ -732,9 +746,13 @@ impl Worker {
                     RateSetting::Auto => {
                         output::choose_rate(out.as_ref(), input.rate, None, s.output.max_rate, bits)
                     }
-                    RateSetting::Fixed(r) => {
-                        output::choose_rate(out.as_ref(), input.rate, Some(r), s.output.max_rate, bits)
-                    }
+                    RateSetting::Fixed(r) => output::choose_rate(
+                        out.as_ref(),
+                        input.rate,
+                        Some(r),
+                        s.output.max_rate,
+                        bits,
+                    ),
                 };
                 (rate, bits)
             };
@@ -766,7 +784,11 @@ impl Worker {
             headroom_db: s.dsp.headroom_db,
             soft_clip: s.dsp.soft_clip,
             output_device: Some(self.output_name.clone()),
-            output_mode: if dsd.is_some() { OutputMode::Dsd } else { OutputMode::Pcm },
+            output_mode: if dsd.is_some() {
+                OutputMode::Dsd
+            } else {
+                OutputMode::Pcm
+            },
             dsd: dsd.unwrap_or_else(|| s.dsp.dsd()),
             gpu: s.dsp.gpu,
             matrix: s.matrix.clone(),

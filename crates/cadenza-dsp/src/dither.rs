@@ -602,7 +602,8 @@ mod tests {
             .enumerate()
             .map(|(i, (a, b))| {
                 let t = 2.0 * PI * i as f64 / n as f64;
-                let w = 0.35875 - 0.48829 * t.cos() + 0.14128 * (2.0 * t).cos() - 0.01168 * (3.0 * t).cos();
+                let w = 0.35875 - 0.48829 * t.cos() + 0.14128 * (2.0 * t).cos()
+                    - 0.01168 * (3.0 * t).cos();
                 (a - b) * w
             })
             .collect();
@@ -682,7 +683,8 @@ mod tests {
                             / steps as f64;
                         10.0 * p.log10()
                     };
-                    let got = band_power_db(&shaped, rate, lo, hi) - band_power_db(&flat, rate, lo, hi);
+                    let got =
+                        band_power_db(&shaped, rate, lo, hi) - band_power_db(&flat, rate, lo, hi);
                     // Allow 2 dB for the finite-length estimate and the dither's own TPDF
                     // spectrum; the target curve is the NTF (what the design promises).
                     worst_excess = worst_excess.max(got - target_ntf);
@@ -701,7 +703,10 @@ mod tests {
                     DitherKind::Ns9 => -22.0,
                     _ => -27.0,
                 };
-                assert!(at_3k < floor, "{kind:?} @ {rate}: NTF at 3 kHz is {at_3k:.1} dB");
+                assert!(
+                    at_3k < floor,
+                    "{kind:?} @ {rate}: NTF at 3 kHz is {at_3k:.1} dB"
+                );
             }
             // Higher order is strictly better at 3 kHz.
             let a = ntf_db(&DitherKind::Ns5.coefficients_for_rate(rate), 3000.0, rate);
@@ -725,7 +730,8 @@ mod tests {
                 // Full-scale: a 1 kHz tone at exactly 0 dBFS plus a DC offset so it clips hard.
                 let x: Vec<f64> = (0..n)
                     .map(|i| {
-                        (1.0 * (2.0 * PI * 1000.0 * i as f64 / rate as f64).sin() + 0.1).clamp(-1.0, 1.0)
+                        (1.0 * (2.0 * PI * 1000.0 * i as f64 / rate as f64).sin() + 0.1)
+                            .clamp(-1.0, 1.0)
                     })
                     .collect();
                 let mut q = Quantizer::for_rate(16, kind, 1, rate);
@@ -743,17 +749,27 @@ mod tests {
                 assert!(worst < bound, "{kind:?} @ {rate}: error {worst} ≥ {bound}");
                 assert!(y.iter().all(|v| v.is_finite()));
                 if kind != DitherKind::NsAdaptive {
-                    assert!(q.clipped() > 0, "{kind:?}: the full-scale input must have clipped");
+                    assert!(
+                        q.clipped() > 0,
+                        "{kind:?}: the full-scale input must have clipped"
+                    );
                 }
                 // The tail must still be quiet noise around the tone, not a limit cycle.
                 let tail = &y[n - 4096..];
-                let err: Vec<f64> = tail.iter().zip(&x[n - 4096..]).map(|(a, b)| a - b).collect();
+                let err: Vec<f64> = tail
+                    .iter()
+                    .zip(&x[n - 4096..])
+                    .map(|(a, b)| a - b)
+                    .collect();
                 let rms = (err.iter().map(|e| e * e).sum::<f64>() / err.len() as f64).sqrt();
                 // Expected shaped noise: 0.5 LSB rms (rounding + TPDF) times the NTF's rms
                 // gain; clipping adds some, a limit cycle would add a lot.
                 let rms_gain = (1.0 + q.coefficients().iter().map(|c| c * c).sum::<f64>()).sqrt();
                 let expected = 0.5 * rms_gain / 32768.0;
-                assert!(rms < 3.0 * expected, "{kind:?} @ {rate}: tail error rms {rms} vs expected {expected}");
+                assert!(
+                    rms < 3.0 * expected,
+                    "{kind:?} @ {rate}: tail error rms {rms} vs expected {expected}"
+                );
             }
         }
     }
@@ -814,7 +830,10 @@ mod tests {
         }
         assert_eq!(DitherKind::parse("TPDF"), Some(DitherKind::Tpdf));
         assert_eq!(DitherKind::parse("LNS15"), Some(DitherKind::Lns15));
-        assert_eq!(DitherKind::parse("ns-adaptive"), Some(DitherKind::NsAdaptive));
+        assert_eq!(
+            DitherKind::parse("ns-adaptive"),
+            Some(DitherKind::NsAdaptive)
+        );
         assert_eq!(DitherKind::parse("nope"), None);
     }
 }

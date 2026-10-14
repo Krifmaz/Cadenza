@@ -133,7 +133,10 @@ pub fn validate(settings: &crate::config::Settings) -> Result<(), String> {
         // for the actual channel count when a track starts.
         let preset = settings.matrix.preset.trim().to_ascii_lowercase();
         if preset != "custom" && !cadenza_dsp::matrix::preset_ids().contains(&preset.as_str()) {
-            return Err(format!("unknown matrix preset {:?}", settings.matrix.preset));
+            return Err(format!(
+                "unknown matrix preset {:?}",
+                settings.matrix.preset
+            ));
         }
         if preset == "custom" {
             settings
@@ -142,7 +145,8 @@ pub fn validate(settings: &crate::config::Settings) -> Result<(), String> {
                 .map_err(|e| format!("matrix: {e}"))?;
             for o in &settings.matrix.outputs {
                 for f in o.lowpass.iter().chain(o.highpass.iter()) {
-                    f.validate(44_100.0).map_err(|e| format!("matrix output {:?}: {e}", o.name))?;
+                    f.validate(44_100.0)
+                        .map_err(|e| format!("matrix output {:?}: {e}", o.name))?;
                 }
             }
         }
@@ -488,10 +492,25 @@ mod tests {
         let list = filter_list(&FilterQuery::default());
         assert!(list.len() >= 60);
         let first = &list[0];
-        for key in ["id", "label", "family", "taps", "taps_at_rate", "transition_hz", "transition_percent", "stopband_db", "latency_seconds", "window"] {
+        for key in [
+            "id",
+            "label",
+            "family",
+            "taps",
+            "taps_at_rate",
+            "transition_hz",
+            "transition_percent",
+            "stopband_db",
+            "latency_seconds",
+            "window",
+        ] {
             assert!(first.get(key).is_some(), "missing {key}");
         }
-        let x2 = filter_list(&FilterQuery { in_rate: Some(44_100), out_rate: Some(88_200), attenuation_db: None });
+        let x2 = filter_list(&FilterQuery {
+            in_rate: Some(44_100),
+            out_rate: Some(88_200),
+            attenuation_db: None,
+        });
         assert_eq!(x2[0]["out_rate"], 88_200);
 
         let s = crate::config::Settings::default();
@@ -501,7 +520,11 @@ mod tests {
         assert_eq!(o["dsd_rates"][5]["dop_possible"], false);
         assert_eq!(o["dsd_modulators"].as_array().unwrap().len(), 4);
         assert_eq!(o["gpu"]["precision"], "f64");
-        assert!(o["matrix_presets"].as_array().unwrap().iter().any(|p| p["id"] == "2.1"));
+        assert!(o["matrix_presets"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|p| p["id"] == "2.1"));
         assert_eq!(o["max_pcm_rate"], 1_536_000);
 
         assert!(validate(&s).is_ok());

@@ -169,10 +169,17 @@ impl Biquad {
     fn tick(&mut self, ch: usize, x: f64) -> f64 {
         let (z1, z2) = self.state[ch];
         let y = self.c.b0 * x + z1;
-        self.state[ch] = (
-            self.c.b1 * x - self.c.a1 * y + z2,
-            self.c.b2 * x - self.c.a2 * y,
-        );
+        let mut z1 = self.c.b1 * x - self.c.a1 * y + z2;
+        let mut z2 = self.c.b2 * x - self.c.a2 * y;
+        // Denormal guard (see `matrix::crossover::Section::tick`): no subnormal states
+        // during digital silence, so the per-sample cost stays constant.
+        if z1.abs() < crate::matrix::DENORMAL_FLOOR {
+            z1 = 0.0;
+        }
+        if z2.abs() < crate::matrix::DENORMAL_FLOOR {
+            z2 = 0.0;
+        }
+        self.state[ch] = (z1, z2);
         y
     }
 }

@@ -33,9 +33,7 @@ pub enum TrackDecoder {
 impl TrackDecoder {
     /// Open a source, picking the reader from the file extension (`.dsf` / `.dff`).
     pub fn open(source: &Source) -> Result<Self, TrackDecodeError> {
-        let dsd = source
-            .extension()
-            .is_some_and(|e| is_dsd_extension(&e));
+        let dsd = source.extension().is_some_and(|e| is_dsd_extension(&e));
         if dsd {
             Ok(TrackDecoder::Dsd(DsdDecoder::open(source)?))
         } else {

@@ -42,7 +42,13 @@ pub fn power_spectrum(bits: &[u8], dsd_rate: u32, nfft: usize) -> (Vec<f64>, u32
 /// the tone's level in dBFS (0 dBFS = full-scale sine). `nfft` PCM samples (at
 /// `dsd_rate / 8`) from the end of the stream are analysed, so feed a little more than
 /// `8 × nfft` bits to let the filters settle.
-pub fn tone_snr_db(bits: &[u8], dsd_rate: u32, tone_hz: f64, band_hz: f64, nfft: usize) -> (f64, f64) {
+pub fn tone_snr_db(
+    bits: &[u8],
+    dsd_rate: u32,
+    tone_hz: f64,
+    band_hz: f64,
+    nfft: usize,
+) -> (f64, f64) {
     let (power, pcm_rate) = power_spectrum(bits, dsd_rate, nfft);
     let k = (tone_hz * nfft as f64 / pcm_rate as f64).round() as usize;
     let top = ((band_hz * nfft as f64 / pcm_rate as f64) as usize).min(power.len() - 1);

@@ -5,6 +5,7 @@
 #![warn(missing_docs)]
 
 pub mod api;
+pub mod bench;
 pub mod config;
 pub mod decode;
 pub mod encore;
