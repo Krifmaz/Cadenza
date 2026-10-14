@@ -11,7 +11,7 @@
 //! Settings are passed as `--set key=value`; unknown keys are ignored with a warning (an
 //! older engine with a newer Encore), bad values are an error.
 
-use cadenza_dsp::gpu::{Backend as GpuBackend, GpuConfig, GpuMode};
+use cadenza_dsp::gpu::{Backend as GpuBackend, GpuConfig, GpuMode, GpuPrecision};
 use cadenza_dsp::{
     CoefficientCache, DitherKind, FilterKind, InputFormat, Pipeline, PipelineConfig,
 };
@@ -92,13 +92,14 @@ impl Default for EngineSettings {
 pub const HEADROOM_RANGE: (f64, f64) = (-12.0, 0.0);
 
 /// The schema keys, in display order.
-pub const KEYS: [&str; 6] = [
+pub const KEYS: [&str; 7] = [
     "filter",
     "dither",
     "headroom_db",
     "soft_clip",
     "gpu",
     "gpu_device",
+    "gpu_precision",
 ];
 
 fn parse_bool(v: &str) -> Option<bool> {
@@ -109,7 +110,8 @@ fn parse_bool(v: &str) -> Option<bool> {
     }
 }
 
-/// `auto` / `on` / `off` (the schema's ids) plus the config spellings (`cuda`, `cpu`…).
+/// `auto` / `on` / `off` (the schema's ids) plus the config spellings (`cuda`, `wgpu`,
+/// `cpu`…).
 pub fn parse_gpu(v: &str) -> Result<GpuMode, String> {
     v.parse::<GpuMode>()
         .map_err(|_| format!("bad value {v:?} for gpu (auto, on or off)"))
@@ -153,7 +155,12 @@ impl EngineSettings {
             "gpu_device" => {
                 self.gpu.device = v
                     .parse()
-                    .map_err(|_| format!("bad value {v:?} for gpu_device (a CUDA device index)"))?
+                    .map_err(|_| format!("bad value {v:?} for gpu_device (a GPU index)"))?
+            }
+            "gpu_precision" => {
+                self.gpu.precision = v.parse::<GpuPrecision>().map_err(|_| {
+                    format!("bad value {v:?} for gpu_precision (auto, f64 or double-f32)")
+                })?
             }
             _ => return Ok(false),
         }
@@ -200,13 +207,14 @@ impl EngineSettings {
 /// driver or a card).
 pub fn cuda_devices() -> Vec<(usize, String)> {
     let mut out = Vec::new();
-    if !cadenza_dsp::gpu::COMPILED_IN {
+    if !cadenza_dsp::gpu::CUDA_COMPILED_IN {
         return out;
     }
     for device in 0..16 {
         match GpuBackend::probe(&GpuConfig {
             mode: GpuMode::Cuda,
             device,
+            ..GpuConfig::default()
         }) {
             Ok(GpuBackend::Cuda { name, .. }) => out.push((device, name)),
             _ => break,
@@ -215,9 +223,56 @@ pub fn cuda_devices() -> Vec<(usize, String)> {
     out
 }
 
+/// The GPUs `gpu_device` indexes, `(index, name)`: the CUDA devices when there are any,
+/// otherwise the Vulkan / Metal / DX12 adapters (`AMD Radeon RX 7800 XT (Vulkan)`).
+pub fn gpu_devices() -> Vec<(usize, String)> {
+    let cuda = cuda_devices();
+    if !cuda.is_empty() {
+        return cuda;
+    }
+    #[cfg(feature = "wgpu")]
+    {
+        cadenza_dsp::gpu::wgpu_backend::adapters()
+            .into_iter()
+            .map(|a| (a.index, format!("{} ({})", a.name, a.api)))
+            .collect()
+    }
+    #[cfg(not(feature = "wgpu"))]
+    {
+        Vec::new()
+    }
+}
+
+/// The GPU APIs compiled into this build: `["cuda", "wgpu"]`.
+fn gpu_apis() -> Vec<&'static str> {
+    let mut v = Vec::new();
+    if cadenza_dsp::gpu::CUDA_COMPILED_IN {
+        v.push("cuda");
+    }
+    if cadenza_dsp::gpu::WGPU_COMPILED_IN {
+        v.push("wgpu");
+    }
+    v
+}
+
+/// Help text of the `gpu` setting, naming the GPU APIs this build has.
+fn gpu_help() -> String {
+    let apis = match (
+        cadenza_dsp::gpu::CUDA_COMPILED_IN,
+        cadenza_dsp::gpu::WGPU_COMPILED_IN,
+    ) {
+        (true, true) => "an NVIDIA GPU (CUDA) or any Vulkan / Metal / DX12 GPU (AMD, Intel, Apple)",
+        (true, false) => "an NVIDIA GPU (CUDA)",
+        _ => "a Vulkan / Metal / DX12 GPU (AMD, Intel, Apple, NVIDIA)",
+    };
+    format!(
+        "Run the long filters on {apis}. Auto uses one when present; the CPU is used otherwise. CUDA and 64-bit-capable cards compute the same 64-bit math as the CPU."
+    )
+}
+
 /// The settings schema for `--describe`: every key `--set` takes, with its type, label,
-/// options, default and help. `gpu` is listed only in CUDA builds, `gpu_device` only when a
-/// CUDA device was found.
+/// options, default and help. `gpu` is listed only in GPU builds (`cuda` / `wgpu`),
+/// `gpu_device` only when a GPU was found, `gpu_precision` only in `wgpu` builds.
 pub fn settings_schema(devices: &[(usize, String)]) -> Vec<Value> {
     let d = EngineSettings::default();
     let filters: Vec<Value> = FilterKind::catalog()
@@ -253,7 +308,7 @@ pub fn settings_schema(devices: &[(usize, String)]) -> Vec<Value> {
         out.push(json!({
             "key": "gpu", "label": "GPU processing", "type": "select",
             "options": [["auto", "Auto"], ["on", "On"], ["off", "Off"]], "default": "auto",
-            "help": "Run the long filters on an NVIDIA GPU (CUDA). Auto uses one when present; the CPU is used otherwise. Results are the same 64-bit math either way.",
+            "help": gpu_help(),
         }));
         if !devices.is_empty() {
             let options: Vec<Value> = devices
@@ -263,7 +318,18 @@ pub fn settings_schema(devices: &[(usize, String)]) -> Vec<Value> {
             out.push(json!({
                 "key": "gpu_device", "label": "GPU", "type": "select",
                 "options": options, "default": "0",
-                "help": "Which CUDA device processes the audio.",
+                "help": "Which GPU processes the audio.",
+            }));
+        }
+        if cadenza_dsp::gpu::WGPU_COMPILED_IN {
+            let options: Vec<Value> = GpuPrecision::ALL
+                .iter()
+                .map(|p| json!([p.id(), p.label()]))
+                .collect();
+            out.push(json!({
+                "key": "gpu_precision", "label": "GPU precision", "type": "select",
+                "options": options, "default": GpuPrecision::default().id(),
+                "help": "AMD, Intel and Apple GPUs: Auto computes in 64-bit where the card has it and in double-f32 (about 48 bits, rounding noise near -280 dB) where it does not (Apple, Intel Arc). Double-f32 is much faster on most consumer cards. CUDA always uses 64-bit.",
             }));
         }
     }
@@ -272,7 +338,7 @@ pub fn settings_schema(devices: &[(usize, String)]) -> Vec<Value> {
 
 /// The one-line `--describe` answer.
 pub fn describe() -> Value {
-    let devices = cuda_devices();
+    let devices = gpu_devices();
     json!({
         "name": "cadenza",
         "version": env!("CARGO_PKG_VERSION"),
@@ -280,6 +346,7 @@ pub fn describe() -> Value {
         "in_formats": InFormat::IDS,
         "out_formats": OUT_FORMATS,
         "gpu": cadenza_dsp::gpu::COMPILED_IN,
+        "gpu_apis": gpu_apis(),
         "filters": FilterKind::catalog().into_iter().map(|f| f.id()).collect::<Vec<_>>(),
         "dithers": DitherKind::catalog().iter().map(|k| k.id()).collect::<Vec<_>>(),
         "settings": settings_schema(&devices),
@@ -428,7 +495,12 @@ mod tests {
         assert_eq!(s.set("soft_clip", "false"), Ok(true));
         assert!(!s.soft_clip);
         assert_eq!(s.set("gpu", "on"), Ok(true));
-        assert_eq!(s.gpu.mode, GpuMode::Cuda);
+        assert_eq!(s.gpu.mode, GpuMode::On);
+        assert_eq!(s.set("gpu", "wgpu"), Ok(true));
+        assert_eq!(s.gpu.mode, GpuMode::Wgpu);
+        assert_eq!(s.set("gpu_precision", "double-f32"), Ok(true));
+        assert_eq!(s.gpu.precision, GpuPrecision::DoubleF32);
+        assert!(s.set("gpu_precision", "f16").is_err());
         assert_eq!(s.set("gpu", "off"), Ok(true));
         assert_eq!(s.gpu.mode, GpuMode::Off);
         assert_eq!(s.set("gpu_device", "1"), Ok(true));
@@ -458,8 +530,10 @@ mod tests {
         let devices = vec![(0, "NVIDIA Test".to_string())];
         let schema = settings_schema(&devices);
         let keys: Vec<&str> = schema.iter().map(|s| s["key"].as_str().unwrap()).collect();
-        if cadenza_dsp::gpu::COMPILED_IN {
+        if cadenza_dsp::gpu::WGPU_COMPILED_IN {
             assert_eq!(keys, KEYS);
+        } else if cadenza_dsp::gpu::COMPILED_IN {
+            assert_eq!(keys, &KEYS[..6]);
         } else {
             assert_eq!(keys, &KEYS[..4]);
         }
@@ -485,7 +559,7 @@ mod tests {
                 }
             }
         }
-        // no CUDA device: no gpu_device entry
+        // no GPU found: no gpu_device entry
         assert!(settings_schema(&[])
             .iter()
             .all(|s| s["key"] != "gpu_device"));

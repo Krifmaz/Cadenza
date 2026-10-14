@@ -233,7 +233,7 @@ pub fn patch_settings(s: &mut Settings, set: &serde_json::Map<String, Value>) ->
             },
             "gpu" => {
                 let parsed = match v {
-                    Value::Bool(true) => Some(GpuMode::Cuda),
+                    Value::Bool(true) => "on".parse::<GpuMode>().ok(),
                     Value::Bool(false) => Some(GpuMode::Off),
                     Value::String(t) => t.parse::<GpuMode>().ok(),
                     _ => None,
@@ -379,7 +379,7 @@ mod tests {
         assert_eq!(s.dsp.dsd_oversampling, DsdOversampling::Full);
         assert_eq!(s.dsp.headroom_db, Some(-2.0));
         assert!(!s.dsp.soft_clip);
-        assert_eq!(s.dsp.gpu.mode, GpuMode::Cuda);
+        assert_eq!(s.dsp.gpu.mode, "on".parse::<GpuMode>().unwrap());
         assert!(s.matrix.enabled);
         assert_eq!(s.matrix.preset, "2.1");
         assert!(crate::api::validate(&s).is_ok());

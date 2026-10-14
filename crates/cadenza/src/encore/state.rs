@@ -88,6 +88,7 @@ pub fn gpu_available(device: usize) -> (bool, Option<String>) {
     let probe = GpuBackend::probe(&GpuConfig {
         mode: GpuMode::Auto,
         device,
+        ..GpuConfig::default()
     });
     let (ok, name) = match probe {
         Ok(b) => (b.is_gpu(), b.device_short_name()),
@@ -129,12 +130,13 @@ pub fn dsd_packings(caps: &DsdCaps) -> Vec<Value> {
     v
 }
 
-/// `auto` / `on` / `off` – what the UI shows for the `gpu` setting (`cuda` is `on`).
+/// `auto` / `on` / `off` – what the UI shows for the `gpu` setting (`cuda` and `wgpu`
+/// are `on`).
 pub fn gpu_mode_id(mode: GpuMode) -> &'static str {
     match mode {
         GpuMode::Auto => "auto",
         GpuMode::Off => "off",
-        GpuMode::Cuda => "on",
+        GpuMode::Cuda | GpuMode::Wgpu | GpuMode::On => "on",
     }
 }
 

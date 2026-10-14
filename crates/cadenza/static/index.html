@@ -136,6 +136,7 @@
     <div class="row">
       <label class="field" style="flex:1"><span>Offload</span><select id="gpu"></select></label>
       <label class="field" style="width:110px"><span>Device</span><input type="number" id="gpu_device" min="0" max="15"></label>
+      <label class="field" style="flex:1"><span>Precision (Vulkan / Metal / DX12)</span><select id="gpu_precision"></select></label>
     </div>
     <div class="hint" id="gpu-info"></div>
   </section>
@@ -261,7 +262,8 @@ function matrixInfo() {
 function gpuInfo() {
   const g = options?.gpu;
   if (!g) return;
-  $('gpu-info').textContent = `${g.label}${g.reason ? ' · ' + g.reason : ''}${g.compute_capability ? ' · compute ' + g.compute_capability : ''} · precision ${g.precision}${options.gpu_compiled_in ? '' : ' · this build has no CUDA (build with --features cuda)'}`;
+  $('gpu-info').textContent = `${g.label}${g.reason ? ' · ' + g.reason : ''}${g.compute_capability ? ' · compute ' + g.compute_capability : ''} · precision ${g.precision}${options.gpu_compiled_in ? '' : ' · this build has no GPU support (build with --features cuda or wgpu)'}`;
+  $('gpu_precision').disabled = !options.gpu_wgpu_compiled_in;
   paintGpuBadge();
 }
 // The badge is green only when a stage of the *current* chain actually runs on the GPU
@@ -292,7 +294,7 @@ function loadSettings(set) {
   $('dsd_modulator').value = d.dsd_modulator; $('dsd_packing').value = d.dsd_packing; $('dsd_oversampling').value = d.dsd_oversampling;
   $('dsd_gain_db').value = d.dsd_gain_db ?? -3; $('dsd_passthrough').checked = d.dsd_passthrough !== false;
   $('dsd_rate').dataset.want = d.dsd_rate; fillDsdRates();
-  $('gpu').value = d.gpu || 'auto'; $('gpu_device').value = d.gpu_device ?? 0;
+  $('gpu').value = d.gpu || 'auto'; $('gpu_device').value = d.gpu_device ?? 0; $('gpu_precision').value = d.gpu_precision || 'auto';
   $('matrix_enabled').checked = !!m.enabled; $('matrix_preset').value = m.preset || 'stereo'; matrixInfo();
   const st = m.stereo || {};
   $('m_mono').checked = !!st.mono; $('m_swap').checked = !!st.swap; $('m_balance').value = st.balance_db ?? 0; $('m_mid_side').value = st.mid_side || 'off';
@@ -307,7 +309,7 @@ function loadSettings(set) {
 }
 function lockDsp() {
   const bp = $('bitperfect').checked, dsd = $('output_mode').value === 'dsd';
-  for (const id of ['filter', 'convolution', 'headroom_db', 'soft_clip', 'output_mode', 'matrix_enabled', 'matrix_preset', 'gpu', 'gpu_device']) $(id).disabled = bp;
+  for (const id of ['filter', 'convolution', 'headroom_db', 'soft_clip', 'output_mode', 'matrix_enabled', 'matrix_preset', 'gpu', 'gpu_device', 'gpu_precision']) $(id).disabled = bp;
   for (const id of ['dither', 'bits']) $(id).disabled = bp || dsd;
   $('rate').disabled = bp || dsd;
   for (const id of ['dsd_rate', 'dsd_modulator', 'dsd_packing', 'dsd_gain_db', 'dsd_oversampling']) $(id).disabled = bp || !dsd;
@@ -361,6 +363,7 @@ $('dsd_oversampling').onchange = () => { fillDsdRates(); save({ dsp: { dsd_overs
 $('dsd_passthrough').onchange = () => save({ dsp: { dsd_passthrough: $('dsd_passthrough').checked } });
 $('gpu').onchange = () => save({ dsp: { gpu: $('gpu').value } });
 $('gpu_device').onchange = () => save({ dsp: { gpu_device: num('gpu_device') } });
+$('gpu_precision').onchange = () => save({ dsp: { gpu_precision: $('gpu_precision').value } });
 $('matrix_enabled').onchange = () => { lockDsp(); save({ matrix: { enabled: $('matrix_enabled').checked } }); };
 $('matrix_preset').onchange = () => { matrixInfo(); save({ matrix: { preset: $('matrix_preset').value } }); };
 const stereo = () => ({ mono: $('m_mono').checked, swap: $('m_swap').checked, balance_db: num('m_balance'), mid_side: $('m_mid_side').value });
@@ -384,6 +387,7 @@ $('eq-save').onclick = () => save({ dsp: { eq: eqBands, eq_enabled: $('eq_enable
     $('dsd_packing').innerHTML = opts(options.dsd_packings);
     $('dsd_oversampling').innerHTML = opts(options.dsd_oversampling, 'id', 'id');
     $('gpu').innerHTML = opts(options.gpu_modes);
+    $('gpu_precision').innerHTML = opts(options.gpu_precisions);
     $('matrix_preset').innerHTML = opts(options.matrix_presets) + '<option value="custom">custom</option>';
     $('crossover-kinds').textContent = 'crossover kinds: ' + options.crossover_kinds.map(k => `${k.id} (${k.slopes.join('/')} dB/oct)`).join(', ');
     gpuInfo(); paintEndpoints();

@@ -1,5 +1,5 @@
-# Cadenza releases: on a `v*` tag (or a manual run with a version), build the `cadenza` binary for Linux x86_64 (alsa + cuda)
-# and aarch64 (alsa) on Ubuntu 22.04 (glibc 2.35: runs on Debian bookworm / trixie and newer)
+# Cadenza releases: on a `v*` tag (or a manual run with a version), build the `cadenza` binary for Linux x86_64
+# (alsa + cuda + wgpu) and aarch64 (alsa + wgpu) on Ubuntu 22.04 (glibc 2.35: runs on Debian bookworm / trixie and newer)
 # and publish a GitHub release with one tar.gz per architecture plus SHA256SUMS.
 # Encore's "Download tools" fetches these for server-side processing (`cadenza render`).
 name: Release
@@ -28,11 +28,11 @@ jobs:
         include:
           - arch: x86_64
             runner: ubuntu-22.04
-            features: alsa,cuda
+            features: alsa,cuda,wgpu
           - arch: aarch64
             # native arm64 runner (same Ubuntu 22.04 image, so the same glibc)
             runner: ubuntu-22.04-arm
-            features: alsa
+            features: alsa,wgpu
     runs-on: ${{ matrix.runner }}
     steps:
       - uses: actions/checkout@v4

@@ -261,9 +261,13 @@ pub fn options(settings: &crate::config::Settings) -> Value {
         .iter()
         .map(|o| json!({ "id": o.id() }))
         .collect();
-    let gpu_modes: Vec<Value> = GpuMode::ALL
+    let gpu_modes: Vec<Value> = GpuMode::available()
         .iter()
         .map(|m| json!({ "id": m.id(), "label": m.label() }))
+        .collect();
+    let gpu_precisions: Vec<Value> = cadenza_dsp::gpu::GpuPrecision::ALL
+        .iter()
+        .map(|p| json!({ "id": p.id(), "label": p.label() }))
         .collect();
     let matrix_presets: Vec<Value> = cadenza_dsp::matrix::presets()
         .iter()
@@ -286,7 +290,10 @@ pub fn options(settings: &crate::config::Settings) -> Value {
         "dsd_oversampling": dsd_oversampling,
         "gpu_modes": gpu_modes,
         "gpu": gpu.report(&settings.dsp.gpu),
+        "gpu_precisions": gpu_precisions,
         "gpu_compiled_in": cadenza_dsp::gpu::COMPILED_IN,
+        "gpu_cuda_compiled_in": cadenza_dsp::gpu::CUDA_COMPILED_IN,
+        "gpu_wgpu_compiled_in": cadenza_dsp::gpu::WGPU_COMPILED_IN,
         "matrix_presets": matrix_presets,
         "crossover_kinds": crossover_kinds,
         "backends": crate::output::backends(),

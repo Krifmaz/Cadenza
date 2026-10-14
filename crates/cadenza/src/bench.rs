@@ -158,18 +158,18 @@ fn time_convolver(
     done as f64 / rate as f64 / wall
 }
 
-/// Why a GPU row has no number: `not run: built without the cuda feature`, `not run: no
-/// NVIDIA GPU found (…)`, `not run: gpu = off`.
+/// Why a GPU row has no number: `not run: built without the cuda / wgpu features`, `not
+/// run: no GPU found (…)`, `not run: gpu = off`.
 fn gpu_not_run_note(backend: &Backend) -> String {
     match backend {
-        Backend::Cuda { .. } => String::new(),
+        Backend::Cuda { .. } | Backend::Wgpu { .. } => String::new(),
         Backend::Cpu { reason } if *reason == GpuError::NotCompiled.to_string() => {
-            "not run: built without the cuda feature".into()
+            "not run: built without the cuda / wgpu features".into()
         }
         Backend::Cpu { reason } if *reason == GpuError::Disabled.to_string() => {
             "not run: gpu = off".into()
         }
-        Backend::Cpu { reason } => format!("not run: no NVIDIA GPU found ({reason})"),
+        Backend::Cpu { reason } => format!("not run: no GPU found ({reason})"),
     }
 }
 
@@ -256,11 +256,17 @@ pub fn run(o: &BenchOptions) -> Vec<BenchRow> {
             &o.cache,
             Some(&backend),
         ) {
-            Ok(r) if r.engine.contains("CUDA") => rows.push(gpu_row(
-                backend.label(),
-                "FFT polyphase core on the GPU; time-domain stages stay on the CPU".into(),
-                Some(&r),
-            )),
+            Ok(r)
+                if backend
+                    .device_short_name()
+                    .is_some_and(|d| r.engine.contains(&d)) =>
+            {
+                rows.push(gpu_row(
+                    backend.label(),
+                    "FFT polyphase core on the GPU; time-domain stages stay on the CPU".into(),
+                    Some(&r),
+                ))
+            }
             Ok(r) => rows.push(gpu_row(
                 backend.label(),
                 format!(
@@ -533,9 +539,9 @@ mod tests {
                     "{r:?}"
                 );
                 if !cadenza_dsp::gpu::COMPILED_IN {
-                    assert_eq!(r.note, "not run: built without the cuda feature");
+                    assert_eq!(r.note, "not run: built without the cuda / wgpu features");
                 } else {
-                    assert!(r.note.starts_with("not run: no NVIDIA GPU found"), "{r:?}");
+                    assert!(r.note.starts_with("not run: no GPU found"), "{r:?}");
                 }
             } else {
                 assert!(r.realtime_factor.unwrap() > 0.0, "{r:?}");

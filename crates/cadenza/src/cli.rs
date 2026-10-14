@@ -63,9 +63,14 @@ pub struct Overrides {
     #[arg(long, value_name = "DB")]
     pub headroom: Option<String>,
 
-    /// GPU offload: auto, off or cuda.
+    /// GPU offload: auto, on, off, cuda or wgpu (Vulkan / Metal / DX12).
     #[arg(long, value_name = "MODE")]
     pub gpu: Option<String>,
+
+    /// Arithmetic of the wgpu kernels: auto (64-bit where the card has it), f64 or
+    /// double-f32 (about 48 bits, fastest).
+    #[arg(long, value_name = "PRECISION")]
+    pub gpu_precision: Option<String>,
 
     /// Pipeline matrix preset: stereo, mono, swap, mid-side, 2.1, 2-way-active, 3-way-active, custom
     /// ("off" disables the matrix).
@@ -249,7 +254,7 @@ pub struct RenderArgs {
     #[arg(long, value_name = "DB", allow_hyphen_values = true)]
     pub headroom_db: Option<String>,
 
-    /// GPU offload: auto, on or off (same as --set gpu=MODE).
+    /// GPU offload: auto, on or off, also cuda or wgpu (same as --set gpu=MODE).
     #[arg(long, value_name = "MODE")]
     pub gpu: Option<String>,
 

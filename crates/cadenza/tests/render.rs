@@ -170,7 +170,7 @@ fn tone_matches_the_in_process_pipeline_sample_for_sample() {
         headroom_db: Some(0.0),
         gpu: cadenza_dsp::GpuConfig {
             mode: cadenza_dsp::GpuMode::Off,
-            device: 0,
+            ..cadenza_dsp::GpuConfig::default()
         },
         ..PipelineConfig::default()
     };

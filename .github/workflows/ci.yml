@@ -20,15 +20,23 @@ jobs:
       - uses: dtolnay/rust-toolchain@stable
         with:
           components: clippy, rustfmt
-      - name: System libraries (ALSA)
-        run: sudo apt-get update && sudo apt-get install -y libasound2-dev pkg-config
+      - name: System libraries (ALSA, Mesa software Vulkan for the wgpu kernels)
+        run: sudo apt-get update && sudo apt-get install -y libasound2-dev pkg-config mesa-vulkan-drivers
       - uses: Swatinem/rust-cache@v2
       - name: Format
         run: cargo fmt --all -- --check
       - name: Clippy
         run: cargo clippy --workspace --all-targets --features alsa -- -D warnings
+      - name: Clippy (cuda + wgpu)
+        run: cargo clippy --workspace --all-targets --features alsa,cuda,wgpu -- -D warnings
       - name: Test
         run: cargo test --release --workspace --features alsa
+      - name: Test with wgpu on software Vulkan (lavapipe)
+        env:
+          CADENZA_WGPU_SOFTWARE: "1"
+        run: |
+          cargo test --release --workspace --features alsa,wgpu
+          cargo test --release -p cadenza-dsp --features wgpu -- --ignored wgpu_backend
       - name: Build with CUDA feature (no toolkit needed)
         run: cargo build --release --features cuda
 
@@ -40,7 +48,7 @@ jobs:
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
       - name: Build
-        run: cargo build --release --features coreaudio
+        run: cargo build --release --features coreaudio,wgpu
       - name: Unit tests (output + endpoint, no device needed)
         run: cargo test --release -p cadenza --features coreaudio --lib -- output:: endpoint::
 
@@ -52,6 +60,6 @@ jobs:
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
       - name: Build
-        run: cargo build --release --features wasapi
+        run: cargo build --release --features wasapi,wgpu
       - name: Unit tests (output + endpoint, no device needed)
         run: cargo test --release -p cadenza --features wasapi --lib -- output:: endpoint::

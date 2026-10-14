@@ -14,6 +14,10 @@ rust-version.workspace = true
 # the driver at run time and falls back to the CPU). Pinned to the CUDA 12.5 driver API,
 # which every NVIDIA driver >= 525 provides.
 cuda = ["dep:cudarc", "dep:libloading"]
+# Portable GPU offload through `wgpu` (Vulkan on Linux/Windows/Android, Metal on macOS,
+# DX12 on Windows): AMD, Intel, Apple Silicon and NVIDIA cards. Native f64 where the card
+# has it, double-f32 (two f32 per value, about 48 bits) elsewhere. Needs Rust 1.87.
+wgpu = ["dep:wgpu", "dep:pollster", "dep:naga"]
 
 [dependencies]
 rustfft.workspace = true
@@ -27,3 +31,6 @@ dirs.workspace = true
 rayon.workspace = true
 cudarc = { version = "0.19.10", optional = true, default-features = false, features = ["std", "driver", "nvrtc", "dynamic-loading", "cuda-12050"] }
 libloading = { version = "0.9", optional = true }
+wgpu = { version = "30", optional = true, default-features = false, features = ["std", "parking_lot", "wgsl", "vulkan", "metal", "dx12"] }
+naga = { version = "30", optional = true, features = ["wgsl-in", "spv-out", "msl-out", "hlsl-out"] }
+pollster = { version = "1", optional = true }

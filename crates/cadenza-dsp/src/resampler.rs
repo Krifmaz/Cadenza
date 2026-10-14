@@ -14,12 +14,14 @@
 //!   runs the chosen filter at its own ratio; the first stage's filter defines the passband
 //!   and the second one's transition lies entirely above it.
 //!
-//! * On an NVIDIA card (`--features cuda`, `gpu = auto | cuda`) the FFT polyphase stages
-//!   run on the device ([`crate::gpu::PolyphaseConvolver`]): one forward transform per
-//!   input block, every sub-filter's multiply-accumulate and inverse transform batched,
-//!   the phases interleaved on the device. The resampler keeps the delay compensation,
-//!   decimation and flush logic, so both cores give the same stream (to f64 rounding). A
-//!   CUDA error mid-stream moves the stage to the CPU core with its history replayed.
+//! * On a GPU – NVIDIA through CUDA (`--features cuda`, [`crate::gpu::PolyphaseConvolver`])
+//!   or any Vulkan / Metal / DX12 card through wgpu (`--features wgpu`) – the FFT
+//!   polyphase stages run on the device: one forward transform per input block, every
+//!   sub-filter's multiply-accumulate and inverse transform batched, the phases
+//!   interleaved on the device. The resampler keeps the delay compensation, decimation and
+//!   flush logic, so both cores give the same stream (to f64 rounding; to about 48 bits on
+//!   a wgpu card without f64). A device error mid-stream moves the stage to the CPU core
+//!   with its history replayed.
 //!
 //! The output is **time aligned** with the input: the linear-phase group delay is absorbed
 //! (the first `(N−1)/2` filter outputs are skipped and `flush` pushes the tail out), so a

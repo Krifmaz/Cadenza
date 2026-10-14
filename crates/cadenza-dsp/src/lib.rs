@@ -26,7 +26,7 @@ pub use cache::CoefficientCache;
 pub use dither::DitherKind;
 pub use eq::{Band, BandKind};
 pub use fir::{Family, FilterInfo, FilterKind, FirSpec, Phase};
-pub use gpu::{GpuConfig, GpuMode};
+pub use gpu::{GpuConfig, GpuMode, GpuPrecision};
 pub use headroom::Headroom;
 pub use matrix::{MatrixConfig, MatrixStage};
 pub use pipeline::{ConvolutionSpec, InputFormat, Pipeline, PipelineConfig};

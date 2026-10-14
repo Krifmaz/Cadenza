@@ -310,7 +310,13 @@ fn apply_overrides(config: &mut Config, o: &Overrides) {
     if let Some(g) = &o.gpu {
         match g.parse::<GpuMode>() {
             Ok(mode) => config.dsp.gpu.mode = mode,
-            Err(_) => eprintln!("ignoring unknown gpu mode {g:?} (auto | off | cuda)"),
+            Err(_) => eprintln!("ignoring unknown gpu mode {g:?} (auto | on | off | cuda | wgpu)"),
+        }
+    }
+    if let Some(p) = &o.gpu_precision {
+        match p.parse::<cadenza_dsp::gpu::GpuPrecision>() {
+            Ok(p) => config.dsp.gpu.precision = p,
+            Err(e) => eprintln!("ignoring {e}"),
         }
     }
     if let Some(m) = &o.matrix {

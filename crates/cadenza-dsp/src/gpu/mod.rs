@@ -1,4 +1,5 @@
-//! CUDA offload of the partitioned convolution, in 64-bit, for NVIDIA cards.
+//! GPU offload of the partitioned convolution: CUDA (64-bit) for NVIDIA cards, and `wgpu`
+//! (Vulkan, Metal, DX12) for AMD, Intel, Apple Silicon and NVIDIA cards.
 //!
 //! The GPU runs the engine both the long-FIR resampler and room convolution are built on:
 //! the filter's partition spectra are uploaded once (`f64` complex), and per block the
@@ -23,14 +24,28 @@
 //! `cuda` cargo feature, without an NVIDIA driver (≥ 525) or without a card, [`Backend::detect`]
 //! picks the CPU, says so once in the log, and everything else behaves exactly the same.
 //!
-//! Settings: `gpu = auto | off | cuda` ([`GpuMode`]) and `gpu_device = 0` ([`GpuConfig`]).
-//! The signal path shows `CUDA (RTX 4060) · 64-bit` ([`Backend::label`]).
+//! **wgpu** (`--features wgpu`): the same polyphase core written in WGSL ([`wgsl`]), run
+//! through `wgpu` on Vulkan (Linux, Windows, Android), Metal (macOS) or DX12 (Windows).
+//! Cards with 64-bit shader support compute in native `f64`; the others (Apple Silicon,
+//! Intel Arc, most mobile GPUs) in double-f32 – two `f32` per value, about 48 bits of
+//! mantissa – and the signal path says which. A device is opened once, its kernels
+//! compiled once, and it must pass a self-test against the CPU before it is used. Room
+//! convolution runs there too (the polyphase core with one phase), with the same
+//! seamless move to the CPU if the device fails mid-stream.
+//!
+//! Settings: `gpu = auto | on | off | cuda | wgpu` ([`GpuMode`]), `gpu_device = 0` and
+//! `gpu_precision = auto | f64 | double-f32` ([`GpuConfig`]). `auto` tries CUDA first, then
+//! wgpu (`on` too, with a warning when there is no GPU). The signal path shows `CUDA (RTX 4060) · 64-bit` or
+//! `Metal (Apple M2) · double-f32 (≈48-bit)` ([`Backend::label`]).
 
 pub mod kernels;
 pub mod reference;
+pub mod wgsl;
 
 #[cfg(feature = "cuda")]
 mod cuda;
+#[cfg(feature = "wgpu")]
+pub mod wgpu_backend;
 
 use crate::convolution::{
     BlockConvolver, Convolver as CpuConvolver, PolyphaseBlockConvolver, SpectralFilter,
@@ -40,6 +55,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::json;
 use std::fmt;
 use std::sync::{Arc, Mutex};
+pub use wgsl::Arith;
 
 #[cfg(feature = "cuda")]
 pub use cuda::{Convolver, PolyphaseConvolver};
@@ -58,8 +74,8 @@ pub trait PolyphaseFactory: Sync {
 }
 
 impl PolyphaseFactory for Backend {
-    /// CUDA cores on a CUDA backend; `Err` on the CPU backend (the caller then keeps its
-    /// own CPU core).
+    /// CUDA or wgpu cores on a GPU backend; `Err` on the CPU backend (the caller then keeps
+    /// its own CPU core).
     fn polyphase(
         &self,
         filters: &[SpectralFilter],
@@ -68,6 +84,9 @@ impl PolyphaseFactory for Backend {
         match self {
             Backend::Cuda { device, .. } => {
                 PolyphaseConvolver::for_channels(filters, channels, *device)
+            }
+            Backend::Wgpu { device, arith, .. } => {
+                wgpu_polyphase(filters, channels, *device, *arith)
             }
             Backend::Cpu { reason } => Err(if reason == &GpuError::NotCompiled.to_string() {
                 GpuError::NotCompiled
@@ -104,8 +123,32 @@ impl GpuUse {
     }
 }
 
+/// `true` when this binary has any GPU support (`--features cuda` and/or `--features wgpu`).
+pub const COMPILED_IN: bool = cfg!(any(feature = "cuda", feature = "wgpu"));
+
 /// `true` when this binary was built with `--features cuda` (the only way CUDA can ever be used).
-pub const COMPILED_IN: bool = cfg!(feature = "cuda");
+pub const CUDA_COMPILED_IN: bool = cfg!(feature = "cuda");
+
+/// `true` when this binary was built with `--features wgpu` (Vulkan, Metal, DX12).
+pub const WGPU_COMPILED_IN: bool = cfg!(feature = "wgpu");
+
+/// wgpu polyphase cores on adapter `device` in `arith`.
+#[allow(unused_variables)]
+fn wgpu_polyphase(
+    filters: &[SpectralFilter],
+    channels: usize,
+    device: usize,
+    arith: Arith,
+) -> Result<Vec<Box<dyn PolyphaseBlockConvolver + Send>>, GpuError> {
+    #[cfg(feature = "wgpu")]
+    {
+        wgpu_backend::PolyphaseCore::for_channels(filters, channels, device, arith.into())
+    }
+    #[cfg(not(feature = "wgpu"))]
+    {
+        Err(GpuError::NotCompiled)
+    }
+}
 
 /// Minimum NVIDIA driver version (the one that ships CUDA 12 and its NVRTC).
 pub const MIN_DRIVER_VERSION: u32 = 525;
@@ -114,18 +157,43 @@ pub const MIN_DRIVER_VERSION: u32 = 525;
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum GpuMode {
-    /// Use CUDA when a device is present, the CPU otherwise.
+    /// Use a GPU when one is present (CUDA first, then wgpu), the CPU otherwise.
     #[default]
     Auto,
     /// Never touch the GPU.
     Off,
     /// Require CUDA; fall back to the CPU with a warning when it is unavailable.
     Cuda,
+    /// Require wgpu (Vulkan, Metal, DX12); fall back to the CPU with a warning when it is
+    /// unavailable.
+    Wgpu,
+    /// Use any GPU (CUDA first, then wgpu); fall back to the CPU with a warning when there
+    /// is none.
+    On,
 }
 
 impl GpuMode {
     /// Every mode, for UIs.
-    pub const ALL: [GpuMode; 3] = [GpuMode::Auto, GpuMode::Off, GpuMode::Cuda];
+    pub const ALL: [GpuMode; 5] = [
+        GpuMode::Auto,
+        GpuMode::On,
+        GpuMode::Off,
+        GpuMode::Cuda,
+        GpuMode::Wgpu,
+    ];
+
+    /// The modes this build can honour (`auto` and `off` always; `cuda` and `wgpu` when
+    /// compiled in), for UIs.
+    pub fn available() -> Vec<GpuMode> {
+        Self::ALL
+            .into_iter()
+            .filter(|m| match m {
+                GpuMode::Cuda => CUDA_COMPILED_IN,
+                GpuMode::Wgpu => WGPU_COMPILED_IN,
+                _ => true,
+            })
+            .collect()
+    }
 
     /// Config id: `auto`, `off`, `cuda`.
     pub fn id(self) -> &'static str {
@@ -133,6 +201,8 @@ impl GpuMode {
             GpuMode::Auto => "auto",
             GpuMode::Off => "off",
             GpuMode::Cuda => "cuda",
+            GpuMode::Wgpu => "wgpu",
+            GpuMode::On => "on",
         }
     }
 
@@ -142,6 +212,8 @@ impl GpuMode {
             GpuMode::Auto => "Automatic",
             GpuMode::Off => "Off (CPU)",
             GpuMode::Cuda => "CUDA",
+            GpuMode::Wgpu => "Vulkan / Metal / DX12",
+            GpuMode::On => "On (any GPU)",
         }
     }
 }
@@ -152,8 +224,12 @@ impl std::str::FromStr for GpuMode {
         match s.trim().to_ascii_lowercase().as_str() {
             "auto" | "automatic" | "" => Ok(GpuMode::Auto),
             "off" | "cpu" | "none" | "false" => Ok(GpuMode::Off),
-            "cuda" | "gpu" | "on" | "true" => Ok(GpuMode::Cuda),
-            other => Err(format!("unknown gpu mode {other:?} (auto, off or cuda)")),
+            "cuda" => Ok(GpuMode::Cuda),
+            "wgpu" | "vulkan" | "metal" | "dx12" => Ok(GpuMode::Wgpu),
+            "gpu" | "on" | "true" => Ok(GpuMode::On),
+            other => Err(format!(
+                "unknown gpu mode {other:?} (auto, on, off, cuda or wgpu)"
+            )),
         }
     }
 }
@@ -164,17 +240,91 @@ impl fmt::Display for GpuMode {
     }
 }
 
-/// The GPU settings (`gpu` and `gpu_device` keys; `#[serde(flatten)]` them into a settings
-/// struct, or nest them as `{"mode": …, "device": …}` – both spellings deserialise).
+/// The arithmetic of the wgpu kernels (`gpu_precision`). CUDA always computes in `f64`.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum GpuPrecision {
+    /// Native `f64` where the card has it, double-f32 elsewhere.
+    #[default]
+    Auto,
+    /// Native `f64` only: a card without it is not used (the CPU runs instead).
+    F64,
+    /// Double-f32 (about 48 bits) even where `f64` exists – much faster on consumer
+    /// cards, whose `f64` units run at 1/16 … 1/64 of their `f32` rate.
+    DoubleF32,
+}
+
+impl GpuPrecision {
+    /// Every choice, for UIs.
+    pub const ALL: [GpuPrecision; 3] = [
+        GpuPrecision::Auto,
+        GpuPrecision::F64,
+        GpuPrecision::DoubleF32,
+    ];
+
+    /// Config id: `auto`, `f64`, `double-f32`.
+    pub fn id(self) -> &'static str {
+        match self {
+            GpuPrecision::Auto => "auto",
+            GpuPrecision::F64 => "f64",
+            GpuPrecision::DoubleF32 => "double-f32",
+        }
+    }
+
+    /// Display name.
+    pub fn label(self) -> &'static str {
+        match self {
+            GpuPrecision::Auto => "Automatic (64-bit where the GPU has it)",
+            GpuPrecision::F64 => "64-bit only",
+            GpuPrecision::DoubleF32 => "Double-f32 (≈48-bit, fastest)",
+        }
+    }
+}
+
+impl From<Arith> for GpuPrecision {
+    fn from(a: Arith) -> Self {
+        match a {
+            Arith::F64 => GpuPrecision::F64,
+            Arith::DoubleF32 => GpuPrecision::DoubleF32,
+        }
+    }
+}
+
+impl std::str::FromStr for GpuPrecision {
+    type Err = String;
+    fn from_str(s: &str) -> Result<Self, String> {
+        match s.trim().to_ascii_lowercase().as_str() {
+            "auto" | "automatic" | "" => Ok(GpuPrecision::Auto),
+            "f64" | "64" | "64-bit" | "double" => Ok(GpuPrecision::F64),
+            "double-f32" | "df64" | "48-bit" | "fast" => Ok(GpuPrecision::DoubleF32),
+            other => Err(format!(
+                "unknown gpu precision {other:?} (auto, f64 or double-f32)"
+            )),
+        }
+    }
+}
+
+impl fmt::Display for GpuPrecision {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(self.id())
+    }
+}
+
+/// The GPU settings (`gpu`, `gpu_device` and `gpu_precision` keys; `#[serde(flatten)]` them
+/// into a settings struct, or nest them as `{"mode": …, "device": …, "precision": …}` –
+/// both spellings deserialise).
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(default)]
 pub struct GpuConfig {
-    /// `auto`, `off` or `cuda`.
+    /// `auto`, `on`, `off`, `cuda` or `wgpu`.
     #[serde(rename = "gpu", alias = "mode")]
     pub mode: GpuMode,
-    /// CUDA device ordinal (0 = the first card).
+    /// Device index (0 = the first card) of the API in use.
     #[serde(rename = "gpu_device", alias = "device")]
     pub device: usize,
+    /// Arithmetic of the wgpu kernels.
+    #[serde(rename = "gpu_precision", alias = "precision")]
+    pub precision: GpuPrecision,
 }
 
 /// Why the GPU could not be used.
@@ -183,11 +333,12 @@ pub enum GpuError {
     /// `gpu = off`.
     #[error("gpu = off")]
     Disabled,
-    /// The binary was built without `--features cuda`.
-    #[error("built without the `cuda` feature")]
+    /// The binary was built without the GPU feature asked for (`cuda` / `wgpu`).
+    #[error("built without GPU support (the `cuda` / `wgpu` features)")]
     NotCompiled,
-    /// `libcuda` / `nvcuda.dll` could not be loaded (no NVIDIA driver on this machine).
-    #[error("no NVIDIA driver found ({0}); CUDA needs driver {MIN_DRIVER_VERSION} or newer")]
+    /// The GPU driver could not be loaded (no NVIDIA driver for CUDA; no Vulkan, Metal or
+    /// DX12 device for wgpu).
+    #[error("no GPU driver found ({0})")]
     NoDriver(String),
     /// The driver loaded but reports no usable device (or not the requested ordinal).
     #[error("{0}")]
@@ -217,6 +368,17 @@ pub enum Backend {
         /// Compute capability `(major, minor)`.
         compute: (i32, i32),
     },
+    /// A wgpu device (opened, kernels compiled, self-test passed).
+    Wgpu {
+        /// Adapter index.
+        device: usize,
+        /// Adapter name (`AMD Radeon RX 7800 XT`, `Apple M2`).
+        name: String,
+        /// `Vulkan`, `Metal` or `DX12`.
+        api: String,
+        /// The arithmetic the kernels run in.
+        arith: Arith,
+    },
 }
 
 impl Backend {
@@ -240,14 +402,15 @@ impl Backend {
                 let reason = e.to_string();
                 match (config.mode, &e) {
                     (GpuMode::Off, _) => log::info!("GPU: off (CPU · 64-bit)"),
-                    (GpuMode::Cuda, _) => {
-                        log::warn!("GPU: CUDA requested but {reason}; using the CPU (64-bit)")
-                    }
+                    (GpuMode::Cuda | GpuMode::Wgpu | GpuMode::On, _) => log::warn!(
+                        "GPU: {} requested but {reason}; using the CPU (64-bit)",
+                        config.mode.label()
+                    ),
                     (GpuMode::Auto, GpuError::NotCompiled) => {
                         log::debug!("GPU: {reason}; using the CPU (64-bit)")
                     }
                     (GpuMode::Auto, _) => {
-                        log::info!("GPU: CUDA unavailable ({reason}); using the CPU (64-bit)")
+                        log::info!("GPU: unavailable ({reason}); using the CPU (64-bit)")
                     }
                 }
                 Backend::Cpu { reason }
@@ -257,38 +420,50 @@ impl Backend {
         backend
     }
 
-    /// Probe without caching or logging: `Ok` with a CUDA backend, or why not.
+    /// Probe without caching or logging: `Ok` with a GPU backend, or why not. `auto` tries
+    /// CUDA, then wgpu. (A wgpu device is opened, compiled and self-tested on its first
+    /// probe; later probes reuse it.)
     pub fn probe(config: &GpuConfig) -> Result<Backend, GpuError> {
-        if config.mode == GpuMode::Off {
-            return Err(GpuError::Disabled);
-        }
-        #[cfg(feature = "cuda")]
-        {
-            cuda::probe(config.device)
-        }
-        #[cfg(not(feature = "cuda"))]
-        {
-            Err(GpuError::NotCompiled)
+        match config.mode {
+            GpuMode::Off => Err(GpuError::Disabled),
+            GpuMode::Cuda => probe_cuda(config.device),
+            GpuMode::Wgpu => probe_wgpu(config.device, config.precision),
+            GpuMode::Auto | GpuMode::On => match probe_cuda(config.device) {
+                Ok(b) => Ok(b),
+                Err(ce) => match probe_wgpu(config.device, config.precision) {
+                    Ok(b) => Ok(b),
+                    Err(we) => Err(match (ce, we) {
+                        (GpuError::NotCompiled, other) | (other, GpuError::NotCompiled) => other,
+                        (ce, we) => GpuError::NoDevice(format!("CUDA: {ce}; wgpu: {we}")),
+                    }),
+                },
+            },
         }
     }
 
-    /// `true` for a CUDA backend.
+    /// `true` for a GPU backend.
     pub fn is_gpu(&self) -> bool {
-        matches!(self, Backend::Cuda { .. })
+        !matches!(self, Backend::Cpu { .. })
     }
 
     /// Short device name: `RTX 4060` for `NVIDIA GeForce RTX 4060`.
     pub fn device_short_name(&self) -> Option<String> {
         match self {
-            Backend::Cuda { name, .. } => Some(short_device_name(name)),
+            Backend::Cuda { name, .. } | Backend::Wgpu { name, .. } => {
+                Some(short_device_name(name))
+            }
             Backend::Cpu { .. } => None,
         }
     }
 
-    /// `CUDA (RTX 4060) · 64-bit` or `CPU · 64-bit`, for the signal path.
+    /// `CUDA (RTX 4060) · 64-bit`, `Metal (Apple M2) · double-f32 (≈48-bit)` or
+    /// `CPU · 64-bit`, for the signal path.
     pub fn label(&self) -> String {
         match self {
             Backend::Cuda { name, .. } => format!("CUDA ({}) · 64-bit", short_device_name(name)),
+            Backend::Wgpu {
+                name, api, arith, ..
+            } => format!("{api} ({}) · {}", short_device_name(name), arith.label()),
             Backend::Cpu { .. } => "CPU · 64-bit".to_string(),
         }
     }
@@ -312,8 +487,10 @@ impl Backend {
     pub fn stage_for(&self, config: &GpuConfig, uses: GpuUse) -> Stage {
         let used = uses.any() && self.is_gpu();
         let detail = match self {
-            Backend::Cuda { .. } if used => format!("{} · {}", self.label(), uses.label()),
-            Backend::Cuda { .. } => {
+            Backend::Cuda { .. } | Backend::Wgpu { .. } if used => {
+                format!("{} · {}", self.label(), uses.label())
+            }
+            Backend::Cuda { .. } | Backend::Wgpu { .. } => {
                 format!("{} · available, not used by this chain yet", self.label())
             }
             Backend::Cpu { reason } if config.mode == GpuMode::Off => self.label(),
@@ -349,6 +526,22 @@ impl Backend {
                 "precision": "f64",
                 "compiled_in": COMPILED_IN,
             }),
+            Backend::Wgpu {
+                device,
+                name,
+                api,
+                arith,
+            } => json!({
+                "mode": config.mode.id(),
+                "backend": "wgpu",
+                "api": api,
+                "label": self.label(),
+                "device": device,
+                "device_name": name,
+                "precision": arith.id(),
+                "precision_setting": config.precision.id(),
+                "compiled_in": COMPILED_IN,
+            }),
             Backend::Cpu { reason } => json!({
                 "mode": config.mode.id(),
                 "backend": "cpu",
@@ -361,8 +554,9 @@ impl Backend {
         }
     }
 
-    /// A block convolver for `filter` on this backend: a [`Convolver`] on CUDA, or the CPU
-    /// [`crate::convolution::Convolver`]. A CUDA failure while building (out of device
+    /// A block convolver for `filter` on this backend: a [`Convolver`] on CUDA, the wgpu
+    /// polyphase core with one phase on wgpu, or the CPU
+    /// [`crate::convolution::Convolver`]. A GPU failure while building (out of device
     /// memory, kernel compile error…) is logged and falls back to the CPU.
     pub fn convolver(&self, filter: Arc<SpectralFilter>) -> Box<dyn BlockConvolver + Send> {
         #[cfg(feature = "cuda")]
@@ -372,7 +566,138 @@ impl Backend {
                 Err(e) => log::warn!("GPU: {e}; this convolver runs on the CPU"),
             }
         }
+        if let Backend::Wgpu { .. } = self {
+            match self.polyphase(std::slice::from_ref(&*filter), 1) {
+                Ok(mut cores) => {
+                    return Box::new(PhaseConvolver::new(cores.pop().expect("one core"), filter))
+                }
+                Err(e) => log::warn!("GPU: {e}; this convolver runs on the CPU"),
+            }
+        }
         Box::new(CpuConvolver::from_filter(filter))
+    }
+}
+
+/// CUDA probe (or `NotCompiled`).
+#[allow(unused_variables)]
+fn probe_cuda(device: usize) -> Result<Backend, GpuError> {
+    #[cfg(feature = "cuda")]
+    {
+        cuda::probe(device)
+    }
+    #[cfg(not(feature = "cuda"))]
+    {
+        Err(GpuError::NotCompiled)
+    }
+}
+
+/// wgpu probe (or `NotCompiled`).
+#[allow(unused_variables)]
+fn probe_wgpu(device: usize, precision: GpuPrecision) -> Result<Backend, GpuError> {
+    #[cfg(feature = "wgpu")]
+    {
+        wgpu_backend::probe(device, precision)
+    }
+    #[cfg(not(feature = "wgpu"))]
+    {
+        Err(GpuError::NotCompiled)
+    }
+}
+
+/// A one-phase polyphase core used as a plain block convolver (room convolution on wgpu).
+/// It keeps the last `partitions` input blocks, so a device failure mid-stream moves the
+/// stream to a CPU convolver with its history replayed – no gap, no glitch, logged once.
+pub struct PhaseConvolver {
+    gpu: Option<Box<dyn PolyphaseBlockConvolver + Send>>,
+    cpu: Option<CpuConvolver>,
+    filter: Arc<SpectralFilter>,
+    history: std::collections::VecDeque<Vec<f64>>,
+    label: String,
+}
+
+impl PhaseConvolver {
+    /// Wrap `core` (one phase, built for `filter`).
+    pub fn new(core: Box<dyn PolyphaseBlockConvolver + Send>, filter: Arc<SpectralFilter>) -> Self {
+        assert_eq!(core.phases(), 1, "a convolver has one phase");
+        assert_eq!(
+            core.block(),
+            filter.block(),
+            "core and filter disagree on the block"
+        );
+        Self {
+            label: core.device_label(),
+            gpu: Some(core),
+            cpu: None,
+            filter,
+            history: std::collections::VecDeque::new(),
+        }
+    }
+
+    /// Where it runs now: `Vulkan (RX 7800 XT)` or `CPU` after a device failure.
+    pub fn device_label(&self) -> String {
+        if self.gpu.is_some() {
+            self.label.clone()
+        } else {
+            "CPU".into()
+        }
+    }
+}
+
+impl fmt::Debug for PhaseConvolver {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("gpu::PhaseConvolver")
+            .field("device", &self.device_label())
+            .field("block", &self.filter.block())
+            .finish()
+    }
+}
+
+impl BlockConvolver for PhaseConvolver {
+    fn process_block(&mut self, input: &[f64], out: &mut [f64]) {
+        if let Some(core) = &mut self.gpu {
+            match core.process_block(input, out) {
+                Ok(()) => {
+                    self.history.push_back(input.to_vec());
+                    if self.history.len() > self.filter.partitions().max(1) {
+                        self.history.pop_front();
+                    }
+                    return;
+                }
+                Err(e) => {
+                    log::error!(
+                        "GPU: {e} during convolution; moving it to the CPU (history replayed)"
+                    );
+                    self.gpu = None;
+                    let mut cpu = CpuConvolver::from_filter(Arc::clone(&self.filter));
+                    let mut scratch = vec![0.0; input.len()];
+                    for block in self.history.drain(..) {
+                        cpu.process_block(&block, &mut scratch);
+                    }
+                    self.cpu = Some(cpu);
+                }
+            }
+        }
+        if let Some(cpu) = &mut self.cpu {
+            cpu.process_block(input, out);
+        }
+    }
+
+    fn latency(&self) -> usize {
+        self.filter.block()
+    }
+
+    fn reset(&mut self) {
+        self.history.clear();
+        if let Some(core) = &mut self.gpu {
+            core.reset();
+        }
+        if let Some(cpu) = &mut self.cpu {
+            cpu.reset();
+        }
+    }
+
+    fn on_gpu(&self) -> bool {
+        self.gpu.is_some()
     }
 }
 
@@ -385,7 +710,9 @@ impl fmt::Display for Backend {
 /// `NVIDIA GeForce RTX 4060 Laptop GPU` → `RTX 4060 Laptop GPU`.
 pub fn short_device_name(name: &str) -> String {
     let mut s = name.trim();
-    for prefix in ["NVIDIA ", "GeForce ", "Tesla ", "Quadro "] {
+    for prefix in [
+        "NVIDIA ", "GeForce ", "Tesla ", "Quadro ", "AMD ", "Radeon ",
+    ] {
         if let Some(rest) = s.strip_prefix(prefix) {
             s = rest.trim_start();
         }
@@ -480,7 +807,7 @@ mod tests {
         // no CUDA support at all), so the CPU is chosen and a warning says why.
         let config = GpuConfig {
             mode: GpuMode::Cuda,
-            device: 0,
+            ..GpuConfig::default()
         };
         let before = FALLBACK_LINES.load(Ordering::SeqCst);
         let backend = Backend::detect(&config);
@@ -489,7 +816,7 @@ mod tests {
         let Backend::Cpu { reason } = &backend else {
             unreachable!()
         };
-        if COMPILED_IN {
+        if CUDA_COMPILED_IN {
             assert!(
                 reason.contains("driver") || reason.contains("device") || reason.contains("CUDA"),
                 "{reason}"
@@ -525,7 +852,7 @@ mod tests {
         // `off` never probes and reports plainly.
         let off = Backend::detect(&GpuConfig {
             mode: GpuMode::Off,
-            device: 0,
+            ..GpuConfig::default()
         });
         assert_eq!(
             off,
@@ -537,7 +864,7 @@ mod tests {
             off.stage(
                 &GpuConfig {
                     mode: GpuMode::Off,
-                    device: 0
+                    ..GpuConfig::default()
                 },
                 true
             )
@@ -558,7 +885,7 @@ mod tests {
     #[test]
     fn gpu_convolver_constructor_reports_why_without_a_device() {
         let err = Convolver::new(&[1.0], 64, 0).expect_err("no GPU on this machine");
-        if COMPILED_IN {
+        if CUDA_COMPILED_IN {
             assert!(matches!(
                 err,
                 GpuError::NoDriver(_) | GpuError::NoDevice(_) | GpuError::Driver(_)
@@ -580,7 +907,16 @@ mod tests {
         assert_eq!(nested.mode, GpuMode::Off);
         assert_eq!(nested.device, 2);
         let s = serde_json::to_value(c).unwrap();
-        assert_eq!(s, json!({"gpu": "cuda", "gpu_device": 1}));
+        assert_eq!(
+            s,
+            json!({"gpu": "cuda", "gpu_device": 1, "gpu_precision": "auto"})
+        );
+        let p: GpuConfig =
+            serde_json::from_str(r#"{"gpu":"wgpu","gpu_precision":"double-f32"}"#).unwrap();
+        assert_eq!(
+            (p.mode, p.precision),
+            (GpuMode::Wgpu, GpuPrecision::DoubleF32)
+        );
         // config.toml spelling through the flattened keys.
         #[derive(Deserialize)]
         struct Dsp {
@@ -592,7 +928,19 @@ mod tests {
 
         assert_eq!("CUDA".parse::<GpuMode>().unwrap(), GpuMode::Cuda);
         assert_eq!("cpu".parse::<GpuMode>().unwrap(), GpuMode::Off);
-        assert!("metal".parse::<GpuMode>().is_err());
+        assert_eq!("metal".parse::<GpuMode>().unwrap(), GpuMode::Wgpu);
+        assert_eq!("Vulkan".parse::<GpuMode>().unwrap(), GpuMode::Wgpu);
+        assert!("opencl".parse::<GpuMode>().is_err());
+        assert_eq!("on".parse::<GpuMode>().unwrap(), GpuMode::On);
+        for p in GpuPrecision::ALL {
+            assert_eq!(p.id().parse::<GpuPrecision>().unwrap(), p);
+        }
+        assert!("f16".parse::<GpuPrecision>().is_err());
+        assert!(GpuMode::available().contains(&GpuMode::Auto));
+        assert_eq!(
+            GpuMode::available().contains(&GpuMode::Wgpu),
+            WGPU_COMPILED_IN
+        );
         for m in GpuMode::ALL {
             assert_eq!(m.id().parse::<GpuMode>().unwrap(), m);
         }
@@ -674,7 +1022,7 @@ mod tests {
         let err = PolyphaseConvolver::for_channels(&filters, 1, 0)
             .err()
             .unwrap();
-        if COMPILED_IN {
+        if CUDA_COMPILED_IN {
             assert!(matches!(
                 err,
                 GpuError::NoDriver(_) | GpuError::NoDevice(_) | GpuError::Driver(_)
@@ -682,5 +1030,73 @@ mod tests {
         } else {
             assert_eq!(err, GpuError::NotCompiled);
         }
+    }
+
+    #[test]
+    fn wgpu_backend_labels_and_report() {
+        let metal = Backend::Wgpu {
+            device: 0,
+            name: "Apple M2 Pro".into(),
+            api: "Metal".into(),
+            arith: Arith::DoubleF32,
+        };
+        assert!(metal.is_gpu());
+        assert_eq!(metal.label(), "Metal (Apple M2 Pro) · double-f32 (≈48-bit)");
+        let amd = Backend::Wgpu {
+            device: 1,
+            name: "AMD Radeon RX 7800 XT".into(),
+            api: "Vulkan".into(),
+            arith: Arith::F64,
+        };
+        assert_eq!(amd.label(), "Vulkan (RX 7800 XT) · 64-bit");
+        let st = amd.stage_for(
+            &GpuConfig::default(),
+            GpuUse {
+                upsampling: true,
+                convolution: false,
+            },
+        );
+        assert!(st.active);
+        assert_eq!(st.detail, "Vulkan (RX 7800 XT) · 64-bit · upsampling");
+        assert_eq!(st.params["backend"], "wgpu");
+        assert_eq!(st.params["api"], "Vulkan");
+        assert_eq!(st.params["precision"], "f64");
+        assert_eq!(
+            metal.report(&GpuConfig::default())["precision"],
+            "double-f32"
+        );
+    }
+
+    #[test]
+    fn phase_convolver_moves_to_the_cpu_without_a_glitch() {
+        use super::reference::ReferenceFactory;
+        let h: Vec<f64> = (0..5 * 128 + 9)
+            .map(|i| ((i as f64) * 0.05).sin() / (1.0 + i as f64 * 0.01))
+            .collect();
+        let filter = Arc::new(SpectralFilter::new(&h, 128));
+        let x: Vec<f64> = (0..20 * 128).map(|i| ((i as f64) * 0.37).cos()).collect();
+        let mut cpu = CpuConvolver::from_filter(Arc::clone(&filter));
+        let factory = ReferenceFactory {
+            fail_at_block: Some(9),
+            fail_build: false,
+        };
+        let core = factory
+            .polyphase(std::slice::from_ref(&*filter), 1)
+            .unwrap()
+            .pop()
+            .unwrap();
+        let mut gpu = PhaseConvolver::new(core, Arc::clone(&filter));
+        assert_eq!(gpu.latency(), cpu.latency());
+        let mut want = vec![0.0; 128];
+        let mut got = vec![0.0; 128];
+        for (b, chunk) in x.chunks(128).enumerate() {
+            cpu.process_block(chunk, &mut want);
+            gpu.process_block(chunk, &mut got);
+            assert_eq!(gpu.on_gpu(), b < 9, "block {b}");
+            for (p, q) in want.iter().zip(&got) {
+                assert!((p - q).abs() < 1e-10, "block {b}: {p} vs {q}");
+            }
+        }
+        assert_eq!(gpu.device_label(), "CPU");
     }
 }

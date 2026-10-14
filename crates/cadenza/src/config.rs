@@ -151,7 +151,8 @@ pub struct DspConfig {
     /// DSD sources (DSF/DFF) go to a DSD output untouched when the rates match and
     /// nothing else needs to touch the samples; off = always re-modulate through PCM.
     pub dsd_passthrough: bool,
-    /// `gpu = auto | off | cuda` and `gpu_device = 0`.
+    /// `gpu = auto | on | off | cuda | wgpu`, `gpu_device = 0` and
+    /// `gpu_precision = auto | f64 | double-f32`.
     #[serde(flatten)]
     pub gpu: GpuConfig,
 }

@@ -989,10 +989,14 @@ mod tests {
         let active: Vec<&str> = path
             .stages
             .iter()
-            .filter(|s| s.active)
+            .filter(|s| s.active && s.id != "gpu")
             .map(|s| s.id.as_str())
             .collect();
         assert_eq!(active, ["volume", "eq", "resampler", "dither"]);
+        // The compute stage is active exactly when a GPU runs the upsampler (a machine with
+        // one, or CI's software Vulkan with CADENZA_WGPU_SOFTWARE=1).
+        let gpu = path.stages.iter().find(|s| s.id == "gpu").unwrap();
+        assert_eq!(gpu.active, p.gpu_in_use());
         assert!(path.latency_seconds > 0.0);
         serde_json::to_string(&path).unwrap();
     }

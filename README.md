@@ -107,8 +107,15 @@ Dual-licensed under MIT or Apache-2.0.
   partitioned room-correction convolver. Our own Stockham FFT kernels compiled at run time
   by the driver's NVRTC, `f64` throughout, filter spectra and frequency-delay lines
   resident on the card. Needs only an NVIDIA driver (≥ 525), no CUDA toolkit – and the
-  same binary runs without a GPU (`gpu = auto | off | cuda`, `gpu_device`; the signal path
-  shows `CUDA (RTX 4060) · 64-bit · upsampling + room convolution` or the CPU fallback).
+  same binary runs without a GPU (`gpu = auto | on | off | cuda | wgpu`, `gpu_device`; the
+  signal path shows `CUDA (RTX 4060) · 64-bit · upsampling + room convolution` or the CPU
+  fallback).
+- **wgpu GPU offload** (feature `wgpu`) of the same two engines on **AMD, Intel, Apple
+  Silicon and NVIDIA** cards through Vulkan, Metal or DX12: the same kernels in WGSL, in
+  native `f64` where the card has 64-bit shaders and in double-f32 (two `f32` per value,
+  about 48 bits, rounding noise near −270 dB) where it does not (Apple, Intel Arc). Each
+  device passes a self-test against the CPU before it is used (`gpu_precision = auto |
+  f64 | double-f32`; the signal path shows e.g. `Metal (Apple M2) · double-f32 (≈48-bit)`).
 - **`cadenza bench`**: realtime factors (seconds of audio per second) on this machine for
   the chosen filter and rate – the upsampler on the CPU and (row `upsampling (GPU)`) on
   the GPU when present, its FFT engine alone on both, room convolution, and the modulator at every DSD rate (optionally with the long
@@ -148,7 +155,7 @@ implemented and tested here; the notes say where we differ.
 | Exclusive output | ASIO/WASAPI, CoreAudio hog, ALSA | WASAPI exclusive, CoreAudio hog + integer mode, ALSA hw: | matched; **no ASIO** |
 | Native DSD on Windows | via ASIO | DoP only (no standard WASAPI DSD GUID; opt-in driver GUID) | not matched without ASIO |
 | Network endpoint | NAA | Cadenza endpoint (`cadenza endpoint`, mDNS, TCP, ack-paced, PCM + DSD) | matched; our own protocol, not NAA-compatible |
-| GPU offload | CUDA (64-bit) | CUDA, 64-bit, driver only – no toolkit; also builds and runs without a GPU; the upsampler's FFT polyphase core and the room convolution run on it, verified against the CPU engine (to 1e-12, through a CPU model of the exact GPU algorithm; the on-device tests run with `cargo test -p cadenza-dsp --features cuda -- --ignored` on a card, CI has none) and benchmarked (`cadenza bench`, row `upsampling (GPU)`) | matched: upsampler and room convolution on CUDA; AMD/Intel/Apple GPUs next (wgpu) |
+| GPU offload | CUDA only (64-bit) | CUDA (64-bit, driver only – no toolkit) **and wgpu: Vulkan / Metal / DX12 on AMD, Intel, Apple Silicon and NVIDIA** (64-bit where the card has it, double-f32 ≈48-bit elsewhere); also builds and runs without a GPU; the upsampler's FFT polyphase core and the room convolution run on it, verified against the CPU engine (CUDA through a CPU model of the exact kernels; wgpu on real Vulkan in CI with Mesa's software driver: 1.7e-15 relative in f64, 2.5e-14 in double-f32) and benchmarked (`cadenza bench`, row `upsampling (GPU)`) | exceeded on hardware: HQPlayer has no AMD / Intel / Apple GPU support. Not yet measured on real AMD / Intel / Apple cards (none here); the time-domain 44.1 ↔ 48 stage is still CPU-only |
 | 64-bit processing | yes | yes everywhere | matched |
 | UPnP / Roon / control | UPnP renderer, Roon via NAA | HTTP API, web UI, Encore device | **not matched**: no UPnP renderer, no Roon |
 | Licence / price | proprietary | MIT / Apache-2.0, free | – |
@@ -158,11 +165,14 @@ implemented and tested here; the notes say where we differ.
 Where the table says "matched", the plan is to go past HQPlayer, not just tie it. In the order we intend
 to do it:
 
-1. **GPU for the upsampler** – done for CUDA: the FFT polyphase stages run on the card (one forward FFT
-   per block, all sub-filters in one batched multiply-accumulate and one batched inverse FFT, pairs of
-   phases packed into one complex transform), with a seamless switch to the CPU if the device fails
-   mid-stream. Next: a `wgpu` compute path so AMD, Intel and Apple Silicon GPUs work too (HQPlayer is
-   NVIDIA-only), and the time-domain rational stage (44.1 ↔ 48 kHz families) on the GPU as well.
+1. **GPU for the upsampler** – done for CUDA and for **wgpu** (AMD, Intel, Apple Silicon, NVIDIA through
+   Vulkan / Metal / DX12; HQPlayer is NVIDIA-only): the FFT polyphase stages run on the card (one
+   forward FFT per block, all sub-filters in one batched multiply-accumulate and one batched inverse FFT,
+   pairs of phases packed into one complex transform), with a seamless switch to the CPU if the device
+   fails mid-stream. On wgpu the maths is native `f64` where the card has it and double-f32 (≈48 bits)
+   where it does not; every device must pass a self-test against the CPU first. Verified on Mesa's
+   software Vulkan driver here and in CI; not yet on a real AMD / Intel / Apple card. Next: the
+   time-domain rational stage (44.1 ↔ 48 kHz families) on the GPU as well.
 2. **Error-correction modulators** – done on the CPU: `asdm5ec`, `asdm7ec` (4-bit look-ahead, 4 paths)
    and `asdm7ec8` (8 bits, 8 paths, DSD256 and below; above it falls back to `asdm7ec`). A trellis keeps
    the best candidate bit sequences by the low-passed (in-band) quantisation error, which lowers the
@@ -216,6 +226,7 @@ cargo build --release --features alsa     # + direct ALSA hw: devices, native DS
 cargo build --release --features wasapi   # + WASAPI exclusive, DoP (Windows)
 cargo build --release --features coreaudio # + CoreAudio hog mode, DoP (macOS)
 cargo build --release --features cuda     # + CUDA offload (NVIDIA; no toolkit needed to build)
+cargo build --release --features wgpu     # + GPU offload on AMD / Intel / Apple / NVIDIA (Vulkan, Metal, DX12)
 
 cadenza devices                           # output devices: rates, bits, channels, DSD, exclusive
 cadenza filters --in-rate 44100 --out-rate 705600   # taps, transition, stopband, latency
@@ -265,8 +276,9 @@ dsd_packing = "dop"     # dop | native
 dsd_gain_db = -3.0      # headroom before the modulator
 dsd_oversampling = "staged"  # staged | full (long FIR all the way to the DSD rate)
 dsd_passthrough = true  # DSF/DFF bits untouched to a DSD output (output_mode = dsd, same rate)
-gpu = "auto"            # auto | off | cuda
+gpu = "auto"            # auto | on | off | cuda | wgpu
 gpu_device = 0
+gpu_precision = "auto"  # auto | f64 | double-f32 (wgpu only; CUDA is always f64)
 
 [matrix]
 enabled = false
@@ -325,11 +337,12 @@ ffmpeg -i song.flac -f f64le -acodec pcm_f64le - |
   output = value << 8), exactly what Encore's in-process engine produces for the same
   settings, sample for sample. The resampler tail is flushed at EOF.
 - `--set key=value` (repeatable) sets any key of the settings schema: `filter`, `dither`,
-  `headroom_db` (default 0), `soft_clip`, `gpu` (auto/on/off, CUDA builds) and `gpu_device`
-  (when a CUDA device is present). Unknown keys are ignored with a warning; a bad value
+  `headroom_db` (default 0), `soft_clip`, `gpu` (auto/on/off, GPU builds), `gpu_device`
+  (when a GPU is present) and `gpu_precision` (wgpu builds). Unknown keys are ignored with a warning; a bad value
   exits 2. `--filter`, `--dither`, `--headroom-db` and `--gpu` are aliases.
 - `cadenza render --describe` prints one JSON line: name, version, `protocol` (1), input
-  and output formats, whether CUDA is compiled in, the filter and dither ids and the
+  and output formats, whether GPU support is compiled in (`gpu`, and `gpu_apis`:
+  `["cuda", "wgpu"]`), the filter and dither ids and the
   settings schema (`key`, `label`, `type` select/bool/number, `options`, `default`, `help`,
   `min`/`max`/`step`), so Encore draws the engine's settings from the engine itself.
 - stderr is silent except for errors (exit code 2) and, with `--progress`, one
@@ -338,7 +351,7 @@ ffmpeg -i song.flac -f f64le -acodec pcm_f64le - |
 ## Releases
 
 Pushing a `v*` tag runs `.github/workflows/release.yml`: it builds the `cadenza` binary for
-Linux x86_64 (features `alsa,cuda`) and aarch64 (feature `alsa`) on Ubuntu 22.04 (glibc 2.35,
+Linux x86_64 (features `alsa,cuda,wgpu`) and aarch64 (features `alsa,wgpu`) on Ubuntu 22.04 (glibc 2.35,
 so it runs on Debian bookworm/trixie and newer), and publishes a GitHub release with
 `cadenza-<version>-linux-x86_64.tar.gz`, `cadenza-<version>-linux-aarch64.tar.gz` (each holds
 just `cadenza`) and `SHA256SUMS`. Encore downloads the archive for its architecture, checks
@@ -423,8 +436,9 @@ else to install). Settings in `[dsp]`:
 
 | key          | values                | meaning                                              |
 |--------------|-----------------------|------------------------------------------------------|
-| `gpu`        | `auto` / `off` / `cuda` | `auto` uses a card when present; `cuda` warns when it cannot |
+| `gpu`        | `auto` / `on` / `off` / `cuda` / `wgpu` | `auto` uses a card when present (CUDA first, then wgpu); `on`, `cuda` and `wgpu` warn when they cannot |
 | `gpu_device` | `0`, `1`, …           | which card, when there are several                   |
+| `gpu_precision` | `auto` / `f64` / `double-f32` | wgpu only, see below                       |
 
 What runs on the GPU:
 
@@ -449,12 +463,49 @@ What runs on the GPU:
 
 The time-domain polyphase bank (44.1 ↔ 48 kHz families) stays on the CPU for now, and so
 does the sigma-delta modulator, which is sequential. Everything is `double` – no `f32`
-anywhere on the GPU path. Device memory: an upsampler filter of *T* taps holds about
+anywhere on the CUDA path (the wgpu path is described below). Device memory: an upsampler filter of *T* taps holds about
 *16 × T* bytes of shared spectra plus *32 × T / L* bytes of delay line per channel (a
 16M-tap filter at ×16: about 256 MiB + 2 × 32 MiB); a room filter of *P* partitions at
 block *B* holds *P × B × 32* bytes of spectra plus the same for its delay line.
 `cadenza bench` prints the CPU and GPU realtime factors side by side (`upsampling` and
 `upsampling (GPU)`).
+
+## GPU offload on AMD, Intel and Apple (wgpu)
+
+Build with `--features wgpu` (needs Rust 1.87). The same polyphase kernels, written in WGSL
+(`crates/cadenza-dsp/src/gpu/wgsl.rs`), run through `wgpu` on **Vulkan** (Linux, Windows),
+**Metal** (macOS) or **DX12** (Windows). Nothing to install beyond the normal graphics
+driver. With `gpu = auto`, CUDA is tried first, then wgpu; `gpu = wgpu` asks for wgpu only.
+`gpu_device` counts the adapters wgpu finds (discrete cards first; one entry per card even
+when it shows up on both Vulkan and DX12; `cadenza render --describe` lists them).
+
+The arithmetic depends on the card (`gpu_precision`):
+
+- **`f64`** – native 64-bit shaders (`SHADER_F64`: most AMD and NVIDIA cards on Vulkan or
+  DX12). The same maths as the CPU; measured 1.7e-15 relative to the CPU engine.
+- **`double-f32`** – each value is an unevaluated sum of two `f32` (error-free Knuth /
+  Dekker arithmetic), about 48 bits of mantissa: measured 2.5e-14 relative, rounding noise
+  near −270 dB, far below any converter. Used where there is no `f64` (Apple Silicon has
+  none, Intel Arc neither). It is also the faster choice on most consumer cards, whose
+  `f64` units run at 1/16 … 1/64 of their `f32` rate. Not bit-identical to the CPU.
+- **`auto`** (default) – `f64` where available, `double-f32` elsewhere.
+
+Every device runs a **self-test** when it is first opened: a small polyphase core on the
+device against the CPU model, which must agree to 1e-10. A device that fails (a shader
+compiler that "optimised away" the double-f32 error terms, a driver bug) is not used; the
+log says why and the CPU runs instead. This is not hypothetical: Mesa's software Vulkan
+driver does not fuse `fma`, which is why the exact product uses Dekker's split instead.
+Mid-stream device loss moves the stage to the CPU with the history replayed, as on CUDA.
+
+What has been verified, and where: the kernels against the CUDA model in both
+arithmetics (`cargo test`), the WGSL compiled to SPIR-V, MSL and HLSL by naga in every
+test run, and the whole path – upsampler and room convolution – on real Vulkan with
+Mesa's software driver (lavapipe), here and in CI (`CADENZA_WGPU_SOFTWARE=1 cargo test
+-p cadenza-dsp --features wgpu -- --ignored wgpu_backend`). The macOS (Metal) and Windows
+(DX12) builds compile in CI. **Not yet run on a real AMD, Intel or Apple GPU**, so no speed
+figures yet; `cadenza bench` shows them on your machine. Software adapters (lavapipe,
+SwiftShader, WARP) are slower than the CPU engine and are skipped unless
+`CADENZA_WGPU_SOFTWARE=1` is set.
 
 ## Architecture
 
@@ -495,7 +546,8 @@ block *B* holds *P × B × 32* bytes of spectra plus the same for its delay line
 - [ ] Non-uniformly partitioned convolution for lower latency with long impulses
 - [ ] "v3"-class modulators and more poly-sinc variants
 - [x] The resampler's FFT polyphase stages on the GPU (CUDA)
-- [ ] The time-domain rational stage on the GPU, and a `wgpu` path for AMD / Intel / Apple GPUs
+- [x] A `wgpu` path for AMD / Intel / Apple GPUs (Vulkan / Metal / DX12)
+- [ ] The time-domain rational stage on the GPU
 
 ## Development
 
@@ -504,8 +556,11 @@ cargo test --release --workspace            # unit + integration tests (null out
 cargo fmt --all -- --check
 cargo clippy --workspace --all-targets -- -D warnings
 cargo test -p cadenza-dsp --features cuda -- --ignored   # GPU-vs-CPU equality, on a machine with a card
+cargo test -p cadenza-dsp --features wgpu -- --ignored wgpu_backend   # the same on any Vulkan/Metal/DX12 GPU
+CADENZA_WGPU_SOFTWARE=1 cargo test -p cadenza-dsp --features wgpu -- --ignored wgpu_backend   # …or on lavapipe
 ```
 
-CI (`.github/workflows/ci.yml`, pull requests and manual dispatch): Ubuntu (fmt, clippy,
-tests with `alsa`, build with `cuda`), macOS (build with `coreaudio`), Windows (build with
-`wasapi`). Release builds: `.github/workflows/release.yml` on `v*` tags (see Releases).
+CI (`.github/workflows/ci.yml`, pull requests and manual dispatch): Ubuntu (fmt, clippy
+with and without `cuda,wgpu`, tests with `alsa`, tests with `wgpu` on Mesa's software
+Vulkan, build with `cuda`), macOS (build with `coreaudio,wgpu`), Windows (build with
+`wasapi,wgpu`). Release builds: `.github/workflows/release.yml` on `v*` tags (see Releases).

@@ -7,7 +7,7 @@
 
 use super::kernels::{grid_for, pass_schedule, KERNEL_SOURCE, PROGRAM_NAME, THREADS_PER_BLOCK};
 use super::reference::{check_polyphase, filter_spectra, pair_spectra};
-use super::{Backend, GpuError};
+use super::{Backend, GpuError, MIN_DRIVER_VERSION};
 use crate::convolution::{BlockConvolver, PolyphaseBlockConvolver, SpectralFilter};
 use cudarc::driver::{
     CudaContext, CudaFunction, CudaModule, CudaSlice, CudaStream, DriverError, LaunchConfig,
@@ -59,7 +59,9 @@ fn driver_present() -> Result<(), GpuError> {
             Err(e) => last = format!("{name}: {e}"),
         }
     }
-    Err(GpuError::NoDriver(last))
+    Err(GpuError::NoDriver(format!(
+        "{last}; CUDA needs NVIDIA driver {MIN_DRIVER_VERSION} or newer"
+    )))
 }
 
 /// Probe device `device` and describe it, without compiling anything.

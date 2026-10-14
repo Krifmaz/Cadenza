@@ -25,6 +25,8 @@ wasapi = ["dep:wasapi"]
 coreaudio = ["dep:coreaudio-sys"]
 # CUDA offload in cadenza-dsp (NVIDIA driver >= 525 at run time, no toolkit to build).
 cuda = ["cadenza-dsp/cuda"]
+# Portable GPU offload in cadenza-dsp: Vulkan / Metal / DX12 (AMD, Intel, Apple, NVIDIA).
+wgpu = ["cadenza-dsp/wgpu"]
 
 [dependencies]
 cadenza-dsp = { path = "../cadenza-dsp" }
