@@ -173,6 +173,9 @@ pub enum Commands {
         #[arg(long)]
         json: bool,
     },
+    /// Pure PCM filter for Encore's server-side processing: interleaved PCM on stdin →
+    /// upsampling, dither → interleaved s32le on stdout (no decoding or encoding).
+    Render(RenderArgs),
     /// Run the network endpoint next to the DAC: exposes this machine's output devices to a
     /// Cadenza instance that selects `endpoint://<name>` as its backend.
     Endpoint {
@@ -195,4 +198,66 @@ pub enum Commands {
         #[arg(long)]
         no_mdns: bool,
     },
+}
+
+/// `cadenza render` arguments.
+#[derive(Args, Debug, Clone, Default)]
+pub struct RenderArgs {
+    /// Print one JSON line describing this engine (version, protocol, formats, filters,
+    /// dithers, settings schema) and exit.
+    #[arg(long)]
+    pub describe: bool,
+
+    /// Source sample rate in Hz.
+    #[arg(long, value_name = "HZ")]
+    pub in_rate: Option<u32>,
+
+    /// Interleaved channels.
+    #[arg(long, default_value_t = 2)]
+    pub channels: u32,
+
+    /// Input sample format: f32le or f64le.
+    #[arg(long, value_name = "FORMAT", default_value = "f64le")]
+    pub in_format: String,
+
+    /// Output sample rate in Hz (default: the source rate).
+    #[arg(long, value_name = "HZ")]
+    pub rate: Option<u32>,
+
+    /// Quantiser bit depth (16, 24 or 32), left-justified in each s32le sample.
+    #[arg(long, default_value_t = 24)]
+    pub bits: u32,
+
+    /// Output sample format: s32le.
+    #[arg(long, value_name = "FORMAT", default_value = "s32le")]
+    pub out_format: String,
+
+    /// Engine setting `key=value` (repeatable; keys from the --describe schema). Unknown keys
+    /// are ignored with a warning.
+    #[arg(long = "set", value_name = "KEY=VALUE")]
+    pub set: Vec<String>,
+
+    /// Upsampling filter id (same as --set filter=ID).
+    #[arg(long, value_name = "ID")]
+    pub filter: Option<String>,
+
+    /// Dither id (same as --set dither=ID).
+    #[arg(long, value_name = "ID")]
+    pub dither: Option<String>,
+
+    /// Level after upsampling in dB (same as --set headroom_db=DB; default 0).
+    #[arg(long, value_name = "DB", allow_hyphen_values = true)]
+    pub headroom_db: Option<String>,
+
+    /// GPU offload: auto, on or off (same as --set gpu=MODE).
+    #[arg(long, value_name = "MODE")]
+    pub gpu: Option<String>,
+
+    /// Coefficient cache directory (default: the user cache directory).
+    #[arg(long, value_name = "DIR")]
+    pub cache_dir: Option<PathBuf>,
+
+    /// Print a JSON line per second on stderr: {"in_seconds":x}.
+    #[arg(long)]
+    pub progress: bool,
 }
