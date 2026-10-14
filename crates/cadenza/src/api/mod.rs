@@ -518,7 +518,8 @@ mod tests {
         assert_eq!(o["dsd_rates"].as_array().unwrap().len(), 6);
         assert_eq!(o["dsd_rates"][5]["id"], "dsd2048");
         assert_eq!(o["dsd_rates"][5]["dop_possible"], false);
-        assert_eq!(o["dsd_modulators"].as_array().unwrap().len(), 4);
+        assert_eq!(o["dsd_modulators"].as_array().unwrap().len(), 7);
+        assert_eq!(o["dsd_modulators"][6]["id"], "asdm7ec8");
         assert_eq!(o["gpu"]["precision"], "f64");
         assert!(o["matrix_presets"]
             .as_array()

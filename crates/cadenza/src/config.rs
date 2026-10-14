@@ -138,7 +138,8 @@ pub struct DspConfig {
     pub output_mode: OutputMode,
     /// DSD output rate (`dsd64` … `dsd2048`; the family follows the source).
     pub dsd_rate: DsdRate,
-    /// `asdm5`, `asdm7`, `dsd5v2` or `dsd7v2`.
+    /// `asdm5`, `asdm7`, `dsd5v2`, `dsd7v2`, or the error-correction loops `asdm5ec`,
+    /// `asdm7ec`, `asdm7ec8`.
     pub dsd_modulator: DsdModulator,
     /// `dop` or `native`.
     pub dsd_packing: DsdPacking,

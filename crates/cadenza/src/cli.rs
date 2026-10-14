@@ -43,7 +43,7 @@ pub struct Overrides {
     #[arg(long, value_name = "RATE")]
     pub dsd_rate: Option<String>,
 
-    /// DSD modulator: asdm5, asdm7, dsd5v2, dsd7v2.
+    /// DSD modulator: asdm5, asdm7, dsd5v2, dsd7v2, asdm5ec, asdm7ec, asdm7ec8.
     #[arg(long, value_name = "ID")]
     pub dsd_modulator: Option<String>,
 

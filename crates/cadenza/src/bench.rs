@@ -11,7 +11,7 @@
 
 use cadenza_dsp::bench::{self as dsp_bench, BenchResult};
 use cadenza_dsp::convolution::{choose_block, BlockConvolver, Convolver, SpectralFilter};
-use cadenza_dsp::dsd::stage::{bench_modulator, DsdStage};
+use cadenza_dsp::dsd::stage::{bench_modulator, bench_modulators, DsdStage};
 use cadenza_dsp::dsd::{DsdConfig, DsdModulator, DsdOversampling, DsdRate};
 use cadenza_dsp::gpu::{Backend, GpuConfig, GpuError};
 use cadenza_dsp::resampler::RateFamily;
@@ -357,23 +357,32 @@ pub fn run(o: &BenchOptions) -> Vec<BenchRow> {
         for rate in DsdRate::catalog() {
             let hz = rate.hz(family);
             let samples = (hz as f64 * dsd_seconds) as usize;
-            let factor = bench_modulator(o.modulator, hz, samples);
-            rows.push(BenchRow {
-                kind: "modulator".into(),
-                compute: "CPU (1 thread per channel)".into(),
-                detail: format!(
-                    "{} · {} · {} MHz",
-                    rate.label(),
-                    o.modulator.label(),
-                    rate_label(hz)
-                ),
-                in_rate: hz,
-                out_rate: hz,
-                channels: 1,
-                realtime_factor: Some(factor),
-                design_seconds: 0.0,
-                note: "per channel; channels run on separate cores".into(),
-            });
+            // The configured modulator, then every error-correction loop meant for the rate.
+            for kind in bench_modulators(o.modulator, *rate) {
+                let factor = bench_modulator(kind, hz, samples);
+                rows.push(BenchRow {
+                    kind: "modulator".into(),
+                    compute: "CPU (1 thread per channel)".into(),
+                    detail: format!(
+                        "{} · {} · {} kHz",
+                        rate.label(),
+                        kind.label(),
+                        rate_label(hz)
+                    ),
+                    in_rate: hz,
+                    out_rate: hz,
+                    channels: 1,
+                    realtime_factor: Some(factor),
+                    design_seconds: 0.0,
+                    note: match kind.lookahead() {
+                        Some(l) => format!(
+                            "per channel; error correction ({}-bit look-ahead, {} paths)",
+                            l.depth, l.paths
+                        ),
+                        None => "per channel; channels run on separate cores".into(),
+                    },
+                });
+            }
             if o.dsd_upsampling {
                 let cfg = DsdConfig {
                     rate: *rate,
@@ -501,8 +510,21 @@ mod tests {
         assert!(kinds.contains(&"room-convolution"));
         assert_eq!(
             rows.iter().filter(|r| r.kind == "modulator").count(),
-            DsdRate::catalog().len()
+            DsdRate::catalog()
+                .iter()
+                .map(|r| bench_modulators(o.modulator, *r).len())
+                .sum::<usize>()
         );
+        // The error-correction loops are listed per rate (asdm7ec8 up to DSD256 only).
+        assert!(rows
+            .iter()
+            .any(|r| r.detail.starts_with("DSD2048 · ASDM7EC ·")));
+        assert!(rows
+            .iter()
+            .any(|r| r.detail.starts_with("DSD256 · ASDM7EC8 ·")));
+        assert!(!rows
+            .iter()
+            .any(|r| r.detail.starts_with("DSD512 · ASDM7EC8")));
         for r in &rows {
             if r.compute == "GPU" {
                 // No card here: the row says why instead of a number.

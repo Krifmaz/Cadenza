@@ -352,7 +352,8 @@ mod tests {
             .map(|r| r[0].as_str().unwrap())
             .collect();
         assert_eq!(rates, ["dsd64", "dsd128", "dsd256", "dsd512", "dsd1024"]);
-        assert_eq!(e["dsd"]["modulators"].as_array().unwrap().len(), 4);
+        assert_eq!(e["dsd"]["modulators"].as_array().unwrap().len(), 7);
+        assert_eq!(e["dsd"]["modulators"][6], json!(["asdm7ec8", "ASDM7EC8"]));
         assert_eq!(e["dsd"]["packing"], "dop");
         assert_eq!(
             e["dsd"]["packings"],

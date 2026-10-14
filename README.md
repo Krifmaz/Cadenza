@@ -50,9 +50,12 @@ Dual-licensed under MIT or Apache-2.0.
   adaptive step) – each computed for the actual output rate in both families, with a
   clip-safe limiter so they never run away.
 - **DSD output** (`output_mode = dsd`): 5th- and 7th-order sigma-delta modulators
-  **`asdm5`, `asdm7`** and the dithered-quantiser **`dsd5v2`, `dsd7v2`** (lower idle
-  tones), Schreier-optimised noise-transfer zeros, ≥ 110 dB SNR in 20 kHz at DSD64
-  (measured ≈ 112 / 117 dB), stable to −0.3 dBFS with an input clipper and a loop guard,
+  **`asdm5`, `asdm7`**, the dithered-quantiser **`dsd5v2`, `dsd7v2`** (lower idle
+  tones) and the error-correction loops **`asdm5ec`, `asdm7ec`, `asdm7ec8`** (a look-ahead
+  trellis quantiser on the same loops: 4 or 8 bits deep, the cheapest of 4 or 8 candidate
+  paths by in-band-weighted error), Schreier-optimised noise-transfer zeros, ≥ 110 dB SNR
+  in 20 kHz at DSD64 (measured ≈ 110 / 117 dB plain, 117 / 127 / 128 dB with error
+  correction), stable to −0.3 dBFS with an input clipper and a loop guard,
   `dsd_gain_db` headroom (default −3 dB). Rates **DSD64 … DSD1024 and DSD2048** in the
   family of the source (2.8224 … 90.3168 MHz / 3.072 … 98.304 MHz). Packing **DoP**
   (24-bit frames with 0x05/0xFA markers) or **native** (ALSA DSD_U32_BE/LE, DSD_U8; DSD2048
@@ -136,7 +139,7 @@ implemented and tested here; the notes say where we differ.
 | Upsampling filters | sinc-M / L / Lm, closed-form, poly-sinc-gauss, xtr, ext3, min-phase & apodizing | `sinc`, `sinc-mx`, `sinc-xtr` (8M/16M), `closed-form`, `poly-sinc-gauss` (short/long/xla), `poly-sinc-ext3`; l / m / la / ma variants of each (64 catalogue entries) | matched – ours are our own designs, not copies of HQPlayer's exact responses |
 | PCM output | up to 1.536 MHz | up to 1.536 MHz (32×), every multiple of both families, rational cross-family | matched |
 | Dither / noise shaping | TPDF, NS1–NS9, LNS15 | TPDF, EF2, Lipshitz, Wannamaker, Gesemann, `ns5`, `ns9`, `lns15`, `ns-adaptive`, per output rate | matched (our shaper designs; no NS1–NS4 names) |
-| DSD output | DSD64–DSD1024, ASDM5/7 (+ v2/v3 variants) | DSD64–DSD1024 **and DSD2048**, `asdm5`, `asdm7`, `dsd5v2`, `dsd7v2`; DoP and native | matched and exceeded on rate; no "v3" family yet |
+| DSD output | DSD64–DSD1024, ASDM5/7 (+ EC, v2/v3 variants) | DSD64–DSD1024 **and DSD2048**, `asdm5`, `asdm7`, `dsd5v2`, `dsd7v2`, error-correction `asdm5ec`, `asdm7ec`, `asdm7ec8` (look-ahead trellis, +6 / +10 dB in-band SNR over the plain loops at DSD64); DoP and native | matched and exceeded on rate; EC matched; no "v3" family yet; EC is CPU-heavy (see `cadenza bench`) |
 | 1024× oversampling | yes (GPU recommended) | `dsd_oversampling = full` (long FIR to the DSD rate), CPU or CUDA | matched; very heavy on a CPU – check `cadenza bench --dsd-upsampling --dsd-full` |
 | DSD input | DSF/DFF, DSD→PCM, DSD→DSD via PCM, direct | DSF/DFF, DSD→PCM (CIC + FIR, < 0.01 dB), re-modulation via PCM, bit-perfect pass-through | matched |
 | Convolution | yes | yes, any length, per channel | matched |
@@ -160,9 +163,16 @@ to do it:
    phases packed into one complex transform), with a seamless switch to the CPU if the device fails
    mid-stream. Next: a `wgpu` compute path so AMD, Intel and Apple Silicon GPUs work too (HQPlayer is
    NVIDIA-only), and the time-domain rational stage (44.1 ↔ 48 kHz families) on the GPU as well.
-2. **Error-correction modulators** – `asdm5ec` / `asdm7ec` and the lookahead variants people use for
-   DSD1024 today, then a GPU modulator path. HQPlayer runs its modulators on one CPU core; that is its
-   biggest bottleneck at DSD1024 and nobody has beaten it yet. DSD2048 is already ours alone.
+2. **Error-correction modulators** – done on the CPU: `asdm5ec`, `asdm7ec` (4-bit look-ahead, 4 paths)
+   and `asdm7ec8` (8 bits, 8 paths, DSD256 and below; above it falls back to `asdm7ec`). A trellis keeps
+   the best candidate bit sequences by the low-passed (in-band) quantisation error, which lowers the
+   in-band noise by 6 dB (`asdm5ec`) and 10 dB (`asdm7ec`) at DSD64 with the same NTF, guard-free
+   at the default gain at every rate; `cadenza bench` lists them per DSD rate. They cost 3–8× the CPU of the plain loops (on a
+   loaded 4-core test VM: `asdm7ec` 3.6× realtime per channel at DSD64, 1.2× at DSD256, 0.5× at DSD512;
+   `asdm7ec8` 1.1× at DSD64, 0.3× at DSD256). Next: the GPU modulator path – many channels and trellis
+   paths in parallel – which is what DSD512/1024 with error correction needs. HQPlayer runs its
+   modulators on one CPU core; that is its biggest bottleneck at DSD1024 and nobody has beaten it yet.
+   DSD2048 is already ours alone.
 3. **ASIO on Windows** – a thin runtime loader for the DAC driver's ASIO COM interface (no SDK bundled, the
    FlexASIO approach), which brings native DSD on Windows with it. Also the WASAPI native-DSD GUID some
    drivers accept, so DSD works without ASIO.
@@ -249,7 +259,7 @@ eq_enabled = true
 soft_clip = true        # transparent soft clipper as the last guard
 output_mode = "pcm"     # pcm | dsd
 dsd_rate = "dsd256"     # dsd64 | dsd128 | dsd256 | dsd512 | dsd1024 | dsd2048 (native only)
-dsd_modulator = "asdm7" # asdm5 | asdm7 | dsd5v2 | dsd7v2
+dsd_modulator = "asdm7" # asdm5 | asdm7 | dsd5v2 | dsd7v2 | asdm5ec | asdm7ec | asdm7ec8
 dsd_packing = "dop"     # dop | native
 dsd_gain_db = -3.0      # headroom before the modulator
 dsd_oversampling = "staged"  # staged | full (long FIR all the way to the DSD rate)
@@ -323,6 +333,14 @@ FLAC 16/44.1 → 705.6k (sinc-l-1m) → ×16 short stage → ASDM7 (-3 dB) → D
   another rate is a re-modulation through PCM, exactly as HQPlayer does it.
 - `dsd_gain_db` (default −3 dB) keeps the modulator inside its stable range; the clipper
   and loop guard that protect it count their engagements in the signal path.
+- **Error correction** (`asdm5ec`, `asdm7ec`, `asdm7ec8`): the same loops as `asdm5` /
+  `asdm7`, but each bit is decided by a look-ahead trellis (an M-algorithm over the next
+  4 or 8 bits) that minimises the quantisation error's in-band content instead of its
+  instantaneous size. Measured at DSD64, −6 dBFS 1 kHz, 20 kHz band: 110.5 → 116.9 dB
+  (`asdm5ec`), 116.8 → 127.3 dB (`asdm7ec`), ≈ 128 dB (`asdm7ec8`); none of the guards
+  engages at the default gain at any rate. The bits come out 4 or 8 samples later (a few
+  µs). They need several times the CPU of the plain loops – run `cadenza bench` first;
+  `asdm7ec8` is meant for DSD256 and below and runs as `asdm7ec` above that.
 
 ## Matrix
 

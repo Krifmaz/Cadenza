@@ -199,7 +199,7 @@ fn apply_overrides(config: &mut Config, o: &Overrides) {
         match DsdModulator::parse(m) {
             Some(k) => config.dsp.dsd_modulator = k,
             None => {
-                eprintln!("ignoring unknown DSD modulator {m:?} (asdm5, asdm7, dsd5v2, dsd7v2)")
+                eprintln!("ignoring unknown DSD modulator {m:?} (asdm5, asdm7, dsd5v2, dsd7v2, asdm5ec, asdm7ec, asdm7ec8)")
             }
         }
     }

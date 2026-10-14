@@ -8,7 +8,7 @@ use super::interpolate::ShortInterpolator;
 use super::modulator::SigmaDelta;
 use super::ntf::Ntf;
 use super::packing::Packer;
-use super::{DsdConfig, DsdError, DsdOversampling, DsdPacking, DsdRate};
+use super::{DsdConfig, DsdError, DsdModulator, DsdOversampling, DsdPacking, DsdRate};
 use crate::signal_path::{rate_label, Stage};
 use rayon::prelude::*;
 use serde_json::json;
@@ -26,6 +26,9 @@ pub fn short_stage_factor(rate: DsdRate) -> u32 {
 /// The running DSD output stage.
 pub struct DsdStage {
     config: DsdConfig,
+    /// The modulator that actually runs (`config.modulator`, or its fallback above
+    /// [`DsdModulator::max_rate`]).
+    kind: DsdModulator,
     channels: usize,
     pcm_rate: u32,
     dsd_rate: u32,
@@ -88,7 +91,20 @@ impl DsdStage {
             )?),
             DsdOversampling::Full => None,
         };
-        let kind = config.modulator;
+        let kind = config.modulator.for_rate(config.rate);
+        if kind != config.modulator {
+            log::warn!(
+                "{} is limited to {} (too heavy for one core above it); using {} at {}",
+                config.modulator.label(),
+                config
+                    .modulator
+                    .max_rate()
+                    .map(DsdRate::label)
+                    .unwrap_or_default(),
+                kind.label(),
+                config.rate.label()
+            );
+        }
         let ntf = Arc::new(Ntf::for_rate(
             kind.order(),
             dsd_rate,
@@ -101,6 +117,7 @@ impl DsdStage {
         Ok(Self {
             gain: 10f64.powf(config.gain_db / 20.0),
             config,
+            kind,
             channels,
             pcm_rate,
             dsd_rate,
@@ -118,6 +135,10 @@ impl DsdStage {
     /// Configuration.
     pub fn config(&self) -> &DsdConfig {
         &self.config
+    }
+    /// The modulator that runs (the configured one unless it is limited to lower rates).
+    pub fn modulator(&self) -> DsdModulator {
+        self.kind
     }
     /// Channels.
     pub fn channels(&self) -> usize {
@@ -158,12 +179,15 @@ impl DsdStage {
             .map(SigmaDelta::guard_engagements)
             .sum()
     }
-    /// Latency in seconds: the short stage's group delay (the modulator adds none).
+    /// Latency in seconds: the short stage's group delay plus the look-ahead of an
+    /// error-correction modulator (`K` samples; the plain loops add none).
     pub fn latency_seconds(&self) -> f64 {
-        self.interpolator
+        let short = self
+            .interpolator
             .as_ref()
-            .map(|i| i.delay_samples() as f64 / self.dsd_rate as f64)
-            .unwrap_or(0.0)
+            .map_or(0, |i| i.delay_samples() as u64);
+        let modulator = self.modulators.first().map_or(0, |m| m.delay_samples()) as u64;
+        (short + modulator) as f64 / self.dsd_rate as f64
     }
     /// PCM frames pushed so far.
     pub fn frames_in(&self) -> u64 {
@@ -290,14 +314,25 @@ impl DsdStage {
             }),
         }
         let guards = self.guard_engagements();
-        let m = self.config.modulator;
+        let m = self.kind;
+        let look = m.lookahead();
         stages.push(Stage {
             id: "modulator".into(),
             name: "Sigma-delta modulator".into(),
             detail: format!(
-                "{} · {}th order · {:+.1} dB gain → {}{}",
+                "{}{} · {}th order{} · {:+.1} dB gain → {}{}",
                 m.label(),
+                if m != self.config.modulator {
+                    format!(" (for {})", self.config.modulator.label())
+                } else {
+                    String::new()
+                },
                 m.order(),
+                look.map(|l| format!(
+                    " · error correction: {}-bit look-ahead, {} paths",
+                    l.depth, l.paths
+                ))
+                .unwrap_or_default(),
                 self.config.gain_db,
                 self.output_label(),
                 if guards > 0 {
@@ -311,6 +346,11 @@ impl DsdStage {
                 "label": m.label(),
                 "order": m.order(),
                 "dithered": m.dithered(),
+                "configured": self.config.modulator.id(),
+                "error_correction": m.error_correction(),
+                "lookahead_depth": look.map(|l| l.depth),
+                "lookahead_paths": look.map(|l| l.paths),
+                "lookahead_weight": look.map(|l| l.weight),
                 "h_inf": self.ntf.h_inf,
                 "predicted_noise_dbfs": self.ntf.predicted_noise_dbfs(),
                 "gain_db": self.config.gain_db,
@@ -327,6 +367,18 @@ impl DsdStage {
         });
         stages
     }
+}
+
+/// The modulators `cadenza bench` times at `rate`: the configured one, then every
+/// error-correction loop meant for that rate (`asdm7ec8` only up to DSD256).
+pub fn bench_modulators(primary: DsdModulator, rate: DsdRate) -> Vec<DsdModulator> {
+    let mut kinds = vec![primary];
+    for kind in DsdModulator::catalog() {
+        if kind.error_correction() && kind.for_rate(rate) == *kind && !kinds.contains(kind) {
+            kinds.push(*kind);
+        }
+    }
+    kinds
 }
 
 /// Realtime factor of one modulator (seconds of audio per second of CPU time, one
@@ -464,8 +516,107 @@ mod tests {
     }
 
     #[test]
+    fn error_correction_modulator_runs_in_the_stage_and_is_reported() {
+        let c = DsdConfig {
+            rate: DsdRate::Dsd64,
+            modulator: DsdModulator::Asdm7ec,
+            gain_db: 0.0,
+            ..Default::default()
+        };
+        let pcm_rate = DsdStage::pcm_input_rate(&c, 44_100);
+        let mut s = DsdStage::new(pcm_rate, 44_100, 2, c).unwrap();
+        assert_eq!(s.modulator(), DsdModulator::Asdm7ec);
+        let staged_only = {
+            let plain = DsdConfig {
+                modulator: DsdModulator::Asdm7,
+                ..c
+            };
+            DsdStage::new(pcm_rate, 44_100, 2, plain)
+                .unwrap()
+                .latency_seconds()
+        };
+        // The look-ahead adds its K = 4 samples of delay at the DSD rate.
+        let extra = s.latency_seconds() - staged_only;
+        assert!((extra - 4.0 / 2_822_400.0).abs() < 1e-12, "{extra:e}");
+        let nfft = 1 << 16;
+        let hz = coherent_tone_hz(1000.0, pcm_rate, nfft);
+        let frames = nfft + 8192;
+        let pcm: Vec<f64> = (0..frames)
+            .flat_map(|i| {
+                let v = 0.5 * (2.0 * PI * hz * i as f64 / pcm_rate as f64).sin();
+                [v, -v]
+            })
+            .collect();
+        let mut words = Vec::new();
+        for chunk in pcm.chunks(2 * 1000) {
+            words.extend(s.process(chunk));
+        }
+        words.extend(s.flush());
+        assert_eq!(words.len(), frames * 8 / 16 * 2);
+        let planar = unpack_dop(&words, 2).expect("DoP markers alternate");
+        let (snr, _) = tone_snr_db(&planar[0], 2_822_400, hz, 20_000.0, nfft);
+        assert!(snr > 118.0, "asdm7ec through the stage: SNR {snr:.1} dB");
+        assert_eq!(s.guard_engagements(), 0);
+        let st = s.stages();
+        assert!(
+            st[1].detail.contains("ASDM7EC") && st[1].detail.contains("4-bit look-ahead"),
+            "{}",
+            st[1].detail
+        );
+        assert_eq!(st[1].params["error_correction"], true);
+        assert_eq!(st[1].params["lookahead_depth"], 4);
+    }
+
+    #[test]
+    fn asdm7ec8_falls_back_to_asdm7ec_above_dsd256() {
+        let c = DsdConfig {
+            rate: DsdRate::Dsd512,
+            modulator: DsdModulator::Asdm7ec8,
+            ..Default::default()
+        };
+        let s = DsdStage::new(DsdStage::pcm_input_rate(&c, 44_100), 44_100, 1, c).unwrap();
+        assert_eq!(s.modulator(), DsdModulator::Asdm7ec);
+        let st = s.stages();
+        assert!(
+            st[1].detail.contains("ASDM7EC (for ASDM7EC8)"),
+            "{}",
+            st[1].detail
+        );
+        assert_eq!(st[1].params["configured"], "asdm7ec8");
+        let c = DsdConfig {
+            rate: DsdRate::Dsd256,
+            ..c
+        };
+        let s = DsdStage::new(DsdStage::pcm_input_rate(&c, 44_100), 44_100, 1, c).unwrap();
+        assert_eq!(s.modulator(), DsdModulator::Asdm7ec8);
+        assert!(s.stages()[1].detail.contains("8-bit look-ahead, 8 paths"));
+    }
+
+    #[test]
+    fn bench_lists_the_error_correction_loops_per_rate() {
+        let ids = |r| -> Vec<&str> {
+            bench_modulators(DsdModulator::Asdm7, r)
+                .iter()
+                .map(|m| m.id())
+                .collect()
+        };
+        assert_eq!(
+            ids(DsdRate::Dsd256),
+            ["asdm7", "asdm5ec", "asdm7ec", "asdm7ec8"]
+        );
+        assert_eq!(ids(DsdRate::Dsd512), ["asdm7", "asdm5ec", "asdm7ec"]);
+        assert_eq!(
+            bench_modulators(DsdModulator::Asdm7ec, DsdRate::Dsd64).len(),
+            3,
+            "no duplicate of the configured one"
+        );
+    }
+
+    #[test]
     fn bench_runs() {
-        let f = bench_modulator(DsdModulator::Asdm7, 2_822_400, 100_000);
-        assert!(f > 0.0);
+        for kind in DsdModulator::catalog() {
+            let f = bench_modulator(*kind, 2_822_400, 20_000);
+            assert!(f > 0.0, "{}", kind.id());
+        }
     }
 }

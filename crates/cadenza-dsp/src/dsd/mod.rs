@@ -170,6 +170,12 @@ pub enum DsdModulator {
     Dsd5v2,
     /// 7th-order with adaptive dithered quantiser.
     Dsd7v2,
+    /// 5th-order error-correction loop: look-ahead trellis quantiser, 4 bits deep.
+    Asdm5ec,
+    /// 7th-order error-correction loop: look-ahead trellis quantiser, 4 bits deep.
+    Asdm7ec,
+    /// 7th-order error-correction loop, 8 bits deep (heavier; DSD256 and below).
+    Asdm7ec8,
 }
 
 impl DsdModulator {
@@ -180,24 +186,33 @@ impl DsdModulator {
             DsdModulator::Asdm7,
             DsdModulator::Dsd5v2,
             DsdModulator::Dsd7v2,
+            DsdModulator::Asdm5ec,
+            DsdModulator::Asdm7ec,
+            DsdModulator::Asdm7ec8,
         ]
     }
-    /// `asdm5`, `asdm7`, `dsd5v2`, `dsd7v2`.
+    /// `asdm5`, `asdm7`, `dsd5v2`, `dsd7v2`, `asdm5ec`, `asdm7ec`, `asdm7ec8`.
     pub fn id(self) -> &'static str {
         match self {
             DsdModulator::Asdm5 => "asdm5",
             DsdModulator::Asdm7 => "asdm7",
             DsdModulator::Dsd5v2 => "dsd5v2",
             DsdModulator::Dsd7v2 => "dsd7v2",
+            DsdModulator::Asdm5ec => "asdm5ec",
+            DsdModulator::Asdm7ec => "asdm7ec",
+            DsdModulator::Asdm7ec8 => "asdm7ec8",
         }
     }
-    /// `ASDM5`, `ASDM7`, `DSD5v2`, `DSD7v2`.
+    /// `ASDM5`, `ASDM7`, `DSD5v2`, `DSD7v2`, `ASDM5EC`, `ASDM7EC`, `ASDM7EC8`.
     pub fn label(self) -> &'static str {
         match self {
             DsdModulator::Asdm5 => "ASDM5",
             DsdModulator::Asdm7 => "ASDM7",
             DsdModulator::Dsd5v2 => "DSD5v2",
             DsdModulator::Dsd7v2 => "DSD7v2",
+            DsdModulator::Asdm5ec => "ASDM5EC",
+            DsdModulator::Asdm7ec => "ASDM7EC",
+            DsdModulator::Asdm7ec8 => "ASDM7EC8",
         }
     }
     /// Parse an id (case-insensitive).
@@ -208,8 +223,48 @@ impl DsdModulator {
     /// Loop order.
     pub fn order(self) -> usize {
         match self {
-            DsdModulator::Asdm5 | DsdModulator::Dsd5v2 => 5,
-            DsdModulator::Asdm7 | DsdModulator::Dsd7v2 => 7,
+            DsdModulator::Asdm5 | DsdModulator::Dsd5v2 | DsdModulator::Asdm5ec => 5,
+            DsdModulator::Asdm7
+            | DsdModulator::Dsd7v2
+            | DsdModulator::Asdm7ec
+            | DsdModulator::Asdm7ec8 => 7,
+        }
+    }
+    /// Look-ahead trellis parameters of the error-correction loops (`None` for the
+    /// plain and dithered quantisers).
+    pub fn lookahead(self) -> Option<modulator::Lookahead> {
+        // Chosen at DSD64 (−6 dBFS 1 kHz, see the modulator tests): more weight buys
+        // in-band SNR and costs headroom on DC; these keep ≥ 0.71 FS of DC stable at DSD64
+        // (the plain loops: 0.71 / 0.75) and the default-gain test guard-free everywhere.
+        let look = |depth, weight| modulator::Lookahead {
+            weight,
+            ..modulator::Lookahead::new(depth)
+        };
+        match self {
+            DsdModulator::Asdm5ec => Some(look(4, 100.0)),
+            DsdModulator::Asdm7ec => Some(look(4, 300.0)),
+            DsdModulator::Asdm7ec8 => Some(look(8, 200.0)),
+            _ => None,
+        }
+    }
+    /// Whether this is an error-correction (look-ahead) loop.
+    pub fn error_correction(self) -> bool {
+        self.lookahead().is_some()
+    }
+    /// The modulator that runs at `rate`: this one, or – above [`Self::max_rate`] – the
+    /// lighter loop of the same family (`asdm7ec8` → `asdm7ec`).
+    pub fn for_rate(self, rate: DsdRate) -> Self {
+        match self.max_rate() {
+            Some(max) if rate > max => DsdModulator::Asdm7ec,
+            _ => self,
+        }
+    }
+    /// The highest DSD rate the modulator is meant for (`asdm7ec8` is too heavy for one
+    /// core above DSD256); `None` = every rate.
+    pub fn max_rate(self) -> Option<DsdRate> {
+        match self {
+            DsdModulator::Asdm7ec8 => Some(DsdRate::Dsd256),
+            _ => None,
         }
     }
     /// Whether the quantiser is dithered.
@@ -409,6 +464,38 @@ mod tests {
         assert_eq!(family_base(176_400), 44_100);
         assert_eq!(family_base(96_000), 48_000);
         assert_eq!(DsdModulator::parse("ASDM7"), Some(DsdModulator::Asdm7));
+        assert_eq!(DsdModulator::parse("asdm5ec"), Some(DsdModulator::Asdm5ec));
+        assert_eq!(DsdModulator::parse("ASDM7EC"), Some(DsdModulator::Asdm7ec));
+        assert_eq!(
+            DsdModulator::parse("asdm7ec8"),
+            Some(DsdModulator::Asdm7ec8)
+        );
+        assert_eq!(DsdModulator::Asdm7ec8.label(), "ASDM7EC8");
+        assert_eq!(DsdModulator::Asdm5ec.order(), 5);
+        assert_eq!(DsdModulator::Asdm7ec8.order(), 7);
+        assert!(
+            DsdModulator::Asdm7ec.error_correction() && !DsdModulator::Dsd7v2.error_correction()
+        );
+        assert!(!DsdModulator::Asdm7ec.dithered());
+        assert_eq!(DsdModulator::Asdm7ec8.max_rate(), Some(DsdRate::Dsd256));
+        assert_eq!(
+            DsdModulator::Asdm7ec8.for_rate(DsdRate::Dsd256),
+            DsdModulator::Asdm7ec8
+        );
+        assert_eq!(
+            DsdModulator::Asdm7ec8.for_rate(DsdRate::Dsd512),
+            DsdModulator::Asdm7ec
+        );
+        assert_eq!(
+            DsdModulator::Asdm5ec.for_rate(DsdRate::Dsd2048),
+            DsdModulator::Asdm5ec
+        );
+        // Ids are unique and every one parses back.
+        for m in DsdModulator::catalog() {
+            assert_eq!(DsdModulator::parse(m.id()), Some(*m));
+            assert_eq!(DsdModulator::parse(m.label()), Some(*m));
+        }
+        assert_eq!(DsdModulator::catalog().len(), 7);
         assert_eq!(DsdModulator::Dsd7v2.order(), 7);
         assert_eq!(OutputMode::parse("dsd"), Some(OutputMode::Dsd));
         assert_eq!(DsdPacking::parse("DoP"), Some(DsdPacking::Dop));
@@ -430,5 +517,10 @@ mod tests {
         assert_eq!(c.oversampling, DsdOversampling::Full);
         let s = serde_json::to_string(&c).unwrap();
         assert!(s.contains("\"dsd512\""));
+        let c: DsdConfig = serde_json::from_str(r#"{"modulator":"asdm7ec8"}"#).unwrap();
+        assert_eq!(c.modulator, DsdModulator::Asdm7ec8);
+        assert!(serde_json::to_string(&c).unwrap().contains("\"asdm7ec8\""));
+        let c: DsdConfig = serde_json::from_str(r#"{"modulator":"asdm5ec"}"#).unwrap();
+        assert_eq!(c.modulator, DsdModulator::Asdm5ec);
     }
 }
