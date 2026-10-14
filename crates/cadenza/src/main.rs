@@ -14,6 +14,11 @@ use std::time::Duration;
 
 fn main() {
     let cli = Cli::parse();
+    if let Commands::Render(args) = &cli.command {
+        // a pure filter: stderr stays quiet (errors only) unless --progress or RUST_LOG
+        env_logger::Builder::from_env(env_logger::Env::default().default_filter_or("error")).init();
+        std::process::exit(render(args));
+    }
     env_logger::Builder::from_env(env_logger::Env::default().default_filter_or(&cli.log))
         .format_timestamp_millis()
         .init();
@@ -116,6 +121,7 @@ fn main() {
             dsd_full,
             json,
         ),
+        Commands::Render(_) => unreachable!("handled above"),
         Commands::Endpoint {
             name,
             listen,
@@ -149,6 +155,78 @@ fn main() {
     if let Err(e) = result {
         eprintln!("error: {e:#}");
         std::process::exit(1);
+    }
+}
+
+/// `cadenza render`: exit code 0, or 2 with the message on stderr.
+fn render(args: &cli::RenderArgs) -> i32 {
+    use cadenza::render::{self, EngineSettings, InFormat, RenderOptions};
+    use std::io::Write;
+    if args.describe {
+        println!("{}", render::describe());
+        return 0;
+    }
+    let fail = |msg: String| {
+        eprintln!("cadenza render: {msg}");
+        2
+    };
+    let Some(in_rate) = args.in_rate else {
+        return fail("--in-rate is required".into());
+    };
+    let Some(in_format) = InFormat::parse(&args.in_format) else {
+        return fail(format!(
+            "unknown input format {:?} (f32le or f64le)",
+            args.in_format
+        ));
+    };
+    if !render::OUT_FORMATS.contains(&args.out_format.trim().to_ascii_lowercase().as_str()) {
+        return fail(format!(
+            "unknown output format {:?} (s32le)",
+            args.out_format
+        ));
+    }
+    let mut settings = EngineSettings::default();
+    // the old flags are aliases of --set; --set comes last and wins
+    let mut sets: Vec<String> = Vec::new();
+    for (key, v) in [
+        ("filter", &args.filter),
+        ("dither", &args.dither),
+        ("headroom_db", &args.headroom_db),
+        ("gpu", &args.gpu),
+    ] {
+        if let Some(v) = v {
+            sets.push(format!("{key}={v}"));
+        }
+    }
+    sets.extend(args.set.iter().cloned());
+    if let Err(e) = settings.apply_sets(&sets, |w| eprintln!("cadenza render: {w}")) {
+        return fail(e);
+    }
+    let opts = RenderOptions {
+        in_rate,
+        channels: args.channels,
+        in_format,
+        rate: args.rate.unwrap_or(in_rate),
+        bits: args.bits,
+        settings,
+        cache: match &args.cache_dir {
+            Some(d) => CoefficientCache::in_dir(d),
+            None => CoefficientCache::default_location(),
+        },
+    };
+    let stdin = std::io::stdin().lock();
+    let stdout = std::io::stdout().lock();
+    let input = std::io::BufReader::with_capacity(render::IO_BUFFER, stdin);
+    let output = std::io::BufWriter::with_capacity(render::IO_BUFFER, stdout);
+    let mut stderr = std::io::stderr();
+    let progress: Option<&mut dyn Write> = if args.progress {
+        Some(&mut stderr)
+    } else {
+        None
+    };
+    match render::run(&opts, input, output, progress) {
+        Ok(_) => 0,
+        Err(e) => fail(e),
     }
 }
 

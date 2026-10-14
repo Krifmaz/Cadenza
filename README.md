@@ -231,6 +231,7 @@ cadenza bench --dsd-upsampling                           # + the long filter fee
 cadenza serve                             # control API + web UI on http://127.0.0.1:8777
 cadenza serve --listen 0.0.0.0:8777 --device "hw:1,0" --rate auto
 cadenza endpoint --name "Living room"     # on the DAC box; then --backend "endpoint://Living room"
+cadenza render --describe                 # the PCM filter Encore runs on its server (below)
 ```
 
 The configuration lives in `~/.config/cadenza/config.toml` (platform equivalent via
@@ -304,6 +305,44 @@ device = ""
 buffer_ms = 150         # jitter buffer
 mdns = true
 ```
+
+### `cadenza render` (Encore server-side processing)
+
+Encore's server-side processing (Settings → Playback → Server processing) can run a
+downloaded `cadenza` binary instead of the engine compiled into Encore, and updates it from
+this repository's releases (Encore → Settings → Download tools). `render` is a pure filter:
+interleaved PCM in on stdin, interleaved PCM out on stdout, nothing decoded or encoded.
+
+```bash
+ffmpeg -i song.flac -f f64le -acodec pcm_f64le - |
+  cadenza render --in-rate 44100 --channels 2 --in-format f64le --rate 192000 \
+                 --bits 24 --out-format s32le --set filter=sinc-l-1m --set dither=ns9 \
+                 --cache-dir ~/.cache/cadenza |
+  ffmpeg -f s32le -ar 192000 -ac 2 -i - -c:a flac -sample_fmt s32 -bits_per_raw_sample 24 out.flac
+```
+
+- Input `f32le` or `f64le`; output `s32le` with the 16/24-bit value left-justified (24-bit
+  output = value << 8), exactly what Encore's in-process engine produces for the same
+  settings, sample for sample. The resampler tail is flushed at EOF.
+- `--set key=value` (repeatable) sets any key of the settings schema: `filter`, `dither`,
+  `headroom_db` (default 0), `soft_clip`, `gpu` (auto/on/off, CUDA builds) and `gpu_device`
+  (when a CUDA device is present). Unknown keys are ignored with a warning; a bad value
+  exits 2. `--filter`, `--dither`, `--headroom-db` and `--gpu` are aliases.
+- `cadenza render --describe` prints one JSON line: name, version, `protocol` (1), input
+  and output formats, whether CUDA is compiled in, the filter and dither ids and the
+  settings schema (`key`, `label`, `type` select/bool/number, `options`, `default`, `help`,
+  `min`/`max`/`step`), so Encore draws the engine's settings from the engine itself.
+- stderr is silent except for errors (exit code 2) and, with `--progress`, one
+  `{"in_seconds":x}` line per second.
+
+## Releases
+
+Pushing a `v*` tag runs `.github/workflows/release.yml`: it builds the `cadenza` binary for
+Linux x86_64 (features `alsa,cuda`) and aarch64 (feature `alsa`) on Ubuntu 22.04 (glibc 2.35,
+so it runs on Debian bookworm/trixie and newer), and publishes a GitHub release with
+`cadenza-<version>-linux-x86_64.tar.gz`, `cadenza-<version>-linux-aarch64.tar.gz` (each holds
+just `cadenza`) and `SHA256SUMS`. Encore downloads the archive for its architecture, checks
+it against `SHA256SUMS` and runs `cadenza render --describe` before switching to it.
 
 ## DSD
 
@@ -447,7 +486,7 @@ block *B* holds *P × B × 32* bytes of spectra plus the same for its delay line
   `Pipeline`, the serialisable `SignalPath` and `bench`.
 - `crates/cadenza` — the program: decoding (Symphonia, DSF/DFF), outputs, the endpoint, the
   player engine, config and CLI (`play`, `serve`, `devices`, `filters`, `dithers`,
-  `config`, `bench`, `endpoint`), the HTTP API and web UI, and the Encore client.
+  `config`, `bench`, `endpoint`, `render`), the HTTP API and web UI, and the Encore client.
 
 ## Roadmap
 
@@ -469,4 +508,4 @@ cargo test -p cadenza-dsp --features cuda -- --ignored   # GPU-vs-CPU equality, 
 
 CI (`.github/workflows/ci.yml`, pull requests and manual dispatch): Ubuntu (fmt, clippy,
 tests with `alsa`, build with `cuda`), macOS (build with `coreaudio`), Windows (build with
-`wasapi`).
+`wasapi`). Release builds: `.github/workflows/release.yml` on `v*` tags (see Releases).
