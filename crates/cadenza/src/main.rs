@@ -444,9 +444,11 @@ fn serve(config: Config, path: std::path::PathBuf) -> anyhow::Result<()> {
             persist: Some(persist),
         },
     );
-    if config.encore.enabled() {
-        cadenza::encore::start(Arc::new(config.encore.clone()), engine.clone());
-    }
+    // The link runs for the life of the process; the handle is only needed to stop it.
+    let _link = config
+        .encore
+        .enabled()
+        .then(|| cadenza::encore::start(Arc::new(config.encore.clone()), engine.clone()));
     runtime.block_on(cadenza::api::serve(&config.server.listen, engine))
 }
 

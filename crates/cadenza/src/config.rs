@@ -230,12 +230,23 @@ pub struct EncoreConfig {
     pub cookie: String,
     /// Shown in Encore's device list (default `Cadenza on <hostname>`).
     pub device_name: String,
+    /// An Encore app token (`POST /api/auth/app-token`): sent as `Authorization: Bearer`
+    /// instead of a cookie. The desktop app uses this.
+    pub token: String,
+    /// Device id override; empty = `cadenza-<hash of hostname|url>`.
+    pub device_id: String,
+    /// `true` when this player runs inside the Encore desktop app (reported to Encore as
+    /// `engine.embedded`).
+    pub embedded: bool,
 }
 
 impl EncoreConfig {
-    /// Whether the integration should run.
+    /// Whether the integration should run: a URL and one way to authenticate.
     pub fn enabled(&self) -> bool {
-        !self.url.trim().is_empty() && (!self.cookie.is_empty() || !self.username.is_empty())
+        !self.url.trim().is_empty()
+            && (!self.token.trim().is_empty()
+                || !self.cookie.trim().is_empty()
+                || !self.username.is_empty())
     }
 }
 

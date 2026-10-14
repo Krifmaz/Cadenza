@@ -118,6 +118,9 @@ Dual-licensed under MIT or Apache-2.0.
   path, output mode, DSD / headroom / GPU / matrix settings and the device's DSD
   capabilities), receives commands instantly over Encore's event stream, streams the
   original files, and reports plays like Encore's own player.
+  The same client lives inside the Encore desktop app (`cadenza::embed::EmbeddedPlayer`):
+  the engine runs in the app's process with its own `config.toml`, signs in with an app
+  token, and Settings → Playback → Cadenza engine in Encore changes every setting live.
 - **Signal path** report: every stage with its parameters, as JSON – e.g.
   `FLAC 16/44.1 → 705.6k (sinc-l-1m) → ASDM7 → DSD256 (DoP)`.
 - **64-bit maths** everywhere, on the CPU and on the GPU.
@@ -229,7 +232,10 @@ listen = "127.0.0.1:8777"
 [encore]
 url = "http://192.168.1.10:8080"
 username = "me"
-password = "secret"     # or cookie = "encore_session=…"
+password = "secret"     # or cookie = "encore_session=…", or token = "…" (an Encore app token, sent as a bearer)
+# device_id = ""        # empty = a stable id from hostname and url
+# device_name = ""      # empty = "Cadenza on <hostname>"
+# embedded = false      # true inside the Encore desktop app (reported to Encore)
 
 [endpoint]              # `cadenza endpoint` on the DAC box
 name = ""               # advertised name; empty = "Cadenza endpoint on <hostname>"

@@ -8,6 +8,7 @@ pub mod api;
 pub mod bench;
 pub mod config;
 pub mod decode;
+pub mod embed;
 pub mod encore;
 pub mod endpoint;
 pub mod engine;

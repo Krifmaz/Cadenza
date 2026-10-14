@@ -2,8 +2,11 @@
 
 use super::Client;
 use crate::api::control_command;
-use crate::config::RateSetting;
+use crate::config::{RateSetting, Settings};
 use crate::engine::{Command, Engine, Track};
+use crate::output::split_backend;
+use cadenza_dsp::dsd::{DsdModulator, DsdOversampling, DsdPacking, DsdRate, OutputMode};
+use cadenza_dsp::gpu::GpuMode;
 use cadenza_dsp::{DitherKind, FilterKind};
 use serde_json::Value;
 use std::collections::VecDeque;
@@ -105,31 +108,52 @@ pub fn run(client: &Client, engine: &Engine, cmd: &Value) {
     }
 }
 
-/// `engine {set: {bitperfect|filter|dither|rate|bits: value}}`.
-pub fn apply_engine_settings(engine: &Engine, set: &serde_json::Map<String, Value>) {
-    let mut s = engine.settings();
+/// The exclusive backend of this build, if any (`wasapi`, `coreaudio`, `alsa`), and the
+/// shared one (`cpal`).
+fn exclusive_backend() -> Option<&'static str> {
+    crate::output::backends()
+        .into_iter()
+        .find(|b| matches!(*b, "wasapi" | "coreaudio" | "alsa"))
+}
+
+fn as_bool(v: &Value) -> Option<bool> {
+    v.as_bool()
+        .or_else(|| match v.as_str()?.trim().to_ascii_lowercase().as_str() {
+            "true" | "1" | "on" | "yes" => Some(true),
+            "false" | "0" | "off" | "no" => Some(false),
+            _ => None,
+        })
+}
+
+fn as_f64(v: &Value) -> Option<f64> {
+    v.as_f64()
+        .or_else(|| v.as_str().and_then(|t| t.trim().parse().ok()))
+}
+
+/// Apply an `engine {set: {…}}` patch to `s`, key by key. Every key of the engine
+/// description that is a setting is accepted: `bitperfect`, `filter`, `dither`, `rate`,
+/// `bits`, `output` (`<backend>:<device>`), `output_mode`, `dsd_rate`, `dsd_modulator`,
+/// `dsd_packing`, `dsd_gain_db`, `dsd_oversampling`, `headroom_db` (number, `null` or
+/// `"auto"`), `soft_clip`, `gpu` (`auto` / `on` / `off`), `matrix` (`off` or a preset id)
+/// and `exclusive`. Keys with values that make no sense are skipped; the returned list
+/// says which, in plain words.
+pub fn patch_settings(s: &mut Settings, set: &serde_json::Map<String, Value>) -> Vec<String> {
+    let mut ignored = Vec::new();
     for (k, v) in set {
+        let mut bad = |what: &str| ignored.push(format!("{k}: {what} {v}"));
         match k.as_str() {
-            "bitperfect" | "bit_perfect" => {
-                s.dsp.bit_perfect = v
-                    .as_bool()
-                    .or_else(|| v.as_str().map(|t| t == "true" || t == "1"))
-                    .unwrap_or(false)
-            }
-            "filter" => {
-                if let Some(id) = v.as_str().filter(|id| FilterKind::parse(id).is_some()) {
-                    s.dsp.filter = id.to_string();
-                } else {
-                    log::warn!("Encore: unknown filter {v}");
-                }
-            }
-            "dither" => {
-                if let Some(id) = v.as_str().filter(|id| DitherKind::parse(id).is_some()) {
-                    s.dsp.dither = id.to_string();
-                } else {
-                    log::warn!("Encore: unknown dither {v}");
-                }
-            }
+            "bitperfect" | "bit_perfect" => match as_bool(v) {
+                Some(b) => s.dsp.bit_perfect = b,
+                None => bad("not a boolean"),
+            },
+            "filter" => match v.as_str().filter(|id| FilterKind::parse(id).is_some()) {
+                Some(id) => s.dsp.filter = id.to_string(),
+                None => bad("unknown filter"),
+            },
+            "dither" => match v.as_str().filter(|id| DitherKind::parse(id).is_some()) {
+                Some(id) => s.dsp.dither = id.to_string(),
+                None => bad("unknown dither"),
+            },
             "rate" => {
                 let parsed = match v {
                     Value::Number(n) => n.as_u64().map(|r| RateSetting::Fixed(r as u32)),
@@ -138,16 +162,142 @@ pub fn apply_engine_settings(engine: &Engine, set: &serde_json::Map<String, Valu
                 };
                 match parsed {
                     Some(r) => s.output.rate = r,
-                    None => log::warn!("Encore: bad rate {v}"),
+                    None => bad("bad rate"),
                 }
             }
             "bits" => {
-                if let Some(b) = v.as_u64().filter(|b| matches!(b, 16 | 24 | 32)) {
-                    s.output.bits = b as u32;
+                let n = v
+                    .as_u64()
+                    .or_else(|| v.as_str().and_then(|t| t.trim().parse().ok()));
+                match n.filter(|b| matches!(b, 16 | 24 | 32)) {
+                    Some(b) => s.output.bits = b as u32,
+                    None => bad("bits must be 16, 24 or 32:"),
                 }
             }
-            other => log::debug!("Encore: ignoring engine setting {other}"),
+            "output" => {
+                let parsed = v.as_str().and_then(|id| {
+                    let (b, d) = id.split_once(':').unwrap_or((id, ""));
+                    let (b, d) = split_backend(b, d);
+                    crate::output::backends()
+                        .contains(&b)
+                        .then(|| (b.to_string(), d.to_string()))
+                });
+                match parsed {
+                    Some((b, d)) => {
+                        s.output.backend = b;
+                        s.output.device = d;
+                    }
+                    None => bad("unknown output"),
+                }
+            }
+            "output_mode" => match v.as_str().and_then(OutputMode::parse) {
+                Some(m) => s.dsp.output_mode = m,
+                None => bad("output mode must be pcm or dsd:"),
+            },
+            "dsd_rate" => match v.as_str().and_then(DsdRate::parse) {
+                Some(r) => s.dsp.dsd_rate = r,
+                None => bad("unknown DSD rate"),
+            },
+            "dsd_modulator" => match v.as_str().and_then(DsdModulator::parse) {
+                Some(m) => s.dsp.dsd_modulator = m,
+                None => bad("unknown DSD modulator"),
+            },
+            "dsd_packing" => match v.as_str().and_then(DsdPacking::parse) {
+                Some(p) => s.dsp.dsd_packing = p,
+                None => bad("DSD packing must be dop or native:"),
+            },
+            "dsd_gain_db" => match as_f64(v).filter(|g| g.is_finite()) {
+                Some(g) => s.dsp.dsd_gain_db = g,
+                None => bad("not a number"),
+            },
+            "dsd_oversampling" => match v.as_str().and_then(DsdOversampling::parse) {
+                Some(o) => s.dsp.dsd_oversampling = o,
+                None => bad("DSD oversampling must be staged or full:"),
+            },
+            "headroom_db" => {
+                let auto = v.is_null()
+                    || v.as_str()
+                        .is_some_and(|t| t.trim().is_empty() || t.eq_ignore_ascii_case("auto"));
+                if auto {
+                    s.dsp.headroom_db = None;
+                } else {
+                    match as_f64(v).filter(|h| h.is_finite()) {
+                        Some(h) => s.dsp.headroom_db = Some(h),
+                        None => bad("headroom must be dB or auto:"),
+                    }
+                }
+            }
+            "soft_clip" => match as_bool(v) {
+                Some(b) => s.dsp.soft_clip = b,
+                None => bad("not a boolean"),
+            },
+            "gpu" => {
+                let parsed = match v {
+                    Value::Bool(true) => Some(GpuMode::Cuda),
+                    Value::Bool(false) => Some(GpuMode::Off),
+                    Value::String(t) => t.parse::<GpuMode>().ok(),
+                    _ => None,
+                };
+                match parsed {
+                    Some(m) => s.dsp.gpu.mode = m,
+                    None => bad("gpu must be auto, on or off:"),
+                }
+            }
+            "matrix" => {
+                let id = match v {
+                    Value::Null | Value::Bool(false) => Some("off".to_string()),
+                    Value::String(t) => Some(t.trim().to_ascii_lowercase()),
+                    _ => None,
+                };
+                match id.as_deref() {
+                    Some("off") | Some("none") | Some("") => s.matrix.enabled = false,
+                    Some(p) if cadenza_dsp::matrix::preset_ids().contains(&p) => {
+                        s.matrix.enabled = true;
+                        s.matrix.preset = p.to_string();
+                    }
+                    _ => bad("unknown matrix preset"),
+                }
+            }
+            "exclusive" => match as_bool(v) {
+                Some(want) => {
+                    let (current, _) = split_backend(&s.output.backend, &s.output.device);
+                    let is_exclusive = !matches!(current, "cpal" | "null");
+                    if want != is_exclusive {
+                        let target = if want {
+                            exclusive_backend()
+                        } else {
+                            crate::output::backends()
+                                .contains(&"cpal")
+                                .then_some("cpal")
+                        };
+                        match target {
+                            Some(b) => {
+                                s.output.backend = b.to_string();
+                                s.output.device.clear();
+                            }
+                            None => bad("this build has no output backend for exclusive ="),
+                        }
+                    }
+                }
+                None => bad("not a boolean"),
+            },
+            _ => bad("unknown engine setting"),
         }
+    }
+    ignored
+}
+
+/// `engine {set: {…}}`: patch the settings (see [`patch_settings`]), check the result with
+/// the API's validation and hand it to the engine. Bad values are logged and skipped; a
+/// patch whose result does not validate is dropped as a whole.
+pub fn apply_engine_settings(engine: &Engine, set: &serde_json::Map<String, Value>) {
+    let mut s = engine.settings();
+    for msg in patch_settings(&mut s, set) {
+        log::warn!("Encore: ignoring engine setting {msg}");
+    }
+    if let Err(e) = crate::api::validate(&s) {
+        log::warn!("Encore: engine settings not applied: {e}");
+        return;
     }
     engine.update_settings(s);
 }
@@ -186,6 +336,156 @@ mod tests {
             _ => panic!("expected a URL"),
         }
         assert!(track_from_encore(&client, &serde_json::json!({ "title": "no id" })).is_none());
+    }
+
+    #[test]
+    fn engine_patch_covers_every_setting_and_skips_bad_values() {
+        let mut s = Settings::default();
+        s.output.backend = "null".into();
+        let set = serde_json::json!({
+            "bitperfect": true,
+            "filter": "sinc-l-1m",
+            "dither": "tpdf",
+            "rate": 352800,
+            "bits": 32,
+            "output": "null:null",
+            "output_mode": "dsd",
+            "dsd_rate": "dsd512",
+            "dsd_modulator": "dsd5v2",
+            "dsd_packing": "native",
+            "dsd_gain_db": -4.5,
+            "dsd_oversampling": "full",
+            "headroom_db": -2.0,
+            "soft_clip": false,
+            "gpu": "on",
+            "matrix": "2.1",
+        });
+        let ignored = patch_settings(&mut s, set.as_object().unwrap());
+        assert!(ignored.is_empty(), "{ignored:?}");
+        assert!(s.dsp.bit_perfect);
+        assert_eq!(s.dsp.filter, "sinc-l-1m");
+        assert_eq!(s.dsp.dither, "tpdf");
+        assert_eq!(s.output.rate, RateSetting::Fixed(352_800));
+        assert_eq!(s.output.bits, 32);
+        assert_eq!(
+            (s.output.backend.as_str(), s.output.device.as_str()),
+            ("null", "null")
+        );
+        assert_eq!(s.dsp.output_mode, OutputMode::Dsd);
+        assert_eq!(s.dsp.dsd_rate, DsdRate::Dsd512);
+        assert_eq!(s.dsp.dsd_modulator, DsdModulator::Dsd5v2);
+        assert_eq!(s.dsp.dsd_packing, DsdPacking::Native);
+        assert_eq!(s.dsp.dsd_gain_db, -4.5);
+        assert_eq!(s.dsp.dsd_oversampling, DsdOversampling::Full);
+        assert_eq!(s.dsp.headroom_db, Some(-2.0));
+        assert!(!s.dsp.soft_clip);
+        assert_eq!(s.dsp.gpu.mode, GpuMode::Cuda);
+        assert!(s.matrix.enabled);
+        assert_eq!(s.matrix.preset, "2.1");
+        assert!(crate::api::validate(&s).is_ok());
+
+        // Other spellings: strings for numbers and booleans, auto headroom, matrix off.
+        let set = serde_json::json!({
+            "bitperfect": "false",
+            "rate": "auto",
+            "bits": "24",
+            "headroom_db": "auto",
+            "gpu": "off",
+            "matrix": "off",
+            "dsd_gain_db": "-3",
+            "exclusive": true,
+        });
+        let ignored = patch_settings(&mut s, set.as_object().unwrap());
+        assert!(!s.dsp.bit_perfect);
+        assert_eq!(s.output.rate, RateSetting::Auto);
+        assert_eq!(s.output.bits, 24);
+        assert_eq!(s.dsp.headroom_db, None);
+        assert_eq!(s.dsp.gpu.mode, GpuMode::Off);
+        assert!(!s.matrix.enabled);
+        assert_eq!(s.dsp.dsd_gain_db, -3.0);
+        // `exclusive` moves between the shared and the direct backend of this build; on a
+        // build with neither it is the one key that gets skipped.
+        if exclusive_backend().is_some() {
+            assert!(ignored.is_empty(), "{ignored:?}");
+            assert_eq!(s.output.backend, exclusive_backend().unwrap());
+            assert_eq!(s.output.device, "");
+            let set = serde_json::json!({ "exclusive": false });
+            patch_settings(&mut s, set.as_object().unwrap());
+            assert_eq!(s.output.backend, "cpal");
+        } else {
+            assert_eq!(ignored.len(), 1, "{ignored:?}");
+        }
+        // headroom_db null is automatic too.
+        s.dsp.headroom_db = Some(-1.0);
+        patch_settings(
+            &mut s,
+            serde_json::json!({ "headroom_db": null })
+                .as_object()
+                .unwrap(),
+        );
+        assert_eq!(s.dsp.headroom_db, None);
+
+        // Every key with a value that makes no sense is skipped and named; nothing changes.
+        let before = s.clone();
+        let set = serde_json::json!({
+            "bitperfect": "maybe",
+            "filter": "no-such-filter",
+            "dither": 7,
+            "rate": "fast",
+            "bits": 20,
+            "output": "tape:deck",
+            "output_mode": "analogue",
+            "dsd_rate": "dsd9000",
+            "dsd_modulator": "x",
+            "dsd_packing": "sideways",
+            "dsd_gain_db": "loud",
+            "dsd_oversampling": "lots",
+            "headroom_db": "much",
+            "soft_clip": 3,
+            "gpu": "maybe",
+            "matrix": "7.1-nonsense",
+            "exclusive": "sometimes",
+            "colour": "blue",
+        });
+        let ignored = patch_settings(&mut s, set.as_object().unwrap());
+        assert_eq!(ignored.len(), 18, "{ignored:?}");
+        assert_eq!(s, before);
+        assert!(ignored
+            .iter()
+            .any(|m| m.starts_with("colour: unknown engine setting")));
+    }
+
+    #[test]
+    fn invalid_patches_are_not_handed_to_the_engine() {
+        // A value every key accepts on its own but the whole does not: DSD2048 over DoP.
+        let mut s = Settings::default();
+        s.output.backend = "null".into();
+        let engine = Engine::start(
+            s.clone(),
+            crate::engine::EngineOptions {
+                cache: cadenza_dsp::CoefficientCache::disabled(),
+                realtime: false,
+                persist: None,
+            },
+        );
+        let set = serde_json::json!({ "dsd_rate": "dsd2048", "dsd_packing": "dop" });
+        apply_engine_settings(&engine, set.as_object().unwrap());
+        let set = serde_json::json!({ "bits": 16 });
+        apply_engine_settings(&engine, set.as_object().unwrap());
+        let t0 = std::time::Instant::now();
+        while engine.settings().output.bits != 16
+            && t0.elapsed() < std::time::Duration::from_secs(5)
+        {
+            std::thread::sleep(std::time::Duration::from_millis(10));
+        }
+        let got = engine.settings();
+        assert_eq!(got.output.bits, 16);
+        assert_eq!(
+            got.dsp.dsd_rate,
+            DsdRate::Dsd256,
+            "the invalid patch was dropped whole"
+        );
+        engine.shutdown();
     }
 
     #[test]

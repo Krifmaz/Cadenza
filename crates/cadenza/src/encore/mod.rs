@@ -1,31 +1,81 @@
 //! Cadenza as an Encore playback device.
 //!
-//! * log in (or use a given `encore_session` cookie),
+//! * log in (or use a given `encore_session` cookie, or an app token as a bearer),
 //! * every 2 s `POST /api/remote/heartbeat` with the player state and run the commands
 //!   that come back,
 //! * keep `GET /api/remote/events?device=…` open as an SSE stream so commands arrive the
 //!   moment they are sent (the heartbeat stays as the fallback; a command's `seq` makes
 //!   sure it runs once even when it arrives both ways),
-//! * play Encore tracks from `/api/library/tracks/{id}/stream` with the session cookie,
+//! * play Encore tracks from `/api/library/tracks/{id}/stream` with the same credentials,
 //! * report plays like Encore's own player (`now-playing` when a track starts, `plays`
 //!   after half the song or four minutes).
+//!
+//! [`start`] hands back an [`EncoreLink`]; `cadenza serve` keeps it for the life of the
+//! process, the embedded player stops it when the user signs out or changes server.
 
 mod client;
-mod commands;
-mod state;
+pub mod commands;
+pub mod state;
 
 pub use client::Client;
 
 use crate::config::EncoreConfig;
 use crate::engine::{Engine, Event};
 use std::io::{BufRead, BufReader};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use std::thread;
 use std::time::Duration;
 
+/// A running connection to one Encore server: the heartbeat, event stream and play
+/// reporting threads. Dropping the handle does not stop them; [`EncoreLink::stop`] does.
+pub struct EncoreLink {
+    client: Arc<Client>,
+    stop: Arc<AtomicBool>,
+}
+
+impl EncoreLink {
+    /// Ask every thread to end at its next iteration. The heartbeat stops within 10 s, the
+    /// play reporter at once, the event reader when its socket times out (60 s at most).
+    pub fn stop(&self) {
+        self.stop.store(true, Ordering::SeqCst);
+    }
+
+    /// Whether `stop` was called.
+    pub fn stopped(&self) -> bool {
+        self.stop.load(Ordering::SeqCst)
+    }
+
+    /// Device id this link registers as.
+    pub fn device_id(&self) -> &str {
+        self.client.device_id()
+    }
+
+    /// Device name shown in Encore.
+    pub fn device_name(&self) -> &str {
+        self.client.device_name()
+    }
+
+    /// Encore base URL.
+    pub fn server(&self) -> &str {
+        self.client.base()
+    }
+
+    /// The bearer token this link uses (empty with cookie or password login).
+    pub fn token(&self) -> &str {
+        self.client.token()
+    }
+
+    /// The last failure talking to Encore, `None` after the last success.
+    pub fn last_error(&self) -> Option<String> {
+        self.client.last_error()
+    }
+}
+
 /// Start the three Encore threads (heartbeat, event stream, play reporting).
-pub fn start(config: Arc<EncoreConfig>, engine: Engine) {
+pub fn start(config: Arc<EncoreConfig>, engine: Engine) -> EncoreLink {
     let client = Arc::new(Client::new(config));
+    let stop = Arc::new(AtomicBool::new(false));
     log::info!(
         "Encore device {} ({}) → {}",
         client.device_name(),
@@ -33,35 +83,54 @@ pub fn start(config: Arc<EncoreConfig>, engine: Engine) {
         client.base()
     );
     {
-        let (c, e) = (Arc::clone(&client), engine.clone());
+        let (c, e, s) = (Arc::clone(&client), engine.clone(), Arc::clone(&stop));
         thread::Builder::new()
             .name("encore-heartbeat".into())
-            .spawn(move || heartbeat_loop(c, e))
+            .spawn(move || heartbeat_loop(c, e, s))
             .expect("spawn");
     }
     {
-        let (c, e) = (Arc::clone(&client), engine.clone());
+        let (c, e, s) = (Arc::clone(&client), engine.clone(), Arc::clone(&stop));
         thread::Builder::new()
             .name("encore-events".into())
-            .spawn(move || events_loop(c, e))
+            .spawn(move || events_loop(c, e, s))
             .expect("spawn");
     }
-    thread::Builder::new()
-        .name("encore-plays".into())
-        .spawn(move || plays_loop(client, engine))
-        .expect("spawn");
+    {
+        let (c, s) = (Arc::clone(&client), Arc::clone(&stop));
+        thread::Builder::new()
+            .name("encore-plays".into())
+            .spawn(move || plays_loop(c, engine, s))
+            .expect("spawn");
+    }
+    EncoreLink { client, stop }
 }
 
-fn heartbeat_loop(client: Arc<Client>, engine: Engine) {
+/// Sleep `total` in short steps, returning early (true) when `stop` is raised.
+fn wait(stop: &AtomicBool, total: Duration) -> bool {
+    let step = Duration::from_millis(100);
+    let mut left = total;
+    while !left.is_zero() {
+        if stop.load(Ordering::SeqCst) {
+            return true;
+        }
+        let d = left.min(step);
+        thread::sleep(d);
+        left -= d;
+    }
+    stop.load(Ordering::SeqCst)
+}
+
+fn heartbeat_loop(client: Arc<Client>, engine: Engine, stop: Arc<AtomicBool>) {
     let mut failures = 0u32;
-    loop {
+    while !stop.load(Ordering::SeqCst) {
         let status = engine.status();
         let body = serde_json::json!({
             "id": client.device_id(),
             "name": client.device_name(),
-            "state": state::heartbeat_state(&client, &status),
+            "state": state::heartbeat_state_as(&client, &status, client.embedded()),
         });
-        match client.post_json("/api/remote/heartbeat", &body) {
+        let pause = match client.post_json("/api/remote/heartbeat", &body) {
             Ok(resp) => {
                 if failures > 0 {
                     log::info!("Encore heartbeat back");
@@ -72,25 +141,39 @@ fn heartbeat_loop(client: Arc<Client>, engine: Engine) {
                         commands::run(&client, &engine, cmd);
                     }
                 }
+                Duration::from_secs(2)
             }
             Err(e) => {
                 failures += 1;
                 if failures == 1 || failures % 30 == 0 {
                     log::warn!("Encore heartbeat failed: {e}");
                 }
+                // A token that is not accepted cannot be refreshed here: keep trying,
+                // calmly, until the app hands over a new one or the server is back.
+                if client.has_token() {
+                    Duration::from_secs(10)
+                } else {
+                    Duration::from_secs(2)
+                }
             }
+        };
+        if wait(&stop, pause) {
+            break;
         }
-        thread::sleep(Duration::from_secs(2));
     }
+    log::info!("Encore heartbeat stopped");
 }
 
 /// Keep the command stream open; reconnect after a pause whenever it drops.
-fn events_loop(client: Arc<Client>, engine: Engine) {
-    loop {
+fn events_loop(client: Arc<Client>, engine: Engine, stop: Arc<AtomicBool>) {
+    while !stop.load(Ordering::SeqCst) {
         match client.open_stream(&format!("/api/remote/events?device={}", client.device_id())) {
             Ok(reader) => {
                 log::info!("Encore event stream open");
                 read_sse(BufReader::new(reader), |event, data| {
+                    if stop.load(Ordering::SeqCst) {
+                        return;
+                    }
                     if event == "command" {
                         if let Ok(v) = serde_json::from_str::<serde_json::Value>(data) {
                             if let Some(cmd) = v.get("command") {
@@ -99,12 +182,17 @@ fn events_loop(client: Arc<Client>, engine: Engine) {
                         }
                     }
                 });
-                log::warn!("Encore event stream closed; reconnecting");
+                if !stop.load(Ordering::SeqCst) {
+                    log::warn!("Encore event stream closed; reconnecting");
+                }
             }
             Err(e) => log::warn!("Encore event stream: {e}"),
         }
-        thread::sleep(Duration::from_secs(2));
+        if wait(&stop, Duration::from_secs(2)) {
+            break;
+        }
     }
+    log::info!("Encore event stream stopped");
 }
 
 /// Parse an SSE stream, calling `on_event(event_name, data)` for each message.
@@ -132,10 +220,11 @@ pub fn read_sse<R: BufRead>(reader: R, mut on_event: impl FnMut(&str, &str)) {
 }
 
 /// Report starts and plays of Encore tracks.
-fn plays_loop(client: Arc<Client>, engine: Engine) {
+fn plays_loop(client: Arc<Client>, engine: Engine, stop: Arc<AtomicBool>) {
+    use tokio::sync::broadcast::error::TryRecvError;
     let mut rx = engine.subscribe();
-    loop {
-        match rx.blocking_recv() {
+    while !stop.load(Ordering::SeqCst) {
+        match rx.try_recv() {
             Ok(Event::TrackStarted(t)) => {
                 if let Some(id) = encore_track_id(&t) {
                     if let Err(e) = client.post_json(
@@ -157,8 +246,9 @@ fn plays_loop(client: Arc<Client>, engine: Engine) {
                 }
             }
             Ok(Event::Status(_)) => {}
-            Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => continue,
-            Err(tokio::sync::broadcast::error::RecvError::Closed) => break,
+            Err(TryRecvError::Lagged(_)) => continue,
+            Err(TryRecvError::Empty) => thread::sleep(Duration::from_millis(200)),
+            Err(TryRecvError::Closed) => break,
         }
     }
 }
@@ -175,6 +265,9 @@ fn encore_track_id(t: &crate::engine::Track) -> Option<i64> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::config::Settings;
+    use crate::engine::EngineOptions;
+    use cadenza_dsp::CoefficientCache;
 
     #[test]
     fn sse_parser_handles_multi_line_data_and_comments() {
@@ -190,5 +283,68 @@ mod tests {
                 ("message".to_string(), "plain".to_string())
             ]
         );
+    }
+
+    #[test]
+    fn stop_ends_the_loops_against_a_dead_server() {
+        // A port nobody listens on: every request fails fast, the loops keep retrying
+        // until `stop`, then end on their own.
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let url = format!("http://{}", listener.local_addr().unwrap());
+        drop(listener);
+        let mut s = Settings::default();
+        s.output.backend = "null".into();
+        let engine = Engine::start(
+            s,
+            EngineOptions {
+                cache: CoefficientCache::disabled(),
+                realtime: false,
+                persist: None,
+            },
+        );
+        let link = start(
+            Arc::new(EncoreConfig {
+                url,
+                token: "t".into(),
+                device_id: "cadenza-desktop-test".into(),
+                device_name: "Cadenza on test".into(),
+                ..Default::default()
+            }),
+            engine.clone(),
+        );
+        assert_eq!(link.device_id(), "cadenza-desktop-test");
+        assert_eq!(link.device_name(), "Cadenza on test");
+        // The first heartbeat fails and leaves its error behind.
+        let t0 = std::time::Instant::now();
+        while link.last_error().is_none() && t0.elapsed() < Duration::from_secs(10) {
+            thread::sleep(Duration::from_millis(20));
+        }
+        assert!(link.last_error().is_some());
+        assert!(!link.stopped());
+        link.stop();
+        assert!(link.stopped());
+        // The heartbeat thread leaves its 10 s pause early and is gone within a moment.
+        let t0 = std::time::Instant::now();
+        let mut alive = true;
+        while alive && t0.elapsed() < Duration::from_secs(5) {
+            thread::sleep(Duration::from_millis(50));
+            alive = false;
+            // There is no join handle by design; look the threads up by name instead.
+            for entry in std::fs::read_dir("/proc/self/task")
+                .into_iter()
+                .flatten()
+                .flatten()
+            {
+                if let Ok(name) = std::fs::read_to_string(entry.path().join("comm")) {
+                    if name.trim() == "encore-heartbea" || name.trim() == "encore-plays" {
+                        alive = true;
+                    }
+                }
+            }
+        }
+        if cfg!(target_os = "linux") {
+            assert!(!alive, "heartbeat/plays threads still running after stop");
+        }
+        engine.shutdown();
     }
 }
