@@ -182,9 +182,16 @@ to do it:
    in-band noise by 6 dB (`asdm5ec`) and 10 dB (`asdm7ec`) at DSD64 with the same NTF, guard-free
    at the default gain at every rate; `cadenza bench` lists them per DSD rate. They cost about 2–6× the CPU of the plain loops, `asdm7ec8` 7–20× (on a
    loaded 4-core test VM: `asdm7ec` 3.6× realtime per channel at DSD64, 1.2× at DSD256, 0.5× at DSD512;
-   `asdm7ec8` 1.1× at DSD64, 0.3× at DSD256). Next: the GPU modulator path – many channels and trellis
-   paths in parallel – which is what DSD512/1024 with error correction needs. HQPlayer runs its
-   modulators on one CPU core; that is its biggest bottleneck at DSD1024 and nobody has beaten it yet.
+   `asdm7ec8` 1.1× at DSD64, 0.3× at DSD256). **A GPU does not help here**, and we measured why:
+   every bit depends on the previous one, a stream has only 2 channels × 4–8 trellis paths to share
+   out, and cutting the stream into independently modulated time segments (the only way to use a
+   GPU's width) wrecks the noise shaping at every seam – SNR at DSD64 falls from 116 dB to 60 dB
+   (`asdm7`) and from 127 dB to 56–58 dB (`asdm7ec`), because two runs of the same input never
+   converge to the same bits. Three CPU rewrites of the trellis (order-sized state, branch-free
+   ranking, paths side by side for vector instructions) were all bit-identical and none was faster
+   than the plain code (77 ns/sample for `asdm7ec`, 230 ns for `asdm7ec8` on the test VM; DSD512 in
+   real time needs about 37 ns). So the modulator stays one core per channel; the GPU's job is to take
+   every filter off the CPU so those cores are free for it. HQPlayer has the same single-core limit.
    DSD2048 is already ours alone.
 3. **ASIO on Windows** – a thin runtime loader for the DAC driver's ASIO COM interface (no SDK bundled, the
    FlexASIO approach), which brings native DSD on Windows with it. Also the WASAPI native-DSD GUID some

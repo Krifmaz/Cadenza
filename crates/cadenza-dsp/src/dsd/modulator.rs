@@ -976,4 +976,45 @@ mod tests {
             assert_eq!(m.guard_engagements(), 0);
         }
     }
+    /// FNV-1a over the bit stream of every error-correction configuration on a tone, DC,
+    /// a full-scale step and noise: the trellis must produce exactly these bits (the
+    /// optimised search is a rewrite of the same algorithm, not a new one).
+    fn trellis_digest(kind: DsdModulator, rate: u32) -> u64 {
+        let n = 200_000;
+        let mut rng = crate::rng::Rng::new(7);
+        let mut x: Vec<f64> = (0..n)
+            .map(|i| 0.5 * (2.0 * PI * 997.0 * i as f64 / rate as f64).sin())
+            .collect();
+        x.extend(std::iter::repeat_n(0.7, n / 4));
+        x.extend(std::iter::repeat_n(-0.75, n / 4));
+        x.extend((0..n / 2).map(|_| 0.3 * rng.centred()));
+        x.extend(std::iter::repeat_n(0.0, n / 4));
+        let mut m = SigmaDelta::new(kind, rate);
+        let mut bits = Vec::new();
+        m.process(&x, &mut bits);
+        m.complete_byte(&mut bits);
+        let mut h = 0xcbf2_9ce4_8422_2325u64;
+        for b in bits.iter().chain(&m.resets().to_le_bytes()) {
+            h = (h ^ *b as u64).wrapping_mul(0x100_0000_01b3);
+        }
+        h
+    }
+
+    #[test]
+    fn trellis_output_is_bit_identical_to_the_reference_search() {
+        // Recorded from the first (straightforward) implementation of the search.
+        for (kind, rate, want) in [
+            (DsdModulator::Asdm5ec, 2_822_400, 0xce74_2a3a_b4a8_3876u64),
+            (DsdModulator::Asdm5ec, 11_289_600, 0x51a4_5e90_ff23_c39c),
+            (DsdModulator::Asdm5ec, 24_576_000, 0x08d9_59cf_181c_090d),
+            (DsdModulator::Asdm7ec, 2_822_400, 0xde87_ce8a_f90c_f563),
+            (DsdModulator::Asdm7ec, 11_289_600, 0x4973_7ec9_f414_f770),
+            (DsdModulator::Asdm7ec, 24_576_000, 0x0803_6e2f_2d12_a088),
+            (DsdModulator::Asdm7ec8, 2_822_400, 0x2bda_c2a6_20af_3487),
+            (DsdModulator::Asdm7ec8, 11_289_600, 0x7c98_e269_e19f_aaa7),
+            (DsdModulator::Asdm7ec8, 24_576_000, 0x5589_5761_beee_f990),
+        ] {
+            assert_eq!(trellis_digest(kind, rate), want, "{kind:?} at {rate} Hz");
+        }
+    }
 }
