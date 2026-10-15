@@ -233,6 +233,25 @@ impl Worker {
     fn handle(&mut self, cmd: Command) {
         log::debug!("command {cmd:?}");
         self.dirty = true;
+        // A live stream (AirPlay): transport commands go to the sender as well. Next and
+        // previous are the sender's alone; play / pause / stop also act here.
+        if let Some(TrackDecoder::Live(d)) = &self.decoder {
+            use crate::decode::live::LiveControl;
+            let c = match &cmd {
+                Command::Play => Some(LiveControl::Play),
+                Command::Pause | Command::Stop => Some(LiveControl::Pause),
+                // Toggle comes back here as Play or Pause.
+                Command::Next => Some(LiveControl::Next),
+                Command::Prev => Some(LiveControl::Prev),
+                _ => None,
+            };
+            if let Some(c) = c {
+                let taken = d.stream().control(c);
+                if taken && matches!(c, LiveControl::Next | LiveControl::Prev) {
+                    return;
+                }
+            }
+        }
         match cmd {
             Command::Play => match self.state {
                 PlayState::Playing => {}

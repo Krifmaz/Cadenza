@@ -160,7 +160,7 @@ implemented and tested here; the notes say where we differ.
 | GPU offload | CUDA only (64-bit) | CUDA (64-bit, driver only – no toolkit) **and wgpu: Vulkan / Metal / DX12 on AMD, Intel, Apple Silicon and NVIDIA** (64-bit where the card has it, double-f32 ≈48-bit elsewhere); also builds and runs without a GPU; the upsampler's FFT polyphase core, the time-domain 44.1 ↔ 48 kHz stage and the room convolution run on it, verified against the CPU engine (CUDA through a CPU model of the exact kernels; wgpu on real Vulkan in CI with Mesa's software driver: 1.2–2.4e-15 relative in f64, 1–3e-14 in double-f32) and benchmarked (`cadenza bench`, row `upsampling (GPU)`) | exceeded on hardware: HQPlayer has no AMD / Intel / Apple GPU support. Not yet measured on real AMD / Intel / Apple cards, and the CUDA kernels are not yet run on an NVIDIA card since the rational stage was added (none here) |
 | 64-bit processing | yes | yes everywhere | matched |
 | UPnP / Roon / control | UPnP renderer, Roon via NAA | UPnP/DLNA MediaRenderer (AVTransport, RenderingControl, ConnectionManager, gapless next URI, events) with OpenHome services, HTTP API, web UI, Encore device | matched: UPnP AV and OpenHome (Product, Playlist, Volume, Time, Info) – tested with scripted control points, not yet with BubbleUPnP / Kazoo / mconnect themselves; no Roon |
-| AirPlay | no | AirPlay 1 receiver (ALAC, encrypted, volume, title / artist / album, progress) into the full engine | ahead: HQPlayer has none. Tested with a scripted sender, not yet with an iPhone or Mac; AirPlay 2 is not implemented |
+| AirPlay | no | AirPlay 1 receiver (ALAC, encrypted, volume, title / artist / album, cover art, progress, play / pause / next / previous back to the phone) into the full engine | ahead: HQPlayer has none. Tested with a scripted sender, not yet with an iPhone or Mac; AirPlay 2 is not implemented |
 | Licence / price | proprietary | MIT / Apache-2.0, free | – |
 
 ### Notes: how Cadenza gets ahead
@@ -447,10 +447,12 @@ source: upsampling, DSD, EQ, matrix, the signal path.
   is dropped, and an empty buffer is bridged with silence. There is no sample-accurate
   clock sync to the sender yet, so a long session can click once in a while.
 - **Control**: the sender's volume slider sets the engine volume (−30…0 dB, and mute;
-  `volume = false` leaves it alone); title, artist and album, duration and position show
-  in the web UI and the API. Pause and seek on the phone flush the buffer. A second sender
-  takes over from the first, as on an AirPort Express. Cover art is not shown yet, and
-  play/pause/next from Cadenza's own UI do not reach the phone (that needs DACP).
+  `volume = false` leaves it alone); title, artist, album, cover art, duration and
+  position show in the web UI and the API (the cover at `/api/live/<id>/cover`). Pause
+  and seek on the phone flush the buffer. Play, pause, stop, next and previous in
+  Cadenza (web UI, API, Encore) go back to the phone through its remote-control service
+  (DACP, found over mDNS), so the phone moves to the next song. A second sender takes
+  over from the first, as on an AirPort Express.
 - **AirPlay 2** (multi-room from the Home app, AAC, buffered audio) is a different, closed
   protocol and is not implemented. Apple devices have kept playing to AirPlay 1 speakers
   (shairport-sync still lists AirPlay 1 as supported); whether iOS 26 still does is not
@@ -459,8 +461,9 @@ source: upsampling, DSD, EQ, matrix, the signal path.
 Tested here: the key (the `Apple-Response` matches OpenSSL byte for byte), RSA-OAEP key
 unwrapping, AES-CBC packets, ALAC decoding, the reorder buffer and resend requests, and a
 scripted sender that runs a whole encrypted session against a real engine – challenge,
-SDP, setup, timing, a lost and resent packet, volume, metadata, progress, flush, takeover
-by a second sender, teardown. **Not yet tried with a real iPhone or Mac** (none here).
+SDP, setup, timing, a lost and resent packet, volume, metadata, cover art (fetched over
+the API), Cadenza's transport buttons reaching a stand-in for the phone's remote control,
+progress, flush, takeover by a second sender, teardown. **Not yet tried with a real iPhone or Mac** (none here).
 
 ## ASIO (Windows)
 

@@ -245,11 +245,15 @@ pub fn heartbeat_state(client: &Client, s: &Status) -> Value {
 pub fn heartbeat_state_as(client: &Client, s: &Status, embedded: bool) -> Value {
     let track = s.track.as_ref();
     let album_id = track.and_then(|t| t.album_id.clone());
-    let cover = track.and_then(|t| t.cover.clone()).or_else(|| {
-        album_id
-            .as_ref()
-            .map(|a| format!("/api/library/albums/{a}/cover"))
-    });
+    // A live stream's cover is served by this player's own API; Encore cannot reach it.
+    let cover = track
+        .and_then(|t| t.cover.clone())
+        .filter(|c| !c.starts_with("/api/live/"))
+        .or_else(|| {
+            album_id
+                .as_ref()
+                .map(|a| format!("/api/library/albums/{a}/cover"))
+        });
     let format = track
         .and_then(|t| t.format.clone())
         .or_else(|| s.source_format.clone());

@@ -6,11 +6,12 @@ use super::crypto::tests::{encrypt, wrap_key};
 use super::dmap::tests::item;
 use crate::config::{RateSetting, Settings};
 use crate::decode::Source;
-use crate::engine::{Engine, EngineOptions, PlayState};
+use crate::engine::{Command, Engine, EngineOptions, PlayState};
 use cadenza_dsp::CoefficientCache;
 use std::collections::HashMap;
 use std::io::{BufRead, BufReader, Read, Write};
-use std::net::{TcpStream, UdpSocket};
+use std::net::{SocketAddr, TcpListener, TcpStream, UdpSocket};
+use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 struct Sender {
@@ -87,6 +88,44 @@ fn rtp(seq: u16, ts: u32, payload: &[u8], ptype: u8) -> Vec<u8> {
     p
 }
 
+/// The phone's remote-control (DACP) service: records `(path, Active-Remote)`.
+/// `(path, Active-Remote)` of each request the fake remote control got.
+type DacpLog = Arc<Mutex<Vec<(String, String)>>>;
+
+fn fake_dacp() -> (SocketAddr, DacpLog) {
+    let l = TcpListener::bind("127.0.0.1:0").unwrap();
+    let addr = l.local_addr().unwrap();
+    let got = Arc::new(Mutex::new(Vec::new()));
+    let g = Arc::clone(&got);
+    std::thread::spawn(move || {
+        for c in l.incoming() {
+            let Ok(c) = c else { break };
+            let mut r = BufReader::new(c);
+            let mut line = String::new();
+            r.read_line(&mut line).unwrap();
+            let path = line.split_whitespace().nth(1).unwrap_or("").to_string();
+            let mut remote = String::new();
+            loop {
+                let mut h = String::new();
+                r.read_line(&mut h).unwrap();
+                if h.trim().is_empty() {
+                    break;
+                }
+                if let Some((k, v)) = h.split_once(':') {
+                    if k.eq_ignore_ascii_case("active-remote") {
+                        remote = v.trim().to_string();
+                    }
+                }
+            }
+            g.lock().unwrap().push((path, remote));
+            let _ = r
+                .get_mut()
+                .write_all(b"HTTP/1.1 204 No Content\r\nContent-Length: 0\r\n\r\n");
+        }
+    });
+    (addr, got)
+}
+
 fn wait_for(what: &str, timeout: Duration, mut f: impl FnMut() -> bool) {
     let t0 = Instant::now();
     while !f() {
@@ -116,7 +155,12 @@ fn an_airplay_sender_plays_into_the_engine() {
         latency_ms: 200,
         volume: true,
     };
-    let rx = super::start(engine.clone(), &cfg, false).unwrap();
+    let (dacp_addr, dacp) = fake_dacp();
+    let resolver: super::dacp::Resolver = Arc::new(move |id: &str, _| {
+        assert_eq!(id, "A1B2C3D4E5F60718");
+        Some(dacp_addr)
+    });
+    let rx = super::start_with(engine.clone(), &cfg, false, resolver).unwrap();
     assert!(rx.instance.ends_with("@Test room"));
     let mut snd = Sender::connect(rx.port);
 
@@ -168,6 +212,8 @@ fn an_airplay_sender_plays_into_the_engine() {
         &[
             ("Transport", &transport),
             ("X-Apple-Client-Name", "Test iPhone"),
+            ("DACP-ID", "A1B2C3D4E5F60718"),
+            ("Active-Remote", "1986535575"),
         ],
         b"",
     );
@@ -310,6 +356,69 @@ fn an_airplay_sender_plays_into_the_engine() {
     );
     wait_for("mute", Duration::from_secs(3), || {
         engine.status().volume.muted
+    });
+
+    // Cover art, served by the API.
+    let jpeg = vec![0xff, 0xd8, 0xff, 0xe0, 1, 2, 3, 0xff, 0xd9];
+    snd.call("SET_PARAMETER", &[("Content-Type", "image/jpeg")], &jpeg);
+    wait_for("cover", Duration::from_secs(3), || {
+        engine.status().track.as_ref().and_then(|t| t.cover.clone())
+            == Some(format!("/api/live/{live}/cover?v=1"))
+    });
+    let (mime, bytes) = crate::decode::live::lookup(live).unwrap().cover().unwrap();
+    assert_eq!((mime.as_str(), bytes.as_slice()), ("image/jpeg", &jpeg[..]));
+    // Over the control API, as the web UI loads it.
+    let api = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+    let api_addr = api.local_addr().unwrap();
+    api.set_nonblocking(true).unwrap();
+    let router = crate::api::router(engine.clone());
+    std::thread::spawn(move || {
+        let rt = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+        rt.block_on(async move {
+            let l = tokio::net::TcpListener::from_std(api).unwrap();
+            axum::serve(l, router).await.unwrap();
+        });
+    });
+    let resp = ureq::get(&format!("http://{api_addr}/api/live/{live}/cover?v=1"))
+        .call()
+        .unwrap();
+    assert_eq!(resp.content_type(), "image/jpeg");
+    let mut body = Vec::new();
+    resp.into_reader().read_to_end(&mut body).unwrap();
+    assert_eq!(body, jpeg);
+    assert!(matches!(
+        ureq::get(&format!("http://{api_addr}/api/live/nope/cover")).call(),
+        Err(ureq::Error::Status(404, _))
+    ));
+
+    // Cadenza's own transport buttons reach the phone.
+    engine.send(Command::Next);
+    engine.send(Command::Prev);
+    engine.send(Command::Pause);
+    wait_for("pause", Duration::from_secs(3), || {
+        engine.status().state == PlayState::Paused
+    });
+    engine.send(Command::Toggle);
+    wait_for("dacp", Duration::from_secs(5), || {
+        dacp.lock().unwrap().len() >= 4
+    });
+    let ar = "1986535575".to_string();
+    assert_eq!(
+        *dacp.lock().unwrap(),
+        vec![
+            ("/ctrl-int/1/nextitem".to_string(), ar.clone()),
+            ("/ctrl-int/1/previtem".to_string(), ar.clone()),
+            ("/ctrl-int/1/pause".to_string(), ar.clone()),
+            ("/ctrl-int/1/play".to_string(), ar),
+        ]
+    );
+    // Next / previous left the live track playing here.
+    wait_for("resume", Duration::from_secs(3), || {
+        let s = engine.status();
+        s.state == PlayState::Playing && s.queue.len() == 1
     });
 
     // FLUSH (pause on the phone) keeps the session; a second sender then takes over.

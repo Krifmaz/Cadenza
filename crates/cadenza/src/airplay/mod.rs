@@ -10,6 +10,7 @@
 
 pub mod audio;
 pub mod crypto;
+pub mod dacp;
 pub mod dmap;
 #[cfg(test)]
 mod e2e;
@@ -124,6 +125,16 @@ pub fn start(
     config: &AirplayConfig,
     announce: bool,
 ) -> anyhow::Result<AirplayReceiver> {
+    start_with(engine, config, announce, dacp::mdns_resolver())
+}
+
+/// [`start`] with a given way of finding senders' remote controls.
+pub fn start_with(
+    engine: Engine,
+    config: &AirplayConfig,
+    announce: bool,
+    resolver: dacp::Resolver,
+) -> anyhow::Result<AirplayReceiver> {
     let name = config.friendly_name();
     let hw = hardware_address(&name);
     let listener = std::net::TcpListener::bind(("0.0.0.0", config.port))?;
@@ -133,7 +144,7 @@ pub fn start(
         hw.iter().map(|b| format!("{b:02X}")).collect::<String>()
     );
     let stop = Arc::new(AtomicBool::new(false));
-    let shared = rtsp::Shared::new(engine, config.clone(), hw);
+    let shared = rtsp::Shared::new(engine, config.clone(), hw, resolver);
     {
         let stop = Arc::clone(&stop);
         std::thread::Builder::new()

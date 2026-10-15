@@ -12,6 +12,22 @@ use std::collections::{HashMap, VecDeque};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, OnceLock};
 
+/// A transport command from Cadenza's side, for the sender to carry out.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum LiveControl {
+    /// Resume.
+    Play,
+    /// Pause.
+    Pause,
+    /// Next track.
+    Next,
+    /// Previous track.
+    Prev,
+}
+
+/// Where [`LiveControl`] commands go (the AirPlay sender's remote control).
+pub type ControlFn = Arc<dyn Fn(LiveControl) + Send + Sync>;
+
 /// Frames of silence handed out when the buffer is empty.
 const SILENCE_FRAMES: usize = 352;
 
@@ -46,6 +62,9 @@ pub struct LiveStream {
     pulled: AtomicU64,
     /// `(frames pulled, track seconds)` at the last position report from the sender.
     mark: Mutex<Option<(u64, f64)>>,
+    /// Cover art: MIME type and bytes.
+    cover: Mutex<Option<(String, Arc<Vec<u8>>)>>,
+    control: Mutex<Option<ControlFn>>,
 }
 
 impl LiveStream {
@@ -62,6 +81,8 @@ impl LiveStream {
             inner: Mutex::new(Inner::default()),
             pulled: AtomicU64::new(0),
             mark: Mutex::new(None),
+            cover: Mutex::new(None),
+            control: Mutex::new(None),
         }
     }
 
@@ -150,6 +171,33 @@ impl LiveStream {
         *self.mark.lock().unwrap() = Some((self.pulled.load(Ordering::Relaxed), seconds));
     }
 
+    /// Set (or with `None`, clear) the cover art.
+    pub fn set_cover(&self, cover: Option<(String, Vec<u8>)>) {
+        *self.cover.lock().unwrap() = cover.map(|(m, b)| (m, Arc::new(b)));
+    }
+
+    /// The cover art: MIME type and bytes.
+    pub fn cover(&self) -> Option<(String, Arc<Vec<u8>>)> {
+        self.cover.lock().unwrap().clone()
+    }
+
+    /// Route transport commands to the sender.
+    pub fn set_control(&self, f: Option<ControlFn>) {
+        *self.control.lock().unwrap() = f;
+    }
+
+    /// Hand a transport command to the sender; `false` when nobody takes them.
+    pub fn control(&self, c: LiveControl) -> bool {
+        let f = self.control.lock().unwrap().clone();
+        match f {
+            Some(f) => {
+                f(c);
+                true
+            }
+            None => false,
+        }
+    }
+
     /// Track position: from the last mark, or seconds since the stream began.
     pub fn position_seconds(&self) -> f64 {
         let pulled = self.pulled.load(Ordering::Relaxed);
@@ -195,6 +243,11 @@ impl LiveDecoder {
             std::io::Error::new(std::io::ErrorKind::NotFound, format!("no live stream {id}"))
         })?;
         Ok(Self { stream })
+    }
+
+    /// The stream.
+    pub fn stream(&self) -> &Arc<LiveStream> {
+        &self.stream
     }
 
     /// Format.
@@ -252,6 +305,14 @@ mod tests {
         assert!(d.next_chunk().is_none());
         s.mark_position(30.0);
         assert_eq!(d.position_seconds(), 30.0);
+        assert!(!s.control(LiveControl::Next));
+        let got = Arc::new(Mutex::new(Vec::new()));
+        let g = Arc::clone(&got);
+        s.set_control(Some(Arc::new(move |c| g.lock().unwrap().push(c))));
+        assert!(d.stream().control(LiveControl::Next));
+        assert_eq!(*got.lock().unwrap(), vec![LiveControl::Next]);
+        s.set_cover(Some(("image/jpeg".into(), vec![0xff, 0xd8])));
+        assert_eq!(s.cover().unwrap().1.as_slice(), &[0xff, 0xd8]);
         unregister("t1");
         assert!(LiveDecoder::open("t1").is_err());
     }

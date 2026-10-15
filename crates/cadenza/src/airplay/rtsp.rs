@@ -7,7 +7,7 @@
 
 use super::audio::{parse_sdp, PacketDecoder, StreamFormat};
 use super::rtp::Rtp;
-use super::{crypto, dmap, AirplayConfig};
+use super::{crypto, dacp, dmap, AirplayConfig};
 use crate::decode::live::{self, LiveStream};
 use crate::decode::Source;
 use crate::engine::{Command, Engine, Track};
@@ -28,6 +28,7 @@ pub struct Shared {
     pub(super) engine: Engine,
     pub(super) config: AirplayConfig,
     pub(super) hw: [u8; 6],
+    pub(super) resolver: dacp::Resolver,
     /// The connection whose session is playing, and a handle to close it on takeover.
     active: Mutex<Option<(u64, TcpStream)>>,
     next_id: AtomicU64,
@@ -35,11 +36,17 @@ pub struct Shared {
 
 impl Shared {
     /// Shared state for `engine`.
-    pub fn new(engine: Engine, config: AirplayConfig, hw: [u8; 6]) -> Arc<Self> {
+    pub fn new(
+        engine: Engine,
+        config: AirplayConfig,
+        hw: [u8; 6],
+        resolver: dacp::Resolver,
+    ) -> Arc<Self> {
         Arc::new(Self {
             engine,
             config,
             hw,
+            resolver,
             active: Mutex::new(None),
             next_id: AtomicU64::new(1),
         })
@@ -171,6 +178,8 @@ struct Session {
     rtp: Rtp,
     track: Track,
     rate: u32,
+    /// Covers received (makes each cover URL new, so the UI reloads it).
+    covers: u64,
 }
 
 struct Conn {
@@ -355,6 +364,14 @@ impl Conn {
             *active = self.writer.try_clone().ok().map(|s| (self.id, s));
         }
         let live_id = format!("airplay-{}", self.id);
+        if let (Some(id), Some(ar)) = (req.header("dacp-id"), req.header("active-remote")) {
+            stream.set_control(Some(dacp::remote(
+                id.to_string(),
+                ar.to_string(),
+                self.peer,
+                Arc::clone(&self.shared.resolver),
+            )));
+        }
         live::register(&live_id, Arc::clone(&stream));
         let track = Track {
             id: Some(live_id.clone()),
@@ -381,6 +398,7 @@ impl Conn {
             rtp,
             track,
             rate: format.rate,
+            covers: 0,
         });
         Reply::ok()
             .header("Transport", transport)
@@ -420,8 +438,23 @@ impl Conn {
                     .engine
                     .send(Command::SetTrackInfo(Box::new(s.track.clone())));
             }
+        } else if ctype.starts_with("image/") {
+            if let Some(s) = &mut self.session {
+                let mime = ctype.split(';').next().unwrap_or(ctype).trim();
+                if mime == "image/none" || req.body.is_empty() {
+                    s.stream.set_cover(None);
+                    s.track.cover = None;
+                } else {
+                    s.stream
+                        .set_cover(Some((mime.to_string(), req.body.clone())));
+                    s.covers += 1;
+                    s.track.cover = Some(format!("/api/live/{}/cover?v={}", s.live_id, s.covers));
+                }
+                self.shared
+                    .engine
+                    .send(Command::SetTrackInfo(Box::new(s.track.clone())));
+            }
         }
-        // Cover art (image/*) is not shown yet.
     }
 
     /// `progress: start/current/end` in RTP time.

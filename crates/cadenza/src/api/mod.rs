@@ -5,7 +5,7 @@
 
 use crate::engine::{Command, Engine, Event, Track};
 use crate::output::list_devices;
-use axum::extract::{Query, State};
+use axum::extract::{Path, Query, State};
 use axum::http::StatusCode;
 use axum::response::sse::{Event as SseEvent, KeepAlive, Sse};
 use axum::response::{Html, IntoResponse, Response};
@@ -59,6 +59,7 @@ pub fn router(engine: Engine) -> Router {
         .route("/api/queue", post(queue))
         .route("/api/control", post(control))
         .route("/api/events", get(events))
+        .route("/api/live/{id}/cover", get(live_cover))
         .with_state(AppState { engine })
 }
 
@@ -75,6 +76,21 @@ pub async fn serve(listen: &str, engine: Engine) -> anyhow::Result<()> {
 
 async fn index() -> Html<&'static str> {
     Html(INDEX_HTML)
+}
+
+/// Cover art a live stream (AirPlay) received from its sender.
+async fn live_cover(Path(id): Path<String>) -> Response {
+    match crate::decode::live::lookup(&id).and_then(|s| s.cover()) {
+        Some((mime, bytes)) => (
+            [
+                (axum::http::header::CONTENT_TYPE, mime),
+                (axum::http::header::CACHE_CONTROL, "no-cache".to_string()),
+            ],
+            bytes.to_vec(),
+        )
+            .into_response(),
+        None => StatusCode::NOT_FOUND.into_response(),
+    }
 }
 
 async fn status(State(st): State<AppState>) -> Json<Value> {
