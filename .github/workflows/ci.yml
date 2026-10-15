@@ -60,9 +60,9 @@ jobs:
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
       - name: Build
-        run: cargo build --release --features coreaudio,wgpu
+        run: cargo build --release --features coreaudio,wgpu,tap
       - name: Unit tests (output + endpoint, no device needed)
-        run: "cargo test --release -p cadenza --features coreaudio --lib -- output:: endpoint::"
+        run: "cargo test --release -p cadenza --features coreaudio,tap --lib -- output:: endpoint:: system::"
 
   windows:
     name: Windows · build (wasapi)

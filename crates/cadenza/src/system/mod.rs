@@ -18,6 +18,8 @@ use std::sync::{Arc, Mutex};
 pub mod loopback;
 #[cfg(all(target_os = "linux", feature = "pipewire"))]
 pub mod pipewire;
+#[cfg(all(target_os = "macos", feature = "tap"))]
+pub mod tap;
 
 /// What to capture.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
@@ -232,6 +234,17 @@ impl Drop for Feed {
     }
 }
 
+/// Planar channels (one slice per channel, as some capture APIs deliver them) to
+/// interleaved frames; a shorter plane ends the output.
+pub fn interleave_planar(planes: &[&[f32]]) -> Vec<f32> {
+    let frames = planes.iter().map(|p| p.len()).min().unwrap_or(0);
+    let mut out = Vec::with_capacity(frames * planes.len());
+    for i in 0..frames {
+        out.extend(planes.iter().map(|p| p[i]));
+    }
+    out
+}
+
 fn rate_label(rate: u32) -> String {
     if rate % 1000 == 0 {
         format!("{}k", rate / 1000)
@@ -261,7 +274,8 @@ impl SystemInput {
 /// Whether this build has a system input for this platform.
 pub const AVAILABLE: bool = cfg!(any(
     all(target_os = "linux", feature = "pipewire"),
-    all(windows, feature = "loopback")
+    all(windows, feature = "loopback"),
+    all(target_os = "macos", feature = "tap")
 ));
 
 struct Global {
@@ -350,13 +364,33 @@ pub fn start(engine: Engine, cfg: &SystemConfig) -> Result<SystemInput, String> 
             _backend: Box::new(backend),
         })
     }
+    #[cfg(all(target_os = "macos", feature = "tap"))]
+    {
+        let title = match cfg.mode {
+            SystemMode::Sink => format!("{} (system audio)", cfg.name),
+            SystemMode::App => cfg.app.clone(),
+        };
+        let feed = Arc::new(Feed::new(
+            engine,
+            "process-tap",
+            &title,
+            "Tap",
+            cfg.latency_ms,
+        ));
+        let backend = tap::Capture::start(cfg, Arc::clone(&feed))?;
+        Ok(SystemInput {
+            feed,
+            _backend: Box::new(backend),
+        })
+    }
     #[cfg(not(any(
         all(target_os = "linux", feature = "pipewire"),
-        all(windows, feature = "loopback")
+        all(windows, feature = "loopback"),
+        all(target_os = "macos", feature = "tap")
     )))]
     {
         let _ = engine;
-        Err("this build has no system input for this platform (build with the pipewire feature on Linux, loopback on Windows)".into())
+        Err("this build has no system input for this platform (build with the pipewire feature on Linux, loopback on Windows, tap on macOS)".into())
     }
 }
 
@@ -463,5 +497,16 @@ mod tests {
         assert!(SystemConfig::parse_flag("everything", &base).is_err());
         let st = status();
         assert_eq!(st["available"], AVAILABLE);
+    }
+
+    #[test]
+    fn planar_to_interleaved() {
+        let l = [1.0f32, 2.0, 3.0];
+        let r = [-1.0f32, -2.0, -3.0, -4.0];
+        assert_eq!(
+            interleave_planar(&[&l, &r]),
+            vec![1.0, -1.0, 2.0, -2.0, 3.0, -3.0]
+        );
+        assert!(interleave_planar(&[]).is_empty());
     }
 }

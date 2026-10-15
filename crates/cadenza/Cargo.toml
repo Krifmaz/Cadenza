@@ -30,6 +30,8 @@ coreaudio = ["dep:coreaudio-sys"]
 pipewire = ["dep:pipewire"]
 # System-wide input on Windows 10 2004+: process loopback (one app, or all but Cadenza).
 loopback = ["dep:windows", "dep:windows-core"]
+# System-wide input on macOS 14.2+: Core Audio process taps (one app, or all but Cadenza).
+tap = ["dep:objc2", "dep:objc2-foundation", "dep:objc2-core-foundation", "dep:objc2-core-audio", "dep:objc2-core-audio-types", "dep:libc"]
 # CUDA offload in cadenza-dsp (NVIDIA driver >= 525 at run time, no toolkit to build).
 cuda = ["cadenza-dsp/cuda"]
 # Portable GPU offload in cadenza-dsp: Vulkan / Metal / DX12 (AMD, Intel, Apple, NVIDIA).
@@ -71,6 +73,12 @@ alsa = { version = "0.9", optional = true }
 pipewire = { version = "0.10.1", optional = true, features = ["v0_3_44"] }
 
 [target.'cfg(target_os = "macos")'.dependencies]
+libc = { version = "0.2", optional = true }
+objc2 = { version = "0.6", optional = true }
+objc2-foundation = { version = "0.3", optional = true, features = ["NSArray", "NSDictionary", "NSString", "NSValue", "NSUUID"] }
+objc2-core-foundation = { version = "0.3", optional = true, features = ["CFDictionary", "CFString"] }
+objc2-core-audio = { version = "0.3.2", optional = true }
+objc2-core-audio-types = { version = "0.3.2", optional = true }
 coreaudio-sys = { version = "0.2", optional = true }
 
 [target.'cfg(windows)'.dependencies]

@@ -168,7 +168,7 @@ implemented and tested here; the notes say where we differ.
 | 64-bit processing | yes | yes everywhere | matched |
 | UPnP / Roon / control | UPnP renderer, Roon via NAA | UPnP/DLNA MediaRenderer (AVTransport, RenderingControl, ConnectionManager, gapless next URI, events) with OpenHome services, HTTP API, web UI, Encore device | matched: UPnP AV and OpenHome (Product, Playlist, Volume, Time, Info) – tested with scripted control points, not yet with BubbleUPnP / Kazoo / mconnect themselves; no Roon |
 | AirPlay | no | AirPlay 1 receiver (ALAC, encrypted, volume, title / artist / album, cover art, progress, play / pause / next / previous back to the phone) into the full engine | ahead: HQPlayer has none. Tested with a scripted sender, not yet with an iPhone or Mac; AirPlay 2 is not implemented |
-| System-wide input | audio-device input (with a separately installed loopback driver) | Linux: a built-in virtual output device "Cadenza" (PipeWire) and one-app capture before the mixer, following the source rate; Windows: one app or all apps but Cadenza (process loopback); macOS not yet | ahead on Linux (nothing extra to install); Windows has app capture without a driver but no virtual device; macOS not yet. Linux tested against a real headless PipeWire 1.0; the Windows code is built in CI but not yet run against real audio |
+| System-wide input | audio-device input (with a separately installed loopback driver) | Linux: a built-in virtual output device "Cadenza" (PipeWire) and one-app capture before the mixer, following the source rate; Windows: one app or all apps but Cadenza (process loopback); macOS 14.2+: the same through muted process taps, so the sound goes only through Cadenza | ahead on Linux and macOS (nothing extra to install); Windows has capture without a driver but no virtual device. Linux tested against a real headless PipeWire 1.0; the Windows and macOS code is built in CI but not yet run against real audio |
 | Licence / price | proprietary | MIT / Apache-2.0, free | – |
 
 ### Notes: how Cadenza gets ahead
@@ -242,9 +242,11 @@ to do it:
    web UI with an input device or taken from the DAC's spec.
 10. **System-wide upsampler (standalone, no library, no player)** – Linux done (see "System input"
     below): a PipeWire virtual output device and per-app capture, rate-following, tested against a real
-    PipeWire. Windows: per-app and all-apps process loopback, built in CI but not yet run against real
-    audio (the CI runners have no sound devices). macOS next; no tray window yet (the web UI is the
-    settings page).
+    PipeWire. Windows: per-app and all-apps process loopback; macOS 14.2+: muted process taps, which
+    route one app or the whole system through Cadenza like a virtual device, so no HAL plugin is
+    needed there. Windows and macOS are built in CI but not yet run against real audio (the CI runners
+    have no sound devices). No tray window yet (the web UI is the settings page); no Windows virtual
+    device (that needs a signed kernel driver).
     Cadenza stays strictly an upsampler:
     it takes the sound of any app or of the whole system and plays it into the DAC through the engine.
     Two ways in, both with the existing engine settings page in a small tray window and nothing else:
@@ -275,6 +277,7 @@ cargo build --release --features cuda     # + CUDA offload (NVIDIA; no toolkit n
 cargo build --release --features wgpu     # + GPU offload on AMD / Intel / Apple / NVIDIA (Vulkan, Metal, DX12)
 cargo build --release --features pipewire # + system input: virtual device "Cadenza", app capture (Linux)
 cargo build --release --features loopback # + system input: one app, or all apps but Cadenza (Windows 10 2004+)
+cargo build --release --features tap      # + system input: one app, or all apps but Cadenza (macOS 14.2+)
 
 cadenza devices                           # output devices: rates, bits, channels, DSD, exclusive
 cadenza filters --in-rate 44100 --out-rate 705600   # taps, transition, stopband, latency
@@ -597,7 +600,7 @@ seeking anywhere in long tracks), CUE sheets over WAV, FLAC and DSF whose tracks
 concatenate to the whole file exactly, and two DSD files that are one recording cut in
 two playing to the very same samples as the whole. Not yet tried with real disc rips.
 
-## System input (Linux, Windows)
+## System input (Linux, Windows, macOS)
 
 Cadenza as the system's upsampler, with no player of its own: the sound of the desktop or
 of one app goes through the engine into the DAC. Build with `--features pipewire` (needs
@@ -659,6 +662,23 @@ config): process loopback, no driver.
 
 Not yet run against real audio: CI builds it and checks the process lookup and formats, but
 GitHub's Windows runners have no sound devices.
+
+**macOS** (build with `--features tap`, macOS 14.2 or later; same flags and config): Core
+Audio process taps, no driver or plug-in.
+
+- `app:<name>`: the app's processes (by bundle id, its last part, or process name: `Music`,
+  `com.apple.Music`, `firefox`). The app must have played sound since it started.
+- `sink`: every process except Cadenza.
+- The tap is *muted*: what it takes is no longer played to the default output, only through
+  Cadenza – so `sink` behaves like a virtual output device, without installing one (which is
+  why there is no HAL plug-in).
+- It is read through a private aggregate device clocked by the default output device (drift
+  compensated) and arrives as 32-bit float at that device's rate: set the rate in Audio MIDI
+  Setup to the source's, and keep the app's volume at 100 %. macOS asks once for permission to
+  record system audio, for the terminal or app that runs Cadenza.
+
+Not yet run against real audio either: CI builds it on macOS and checks the app matching and
+process naming, but the runners have no sound devices.
 
 ## AirPlay receiver
 
