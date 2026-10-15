@@ -28,6 +28,8 @@ coreaudio = ["dep:coreaudio-sys"]
 # System-wide input on Linux: a PipeWire virtual sink or one app's audio
 # (needs libpipewire-0.3-dev and clang to build).
 pipewire = ["dep:pipewire"]
+# System-wide input on Windows 10 2004+: process loopback (one app, or all but Cadenza).
+loopback = ["dep:windows", "dep:windows-core"]
 # CUDA offload in cadenza-dsp (NVIDIA driver >= 525 at run time, no toolkit to build).
 cuda = ["cadenza-dsp/cuda"]
 # Portable GPU offload in cadenza-dsp: Vulkan / Metal / DX12 (AMD, Intel, Apple, NVIDIA).
@@ -72,6 +74,8 @@ pipewire = { version = "0.10.1", optional = true, features = ["v0_3_44"] }
 coreaudio-sys = { version = "0.2", optional = true }
 
 [target.'cfg(windows)'.dependencies]
+windows-core = { version = "0.62", optional = true }
+windows = { version = "0.62", optional = true, features = ["Win32_Foundation", "Win32_Media_Audio", "Win32_System_Com", "Win32_System_Com_StructuredStorage", "Win32_System_Variant", "Win32_System_Threading", "Win32_System_Diagnostics_ToolHelp", "Win32_Security"] }
 windows-sys = { version = "0.61", optional = true, features = ["Win32_Foundation", "Win32_System_Com", "Win32_System_Registry", "Win32_UI_WindowsAndMessaging"] }
 wasapi = { version = "0.26", optional = true }
 

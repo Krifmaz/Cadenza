@@ -168,7 +168,7 @@ implemented and tested here; the notes say where we differ.
 | 64-bit processing | yes | yes everywhere | matched |
 | UPnP / Roon / control | UPnP renderer, Roon via NAA | UPnP/DLNA MediaRenderer (AVTransport, RenderingControl, ConnectionManager, gapless next URI, events) with OpenHome services, HTTP API, web UI, Encore device | matched: UPnP AV and OpenHome (Product, Playlist, Volume, Time, Info) – tested with scripted control points, not yet with BubbleUPnP / Kazoo / mconnect themselves; no Roon |
 | AirPlay | no | AirPlay 1 receiver (ALAC, encrypted, volume, title / artist / album, cover art, progress, play / pause / next / previous back to the phone) into the full engine | ahead: HQPlayer has none. Tested with a scripted sender, not yet with an iPhone or Mac; AirPlay 2 is not implemented |
-| System-wide input | audio-device input (with a separately installed loopback driver) | Linux: a built-in virtual output device "Cadenza" (PipeWire) and one-app capture before the mixer, following the source rate; Windows and macOS not yet | ahead on Linux (nothing extra to install), behind on Windows and macOS for now. Tested against a real headless PipeWire 1.0; not yet on a desktop with a real DAC |
+| System-wide input | audio-device input (with a separately installed loopback driver) | Linux: a built-in virtual output device "Cadenza" (PipeWire) and one-app capture before the mixer, following the source rate; Windows: one app or all apps but Cadenza (process loopback); macOS not yet | ahead on Linux (nothing extra to install); Windows has app capture without a driver but no virtual device; macOS not yet. Linux tested against a real headless PipeWire 1.0; the Windows code is built in CI but not yet run against real audio |
 | Licence / price | proprietary | MIT / Apache-2.0, free | – |
 
 ### Notes: how Cadenza gets ahead
@@ -242,7 +242,9 @@ to do it:
    web UI with an input device or taken from the DAC's spec.
 10. **System-wide upsampler (standalone, no library, no player)** – Linux done (see "System input"
     below): a PipeWire virtual output device and per-app capture, rate-following, tested against a real
-    PipeWire. Windows and macOS next; no tray window yet (the web UI is the settings page).
+    PipeWire. Windows: per-app and all-apps process loopback, built in CI but not yet run against real
+    audio (the CI runners have no sound devices). macOS next; no tray window yet (the web UI is the
+    settings page).
     Cadenza stays strictly an upsampler:
     it takes the sound of any app or of the whole system and plays it into the DAC through the engine.
     Two ways in, both with the existing engine settings page in a small tray window and nothing else:
@@ -272,6 +274,7 @@ cargo build --release --features coreaudio # + CoreAudio hog mode, DoP (macOS)
 cargo build --release --features cuda     # + CUDA offload (NVIDIA; no toolkit needed to build)
 cargo build --release --features wgpu     # + GPU offload on AMD / Intel / Apple / NVIDIA (Vulkan, Metal, DX12)
 cargo build --release --features pipewire # + system input: virtual device "Cadenza", app capture (Linux)
+cargo build --release --features loopback # + system input: one app, or all apps but Cadenza (Windows 10 2004+)
 
 cadenza devices                           # output devices: rates, bits, channels, DSD, exclusive
 cadenza filters --in-rate 44100 --out-rate 705600   # taps, transition, stopband, latency
@@ -594,7 +597,7 @@ seeking anywhere in long tracks), CUE sheets over WAV, FLAC and DSF whose tracks
 concatenate to the whole file exactly, and two DSD files that are one recording cut in
 two playing to the very same samples as the whole. Not yet tried with real disc rips.
 
-## System input (Linux)
+## System input (Linux, Windows)
 
 Cadenza as the system's upsampler, with no player of its own: the sound of the desktop or
 of one app goes through the engine into the DAC. Build with `--features pipewire` (needs
@@ -640,6 +643,22 @@ Tested against a real headless PipeWire 1.0 with WirePlumber (also in CI): a pla
 to the "Cadenza" device reaches the engine at its level; one app is captured by name and its
 second stream followed; with allowed rates set, 44.1 → 48 → 96 kHz sources arrive at their
 own rates and the engine follows. Not yet tried on a desktop with a real DAC.
+
+**Windows** (build with `--features loopback`, Windows 10 2004 or later; same flags and
+config): process loopback, no driver.
+
+- `app:<name>`: the program's audio (by executable name, `firefox` or `firefox.exe`) and of
+  the processes it started, before Windows mixes it with other apps. The program must be
+  running when Cadenza starts.
+- `sink`: Windows has no virtual device without a signed kernel driver, so this takes *all
+  apps except Cadenza*. Make another device the Windows default (or mute it) so the sound is
+  not heard twice, and let Cadenza play to the DAC in exclusive mode.
+- The audio arrives as 32-bit float at the default device's shared-mode rate, which is what
+  Windows mixes the app at anyway: set that device's format to the source rate (Sound →
+  device properties → Advanced) for no resampling, and keep the app's volume at 100 %.
+
+Not yet run against real audio: CI builds it and checks the process lookup and formats, but
+GitHub's Windows runners have no sound devices.
 
 ## AirPlay receiver
 

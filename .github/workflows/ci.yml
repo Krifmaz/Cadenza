@@ -72,8 +72,8 @@ jobs:
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
       - name: Build
-        run: cargo build --release --features wasapi,asio,wgpu
+        run: cargo build --release --features wasapi,asio,wgpu,loopback
       - name: Device listing (no audio device on the runner)
         run: cargo run --release --features wasapi,asio -- devices
       - name: Unit tests (output + endpoint, no device needed)
-        run: "cargo test --release -p cadenza --features wasapi,asio --lib -- --test-threads=1 --nocapture output:: endpoint::"
+        run: "cargo test --release -p cadenza --features wasapi,asio,loopback --lib -- --test-threads=1 --nocapture output:: endpoint:: system::"

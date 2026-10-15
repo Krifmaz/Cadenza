@@ -14,6 +14,8 @@ use serde::{Deserialize, Serialize};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 
+#[cfg(all(windows, feature = "loopback"))]
+pub mod loopback;
 #[cfg(all(target_os = "linux", feature = "pipewire"))]
 pub mod pipewire;
 
@@ -257,7 +259,10 @@ impl SystemInput {
 }
 
 /// Whether this build has a system input for this platform.
-pub const AVAILABLE: bool = cfg!(all(target_os = "linux", feature = "pipewire"));
+pub const AVAILABLE: bool = cfg!(any(
+    all(target_os = "linux", feature = "pipewire"),
+    all(windows, feature = "loopback")
+));
 
 struct Global {
     config: Option<SystemConfig>,
@@ -326,10 +331,32 @@ pub fn start(engine: Engine, cfg: &SystemConfig) -> Result<SystemInput, String> 
             _backend: Box::new(backend),
         })
     }
-    #[cfg(not(all(target_os = "linux", feature = "pipewire")))]
+    #[cfg(all(windows, feature = "loopback"))]
+    {
+        let title = match cfg.mode {
+            SystemMode::Sink => "All apps (system audio)".to_string(),
+            SystemMode::App => cfg.app.clone(),
+        };
+        let feed = Arc::new(Feed::new(
+            engine,
+            "process-loopback",
+            &title,
+            "Loopback",
+            cfg.latency_ms,
+        ));
+        let backend = loopback::Capture::start(cfg, Arc::clone(&feed))?;
+        Ok(SystemInput {
+            feed,
+            _backend: Box::new(backend),
+        })
+    }
+    #[cfg(not(any(
+        all(target_os = "linux", feature = "pipewire"),
+        all(windows, feature = "loopback")
+    )))]
     {
         let _ = engine;
-        Err("this build has no system input for this platform (Linux: build with the pipewire feature)".into())
+        Err("this build has no system input for this platform (build with the pipewire feature on Linux, loopback on Windows)".into())
     }
 }
 

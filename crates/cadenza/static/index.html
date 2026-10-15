@@ -163,7 +163,7 @@
   <section class="card">
     <h2>System input <span class="badge" id="sys-badge"></span></h2>
     <div class="small" id="sys-info"></div>
-    <div class="hint">Cadenza as the system's upsampler: <code>cadenza serve --system sink</code> adds an output device "Cadenza" that any app (or the whole desktop) can play to; <code>--system app:&lt;name&gt;</code> takes one application's sound before the mixer. Or <code>[system]</code> in the config. Linux (PipeWire) for now.</div>
+    <div class="hint">Cadenza as the system's upsampler: <code>cadenza serve --system sink</code> adds an output device "Cadenza" that any app (or the whole desktop) can play to; <code>--system app:&lt;name&gt;</code> takes one application's sound before the mixer. Or <code>[system]</code> in the config. Linux: PipeWire (build feature <code>pipewire</code>). Windows 10 2004+: process loopback (feature <code>loopback</code>); there <code>sink</code> means all apps except Cadenza, as Windows has no virtual device without a signed driver. macOS: not yet.</div>
   </section>
 
   <section class="card wide">
