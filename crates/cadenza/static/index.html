@@ -17,6 +17,7 @@
     --radius: 14px; --shadow: 0 10px 30px rgba(0, 0, 0, .35); --sidebar: 236px; --player-h: 84px;
     color-scheme: dark;
   }
+  :root[data-bg="solid"] body { background: var(--bg); }
   :root[data-theme="encore"] { --bg: #161617; --bg-2: #1c1c1e; --panel: #222224; --panel-2: #2a2a2d; --border: #353538; --text: #f0ead6; --muted: #aaa493; --faint: #77725f; }
   :root[data-theme="oled"] { --bg: #000; --bg-2: #000; --panel: #0b0b0d; --panel-2: #17171b; --border: #232329; --muted: #9a9aa8; --faint: #66666f; --shadow: none; }
   :root[data-theme="light"] { --bg: #f6f6fb; --bg-2: #fff; --panel: #fff; --panel-2: #f0f0f7; --border: #e2e2ee; --text: #16161f; --muted: #5d5d75; --faint: #8d8da5; --shadow: 0 10px 30px rgba(20, 20, 50, .08); color-scheme: light; }
@@ -155,11 +156,17 @@
   .player .vol input { max-width: 140px; }
   .player .vol svg { width: 18px; height: 18px; color: var(--muted); flex: none; }
 
-  /* appearance */
-  .themes { display: grid; grid-template-columns: repeat(auto-fill, minmax(150px, 1fr)); gap: 10px; }
-  .theme { display: flex; flex-direction: column; align-items: stretch; gap: 8px; padding: 10px; border-radius: 12px; border: 2px solid var(--border); background: var(--panel-2); text-align: left; }
-  .theme.on { border-color: var(--accent); }
-  .theme i { display: block; height: 46px; border-radius: 8px; border: 1px solid rgba(128, 128, 128, .25); }
+  /* appearance (as Encore's) */
+  .presets { display: grid; grid-template-columns: repeat(auto-fill, minmax(140px, 1fr)); gap: 10px; }
+  .preset { display: flex; flex-direction: column; align-items: stretch; gap: 8px; padding: 10px; border-radius: 12px; border: 2px solid var(--border); background: var(--panel-2); text-align: left; }
+  .preset.on { border-color: var(--accent); }
+  .preset i { display: block; height: 46px; border-radius: 8px; border: 1px solid rgba(128, 128, 128, .25); }
+  .seg { display: inline-flex; flex-wrap: wrap; max-width: 100%; border: 1px solid var(--border); border-radius: 12px; overflow: hidden; }
+  .seg button { border: 0; border-radius: 0; background: transparent; padding: 8px 14px; color: var(--muted); }
+  .seg button.on { background: var(--panel-2); color: var(--text); font-weight: 650; }
+  .swatches { display: flex; flex-wrap: wrap; gap: 10px; }
+  .swatch { width: 40px; height: 40px; border-radius: 50%; border: 2px solid transparent; padding: 0; }
+  .swatch.on { border-color: var(--text); box-shadow: 0 0 0 3px var(--panel); }
 
   /* phones: the sidebar becomes a scrolling tab strip, the player shrinks */
   @media (max-width: 860px) {
@@ -181,7 +188,7 @@
 <body>
 <div class="shell">
   <aside class="sidebar">
-    <div class="brand"><div class="logo"><svg viewBox="0 0 24 24" fill="none" stroke="#fff" stroke-width="2.2" stroke-linecap="round"><path d="M4 13v-2M8 17V7M12 20V4M16 16V8M20 13v-2"/></svg></div><span>Cadenza</span></div>
+    <div class="brand"><div class="logo"><svg viewBox="0 0 24 24" fill="none" stroke="var(--on-accent)" stroke-width="2.2" stroke-linecap="round"><path d="M4 13v-2M8 17V7M12 20V4M16 16V8M20 13v-2"/></svg></div><span>Cadenza</span></div>
     <nav class="nav" id="nav">
       <a data-view="now"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="9"/><path d="m10 8.5 5 3.5-5 3.5z"/></svg>Now playing</a>
       <div class="nav-label">Engine</div>
@@ -203,7 +210,7 @@
     <!-- Now playing -->
     <section class="view" data-view="now">
       <div class="hero">
-        <div class="art" id="art-big"><img id="cover-big" alt="" hidden><svg viewBox="0 0 24 24" fill="none" stroke="#fff" stroke-width="1.6" stroke-linecap="round"><path d="M9 18V5l12-2v13"/><circle cx="6" cy="18" r="3"/><circle cx="18" cy="16" r="3"/></svg></div>
+        <div class="art" id="art-big"><img id="cover-big" alt="" hidden><svg viewBox="0 0 24 24" fill="none" style="stroke:var(--on-accent)" stroke-width="1.6" stroke-linecap="round"><path d="M9 18V5l12-2v13"/><circle cx="6" cy="18" r="3"/><circle cx="18" cy="16" r="3"/></svg></div>
         <div>
           <div class="kicker">Now playing</div>
           <h1 id="title-big">Nothing playing</h1>
@@ -407,13 +414,22 @@
 
     <!-- Appearance -->
     <section class="view" data-view="appearance" hidden>
-      <div class="page-head"><div><h1>Appearance</h1><p>The same themes as Encore. Remembered in this browser.</p></div></div>
-      <div class="card">
-        <div class="themes" id="themes">
-          <button class="theme" data-theme=""><i style="background:linear-gradient(135deg,#0b0b12 55%,#8b5cf6 55%,#ec4899)"></i>Cadenza</button>
-          <button class="theme" data-theme="encore"><i style="background:linear-gradient(135deg,#161617 55%,#f0ead6 55%)"></i>Encore</button>
-          <button class="theme" data-theme="oled"><i style="background:#000"></i>OLED black</button>
-          <button class="theme" data-theme="light"><i style="background:linear-gradient(135deg,#f6f6fb 55%,#8b5cf6 55%)"></i>Light</button>
+      <div class="page-head"><div><h1>Appearance</h1><p>The same looks as Encore. Remembered in this browser.</p></div></div>
+      <div class="grid">
+        <div class="card wide">
+          <h2>Looks</h2>
+          <div class="presets" id="ap-presets"></div>
+        </div>
+        <div class="card">
+          <h2>Theme</h2>
+          <div class="seg" id="ap-theme"></div>
+          <h2 style="margin-top:22px">Background</h2>
+          <div class="seg" id="ap-bg"></div>
+        </div>
+        <div class="card">
+          <h2>Colour</h2>
+          <div class="swatches" id="ap-accents"></div>
+          <div class="row" style="margin-top:14px"><span class="small muted">Custom</span><input type="color" id="ap-custom" style="width:48px;height:36px;padding:2px;border-radius:8px;border:1px solid var(--border);background:transparent;cursor:pointer"></div>
         </div>
       </div>
     </section>
@@ -422,7 +438,7 @@
 
 <footer class="player">
   <div class="now">
-    <div class="thumb"><img id="cover" alt="" hidden><svg viewBox="0 0 24 24" fill="none" stroke="#fff" stroke-width="2" stroke-linecap="round"><path d="M9 18V5l12-2v13"/><circle cx="6" cy="18" r="3"/><circle cx="18" cy="16" r="3"/></svg></div>
+    <div class="thumb"><img id="cover" alt="" hidden><svg viewBox="0 0 24 24" fill="none" style="stroke:var(--on-accent)" stroke-width="2" stroke-linecap="round"><path d="M9 18V5l12-2v13"/><circle cx="6" cy="18" r="3"/><circle cx="18" cy="16" r="3"/></svg></div>
     <div style="min-width:0">
       <div class="t ellipsis" id="title">Nothing playing</div>
       <div class="small muted ellipsis" id="sub"></div>
@@ -461,16 +477,7 @@ document.querySelectorAll('#nav a').forEach(a => { a.href = '#' + a.dataset.view
 window.addEventListener('hashchange', () => { showView(); window.scrollTo(0, 0); });
 showView();
 
-// Themes, as in Encore; remembered in this browser only.
-function setTheme(t) {
-  if (t) document.documentElement.dataset.theme = t; else delete document.documentElement.dataset.theme;
-  document.querySelectorAll('#themes .theme').forEach(b => b.classList.toggle('on', b.dataset.theme === (t || '')));
-  try { localStorage.setItem('cadenza-theme', t || ''); } catch { /* storage may be off */ }
-}
-let savedTheme = '';
-try { savedTheme = localStorage.getItem('cadenza-theme') || ''; } catch { /* storage may be off */ }
-setTheme(savedTheme);
-document.querySelectorAll('#themes .theme').forEach(b => b.onclick = () => setTheme(b.dataset.theme));
+
 const esc = (s) => String(s ?? '').replace(/[&<>"']/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
 const dur = (s) => { s = Math.max(0, Math.round(s || 0)); return `${Math.floor(s / 60)}:${String(s % 60).padStart(2, '0')}`; };
 const khz = (r) => r >= 1e6 ? (r / 1e6).toFixed(4).replace(/0+$/, '').replace(/\.$/, '') + ' MHz' : (r / 1000) + ' kHz';
@@ -484,6 +491,87 @@ let status = null, dragging = false, eqBands = [], loaded = false;
 let options = null, filters = [], dithers = [], devices = [];
 const EQ_TYPES = ['peaking', 'low-shelf', 'high-shelf', 'low-pass', 'high-pass', 'notch'];
 const opts = (list, val = 'id', label = 'label') => list.map(o => `<option value="${esc(o[val])}">${esc(o[label] ?? o[val])}</option>`).join('');
+
+// Appearance, as in Encore (same accents, looks and defaults); remembered in this browser only.
+const ACCENTS = [
+  { id: 'logo', name: 'Logo', a: '#f0ead6', b: '#d6c49a' },
+  { id: 'violet', name: 'Violet', a: '#8b5cf6', b: '#ec4899' },
+  { id: 'encore', name: 'Encore', a: '#f2a7e4', b: '#9fd2fb' },
+  { id: 'lilac', name: 'Lilac', a: '#b48cf2', b: '#7cc4fa' },
+  { id: 'pink', name: 'Pink', a: '#ec4899', b: '#f97316' },
+  { id: 'sky', name: 'Sky', a: '#0ea5e9', b: '#8b5cf6' },
+  { id: 'teal', name: 'Teal', a: '#14b8a6', b: '#0ea5e9' },
+  { id: 'green', name: 'Green', a: '#22c55e', b: '#14b8a6' },
+  { id: 'amber', name: 'Amber', a: '#f59e0b', b: '#ef4444' },
+  { id: 'red', name: 'Red', a: '#ef4444', b: '#ec4899' },
+];
+const LOOKS = [
+  { id: 'encore', name: 'Encore', theme: 'encore', accent: 'logo', background: 'solid', sw: ['#161617', '#f0ead6'] },
+  { id: 'default', name: 'Violet dark', theme: 'dark', accent: 'violet', background: 'fade', sw: ['#0b0b12', '#8b5cf6', '#ec4899'] },
+  { id: 'oled', name: 'OLED black', theme: 'oled', accent: 'violet', background: 'solid', sw: ['#000', '#8b5cf6'] },
+  { id: 'pastel', name: 'Pastel', theme: 'dark', accent: 'encore', background: 'fade', sw: ['#0b0b12', '#f2a7e4', '#9fd2fb'] },
+  { id: 'light', name: 'Daylight', theme: 'light', accent: 'sky', background: 'fade', sw: ['#f6f6fb', '#0ea5e9', '#8b5cf6'] },
+  { id: 'mono', name: 'Mono', theme: 'oled', accent: 'custom', custom: '#e5e5e5', background: 'solid', sw: ['#000', '#e5e5e5'] },
+];
+const AP_DEFAULTS = { theme: 'encore', accent: 'logo', custom: '#f0ead6', background: 'solid' };
+const AP_KEY = 'cadenza.appearance';
+const rgbOf = (hex) => { const h = hex.replace('#', ''); const n = parseInt(h.length === 3 ? h.split('').map(c => c + c).join('') : h, 16); return [(n >> 16) & 255, (n >> 8) & 255, n & 255]; };
+const toHex = (r, g, b) => '#' + [r, g, b].map(v => Math.max(0, Math.min(255, Math.round(v))).toString(16).padStart(2, '0')).join('');
+const luminance = (hex) => rgbOf(hex).map(v => { v /= 255; return v <= 0.03928 ? v / 12.92 : ((v + 0.055) / 1.055) ** 2.4; }).reduce((s, v, i) => s + v * [0.2126, 0.7152, 0.0722][i], 0);
+function partner(hex) {
+  let [r, g, b] = rgbOf(hex).map(v => v / 255);
+  const max = Math.max(r, g, b), min = Math.min(r, g, b), l = (max + min) / 2;
+  let h = 0, s = 0;
+  if (max !== min) {
+    const d = max - min;
+    s = l > 0.5 ? d / (2 - max - min) : d / (max + min);
+    h = max === r ? (g - b) / d + (g < b ? 6 : 0) : max === g ? (b - r) / d + 2 : (r - g) / d + 4;
+    h /= 6;
+  }
+  h = (h + 0.1) % 1;
+  const q = l < 0.5 ? l * (1 + s) : l + s - l * s, p = 2 * l - q;
+  const f = (t) => { t = (t + 1) % 1; return t < 1 / 6 ? p + (q - p) * 6 * t : t < 1 / 2 ? q : t < 2 / 3 ? p + (q - p) * (2 / 3 - t) * 6 : p; };
+  return toHex(f(h + 1 / 3) * 255, f(h) * 255, f(h - 1 / 3) * 255);
+}
+function apCurrent() {
+  try { return { ...AP_DEFAULTS, ...JSON.parse(localStorage.getItem(AP_KEY) || '{}') }; } catch { return { ...AP_DEFAULTS }; }
+}
+let apMq;
+function apApply(p) {
+  const root = document.documentElement;
+  const dark = p.theme === 'system' ? matchMedia('(prefers-color-scheme: dark)').matches : p.theme !== 'light';
+  root.dataset.theme = !dark ? 'light' : p.theme === 'oled' ? 'oled' : p.theme === 'encore' ? 'encore' : 'dark';
+  if (p.theme === 'system' && !apMq) { apMq = matchMedia('(prefers-color-scheme: dark)'); apMq.addEventListener('change', () => apApply(apCurrent())); }
+  const pre = ACCENTS.find(x => x.id === p.accent);
+  const a = pre ? pre.a : (p.custom || AP_DEFAULTS.custom), b = pre ? pre.b : partner(a);
+  root.style.setProperty('--accent', a);
+  root.style.setProperty('--accent-2', b);
+  root.style.setProperty('--accent-rgb', rgbOf(a).join(', '));
+  root.style.setProperty('--accent-2-rgb', rgbOf(b).join(', '));
+  root.style.setProperty('--on-accent', (luminance(a) + luminance(b)) / 2 > 0.45 ? '#16161f' : '#fff');
+  root.dataset.bg = p.background === 'solid' ? 'solid' : 'fade';
+  document.querySelector('meta[name=theme-color]')?.setAttribute('content', getComputedStyle(root).getPropertyValue('--bg').trim() || '#161617');
+  paintAppearance(p);
+}
+function apSave(change) {
+  const p = { ...apCurrent(), ...change };
+  try { localStorage.setItem(AP_KEY, JSON.stringify(p)); } catch { /* storage may be off */ }
+  apApply(p);
+}
+function paintAppearance(p) {
+  const same = (l) => l.theme === p.theme && l.accent === p.accent && l.background === p.background && (l.accent !== 'custom' || l.custom === p.custom);
+  $('ap-presets').innerHTML = LOOKS.map(l => `<button class="preset ${same(l) ? 'on' : ''}" data-look="${l.id}"><i style="background:linear-gradient(135deg,${l.sw[0]} 50%,${l.sw.slice(1).join(',')})"></i>${esc(l.name)}</button>`).join('');
+  $('ap-theme').innerHTML = [['encore', 'Encore'], ['dark', 'Dark'], ['oled', 'OLED'], ['light', 'Light'], ['system', 'System']].map(([id, n]) => `<button class="${p.theme === id ? 'on' : ''}" data-theme="${id}">${n}</button>`).join('');
+  $('ap-bg').innerHTML = [['solid', 'Solid'], ['fade', 'Faded']].map(([id, n]) => `<button class="${p.background === id ? 'on' : ''}" data-bg="${id}">${n}</button>`).join('');
+  $('ap-accents').innerHTML = ACCENTS.map(x => `<button class="swatch ${p.accent === x.id ? 'on' : ''}" data-accent="${x.id}" title="${x.name}" style="background:linear-gradient(135deg,${x.a},${x.b})"></button>`).join('');
+  $('ap-custom').value = p.custom || AP_DEFAULTS.custom;
+}
+$('ap-presets').onclick = (e) => { const b = e.target.closest('[data-look]'); if (!b) return; const l = LOOKS.find(x => x.id === b.dataset.look); apSave({ theme: l.theme, accent: l.accent, background: l.background, ...(l.custom ? { custom: l.custom } : {}) }); };
+$('ap-theme').onclick = (e) => { const b = e.target.closest('[data-theme]'); if (b) apSave({ theme: b.dataset.theme }); };
+$('ap-bg').onclick = (e) => { const b = e.target.closest('[data-bg]'); if (b) apSave({ background: b.dataset.bg }); };
+$('ap-accents').onclick = (e) => { const b = e.target.closest('[data-accent]'); if (b) apSave({ accent: b.dataset.accent }); };
+$('ap-custom').oninput = () => apSave({ accent: 'custom', custom: $('ap-custom').value });
+apApply(apCurrent());
 
 function formatLabel(f) {
   if (!f) return '';
