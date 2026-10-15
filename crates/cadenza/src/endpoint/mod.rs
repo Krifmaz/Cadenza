@@ -15,16 +15,21 @@
 
 pub mod client;
 pub mod discovery;
+pub mod group;
 pub mod protocol;
 pub mod server;
+pub mod sync;
 
 use serde::{Deserialize, Serialize};
 
 pub use client::EndpointOutput;
 pub use server::{EndpointServer, EndpointStats};
 
-/// Protocol version spoken by this build.
-pub const PROTOCOL_VERSION: u32 = 1;
+/// Protocol version spoken by this build (2: multi-room sync). Version 1 peers are still
+/// served; sync groups need version 2 on every endpoint.
+pub const PROTOCOL_VERSION: u32 = 2;
+/// Oldest protocol version still spoken.
+pub const MIN_PROTOCOL_VERSION: u32 = 1;
 /// mDNS service type.
 pub const SERVICE_TYPE: &str = "_cadenza-endpoint._tcp.local.";
 /// Default TCP port of `cadenza endpoint`.

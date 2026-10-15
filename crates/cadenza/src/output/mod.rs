@@ -479,7 +479,7 @@ pub fn split_backend<'a>(backend: &'a str, device: &'a str) -> (&'a str, &'a str
 pub fn open_backend(backend: &str, device: &str) -> Result<Box<dyn Output>, OutputError> {
     let (backend, device) = split_backend(backend, device);
     match backend {
-        "null" => Ok(Box::new(null::NullOutput::new(true))),
+        "null" => Ok(Box::new(null::NullOutput::for_device(true, device))),
         #[cfg(feature = "cpal")]
         "cpal" => Ok(Box::new(cpal_backend::CpalOutput::new(device)?)),
         #[cfg(all(feature = "alsa", target_os = "linux"))]
@@ -490,6 +490,10 @@ pub fn open_backend(backend: &str, device: &str) -> Result<Box<dyn Output>, Outp
         "asio" => Ok(Box::new(asio::windows::open(device)?)),
         #[cfg(all(feature = "coreaudio", target_os = "macos"))]
         "coreaudio" => Ok(Box::new(coreaudio_backend::CoreAudioOutput::new(device)?)),
+        // `a+b+c`: one stream on several endpoints, in sync.
+        "endpoint" if device.contains('+') => Ok(Box::new(
+            crate::endpoint::group::GroupOutput::connect(device)?,
+        )),
         "endpoint" => Ok(Box::new(crate::endpoint::client::EndpointOutput::connect(
             device,
         )?)),

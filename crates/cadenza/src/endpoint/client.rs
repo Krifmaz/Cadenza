@@ -7,8 +7,9 @@
 //! by `/<remote device id>` to pick one of the endpoint's devices.
 
 use super::discovery;
-use super::protocol::{Ack, Caps, Hello, Message, Open};
-use super::PROTOCOL_VERSION;
+use super::protocol::{Ack, Caps, Hello, Message, Open, Schedule};
+use super::sync::ClockSync;
+use super::{MIN_PROTOCOL_VERSION, PROTOCOL_VERSION};
 use crate::output::{DeviceInfo, DsdCaps, Output, OutputError, OutputFormat};
 use std::io::{self, BufReader, BufWriter};
 use std::net::{Shutdown, SocketAddr, TcpStream, ToSocketAddrs};
@@ -130,12 +131,38 @@ pub struct EndpointOutput {
     position: u64,
     frames_written: u64,
     last_ack: Option<Ack>,
+    /// Protocol version agreed with the endpoint.
+    version: u32,
+    /// Our clock for sync pings.
+    epoch: Instant,
+    /// The endpoint's clock offset, kept up to date by the reader thread.
+    clock: Arc<Mutex<ClockSync>>,
+    /// The last (stream position at the DAC, endpoint clock ns) the endpoint reported.
+    presenting: Option<(u64, u64)>,
+    /// First block sent after the last discard: acks for earlier blocks are stale.
+    discard_seq: u64,
 }
 
 impl EndpointOutput {
     /// Connect to `spec` (`name`, `host:port`, optionally `/<device>`), say hello and
     /// fetch the endpoint's capabilities. Nothing is opened yet.
     pub fn connect(spec: &str) -> Result<Self, OutputError> {
+        Self::connect_with(spec, Instant::now())
+    }
+
+    /// [`EndpointOutput::connect`] with `epoch` as the zero of the sync clock (a group
+    /// shares one).
+    pub fn connect_with(spec: &str, epoch: Instant) -> Result<Self, OutputError> {
+        match Self::connect_version(spec, epoch, PROTOCOL_VERSION) {
+            // An endpoint from before multi-room only speaks version 1.
+            Err(OutputError::Backend(e)) if e.contains("not supported") => {
+                Self::connect_version(spec, epoch, MIN_PROTOCOL_VERSION)
+            }
+            other => other,
+        }
+    }
+
+    fn connect_version(spec: &str, epoch: Instant, version: u32) -> Result<Self, OutputError> {
         let (target, remote_device) = split_target(spec);
         let addr = resolve(target)?;
         let stream = TcpStream::connect_timeout(&addr, CONNECT_TIMEOUT)
@@ -145,7 +172,7 @@ impl EndpointOutput {
         let socket = stream.try_clone().map_err(io_err)?;
         let mut writer = BufWriter::new(stream);
         Message::Hello(Hello {
-            version: PROTOCOL_VERSION,
+            version,
             name: format!(
                 "Cadenza on {}",
                 gethostname::gethostname().to_string_lossy()
@@ -178,10 +205,17 @@ impl EndpointOutput {
                 OutputError::NoDevice(format!("endpoint {target} has no output devices"))
             })?;
         let (tx, rx) = mpsc::channel();
+        let clock = Arc::new(Mutex::new(ClockSync::default()));
+        let clock_rx = Arc::clone(&clock);
         let reader_thread = thread::Builder::new()
             .name("cadenza-endpoint-rx".into())
             .spawn(move || loop {
                 match Message::read_from(&mut reader) {
+                    Ok(Message::SyncReply { t0, server, .. }) => {
+                        // Timed here, on arrival, not when the player gets round to it.
+                        let t3 = epoch.elapsed().as_nanos() as i64;
+                        clock_rx.lock().unwrap().add(t0 as i64, server as i64, t3);
+                    }
                     Ok(Message::Ack(a)) => {
                         if tx.send(Incoming::Ack(a)).is_err() {
                             break;
@@ -205,6 +239,7 @@ impl EndpointOutput {
             })
             .map_err(io_err)?;
         let label = format!("endpoint · {} · {}", caps.name, device.name);
+        let agreed = caps.version.min(version);
         Ok(Self {
             label,
             remote_device: device.id.clone(),
@@ -220,7 +255,51 @@ impl EndpointOutput {
             position: 0,
             frames_written: 0,
             last_ack: None,
+            version: agreed,
+            epoch,
+            clock,
+            presenting: None,
+            discard_seq: 0,
         })
+    }
+
+    /// Protocol version in use (2 and up: multi-room sync).
+    pub fn version(&self) -> u32 {
+        self.version
+    }
+
+    /// Send a clock ping.
+    pub fn ping(&self, id: u64) -> Result<(), OutputError> {
+        self.send(&Message::Sync {
+            id,
+            t0: self.epoch.elapsed().as_nanos() as u64,
+        })
+    }
+
+    /// The endpoint's clock minus ours (ns), once a ping has come back.
+    pub fn clock_offset(&self) -> Option<i64> {
+        self.clock.lock().unwrap().offset()
+    }
+
+    /// The fastest recent ping round trip (ns).
+    pub fn best_rtt(&self) -> Option<i64> {
+        self.clock.lock().unwrap().best_rtt()
+    }
+
+    /// Tell the endpoint which timeline to play on.
+    pub fn schedule(&self, s: Schedule) -> Result<(), OutputError> {
+        self.send(&Message::Schedule(s))
+    }
+
+    /// The last (stream position at the DAC, endpoint clock ns) reported.
+    pub fn presenting(&mut self) -> Option<(u64, u64)> {
+        let _ = self.poll();
+        self.presenting
+    }
+
+    /// Stream position of the next frame to be sent.
+    pub fn position(&self) -> u64 {
+        self.position
     }
 
     /// The endpoint's capabilities as received.
@@ -244,6 +323,10 @@ impl EndpointOutput {
     /// Handle one incoming message; returns it for the caller to match on.
     fn apply(&mut self, m: &Incoming) {
         if let Incoming::Ack(a) = m {
+            if a.seq < self.discard_seq {
+                // From before a discard (still in flight): its counts are of the old run.
+                return;
+            }
             self.pacer.on_ack(a.played, a.queued);
             if let Some(prev) = self.last_ack {
                 if a.underruns > prev.underruns {
@@ -255,6 +338,9 @@ impl EndpointOutput {
                 }
             }
             self.last_ack = Some(*a);
+            if a.presenting != Ack::UNKNOWN {
+                self.presenting = Some((a.presenting, a.mono_ns));
+            }
         }
     }
 
@@ -352,6 +438,8 @@ impl Output for EndpointOutput {
         self.seq = 0;
         self.position = 0;
         self.last_ack = None;
+        self.discard_seq = 0;
+        self.presenting = None;
         Ok(got)
     }
 
@@ -409,6 +497,8 @@ impl Output for EndpointOutput {
         self.send(&Message::Discard)?;
         // Everything outstanding is gone at the endpoint: do not wait for it to "play".
         self.pacer.reset();
+        self.presenting = None;
+        self.discard_seq = self.seq;
         Ok(())
     }
 

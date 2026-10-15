@@ -7,6 +7,10 @@
 //! test that writes a DSD stream to it catches a broken packer. With
 //! [`NullOutput::capture_to`] (`device = "capture:<file>"`) every sample written is
 //! appended to a file as little-endian `i32`, so tests can check what was played.
+//!
+//! For multi-room tests the device string also takes `ppm=<n>` (the simulated DAC clock
+//! runs that much fast or slow, as real ones do) and `timeline=<file>` (each write is
+//! recorded with the time its first frame plays, on [`epoch`]), separated by `;`.
 
 use super::{DeviceInfo, DsdCaps, Encoding, Output, OutputError, OutputFormat, STANDARD_RATES};
 use cadenza_dsp::dsd::packing::DOP_MARKERS;
@@ -14,6 +18,12 @@ use cadenza_dsp::dsd::{DsdPacking, NativeFormat};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
+
+/// The clock the `timeline=` recordings use (shared by every null output of a process).
+pub fn epoch() -> Instant {
+    static E: std::sync::OnceLock<Instant> = std::sync::OnceLock::new();
+    *E.get_or_init(Instant::now)
+}
 
 /// Highest DSD bit rate the null device "accepts" (DSD1024, 48 k family).
 pub const MAX_DSD_RATE: u32 = 49_152_000;
@@ -31,6 +41,11 @@ pub struct NullOutput {
     /// DoP frames whose marker byte was wrong.
     dop_errors: u64,
     capture: Option<std::io::BufWriter<std::fs::File>>,
+    /// Simulated clock error of the "DAC", parts per million.
+    ppm: f64,
+    /// `timeline=`: per write, the play time of its first frame (ns since [`epoch`]),
+    /// the frame count and the words.
+    timeline: Option<std::io::BufWriter<std::fs::File>>,
 }
 
 impl NullOutput {
@@ -45,7 +60,13 @@ impl NullOutput {
             dop_marker: 0,
             dop_errors: 0,
             capture: None,
+            ppm: 0.0,
+            timeline: None,
         }
+    }
+
+    fn real_rate(&self, rate: u32) -> f64 {
+        rate as f64 * (1.0 + self.ppm * 1e-6)
     }
 
     /// Append every sample written to `path` (little-endian `i32`).
@@ -54,19 +75,40 @@ impl NullOutput {
         Ok(self)
     }
 
-    /// A null output for a configured device name: `capture:<file>` captures.
+    /// A null output for a configured device name: `capture:<file>`, or `;`-separated
+    /// `capture=<file>`, `ppm=<n>`, `timeline=<file>`.
     pub fn for_device(realtime: bool, device: &str) -> Self {
-        let out = Self::new(realtime);
-        match device.strip_prefix("capture:") {
-            Some(path) => match out.capture_to(std::path::Path::new(path)) {
+        let mut out = Self::new(realtime);
+        if let Some(path) = device.strip_prefix("capture:") {
+            return match Self::new(realtime).capture_to(std::path::Path::new(path)) {
                 Ok(o) => o,
                 Err(e) => {
                     log::warn!("null output capture {path}: {e}");
-                    Self::new(realtime)
+                    out
                 }
-            },
-            None => out,
+            };
         }
+        for opt in device.split(';') {
+            let Some((k, v)) = opt.split_once('=') else {
+                continue;
+            };
+            let file = || {
+                std::fs::File::create(v.trim())
+                    .map(std::io::BufWriter::new)
+                    .map_err(|e| log::warn!("null output {k}={v}: {e}"))
+                    .ok()
+            };
+            match k.trim() {
+                "ppm" => out.ppm = v.trim().parse().unwrap_or(0.0),
+                "capture" => out.capture = file(),
+                "timeline" => {
+                    epoch();
+                    out.timeline = file();
+                }
+                _ => {}
+            }
+        }
+        out
     }
 
     /// A counter shared with the caller: total frames written since creation.
@@ -173,13 +215,27 @@ impl Output for NullOutput {
         }
         if self.realtime {
             // Pretend to hold a quarter second of buffer: sleep until the queue is below that.
-            let dur = Duration::from_secs_f64(n as f64 / fmt.rate as f64);
+            let dur = Duration::from_secs_f64(n as f64 / self.real_rate(fmt.rate));
             let now = Instant::now();
-            let end = match self.clock {
-                Some(c) if c > now => c + dur,
-                _ => now + dur,
+            let begin = match self.clock {
+                Some(c) if c > now => c,
+                _ => now,
             };
+            let end = begin + dur;
             self.clock = Some(end);
+            if let Some(t) = &mut self.timeline {
+                use std::io::Write;
+                let at = begin.duration_since(epoch()).as_nanos() as u64;
+                let mut rec = Vec::with_capacity(12 + frames.len() * 4);
+                rec.extend(at.to_le_bytes());
+                rec.extend((n as u32).to_le_bytes());
+                for w in frames {
+                    rec.extend(w.to_le_bytes());
+                }
+                t.write_all(&rec)
+                    .and_then(|_| t.flush())
+                    .map_err(|e| OutputError::Backend(e.to_string()))?;
+            }
             let ahead = end.saturating_duration_since(now);
             if ahead > Duration::from_millis(250) {
                 std::thread::sleep(ahead - Duration::from_millis(250));
@@ -218,7 +274,8 @@ impl Output for NullOutput {
     fn queued_frames(&self) -> usize {
         match (self.format, self.clock) {
             (Some(f), Some(c)) => {
-                (c.saturating_duration_since(Instant::now()).as_secs_f64() * f.rate as f64) as usize
+                (c.saturating_duration_since(Instant::now()).as_secs_f64() * self.real_rate(f.rate))
+                    as usize
             }
             _ => 0,
         }

@@ -158,6 +158,7 @@ implemented and tested here; the notes say where we differ.
 | Exclusive output | ASIO/WASAPI, CoreAudio hog, ALSA | ASIO (own loader, no SDK), WASAPI exclusive, CoreAudio hog + integer mode, ALSA hw: | matched; ASIO tested against a fake driver only, not yet with a real one |
 | Native DSD on Windows | via ASIO | via ASIO (driver switched to DSD, 1-bit bytes in either bit order) and DoP; WASAPI: DoP, opt-in driver GUID | matched in code; not yet tested on a DAC |
 | Network endpoint | NAA | Cadenza endpoint (`cadenza endpoint`, mDNS, TCP, ack-paced, PCM + DSD) | matched; our own protocol, not NAA-compatible |
+| Multi-room | none | Sync groups of endpoints (`endpoint://a+b+c`): the first is the clock, the others follow its DAC (PCM: adaptive resampling; DSD: word slips) | ahead: HQPlayer has none. In a simulation with DACs ±150 ppm off: within about 1.5 samples at 48 kHz once settled; not yet tried on real DACs over a real LAN |
 | GPU offload | CUDA only (64-bit) | CUDA (64-bit, driver only – no toolkit) **and wgpu: Vulkan / Metal / DX12 on AMD, Intel, Apple Silicon and NVIDIA** (64-bit where the card has it, double-f32 ≈48-bit elsewhere); also builds and runs without a GPU; the upsampler's FFT polyphase core, the time-domain 44.1 ↔ 48 kHz stage and the room convolution run on it, verified against the CPU engine (CUDA through a CPU model of the exact kernels; wgpu on real Vulkan in CI with Mesa's software driver: 1.2–2.4e-15 relative in f64, 1–3e-14 in double-f32) and benchmarked (`cadenza bench`, row `upsampling (GPU)`) | exceeded on hardware: HQPlayer has no AMD / Intel / Apple GPU support. Not yet measured on real AMD / Intel / Apple cards, and the CUDA kernels are not yet run on an NVIDIA card since the rational stage was added (none here) |
 | 64-bit processing | yes | yes everywhere | matched |
 | UPnP / Roon / control | UPnP renderer, Roon via NAA | UPnP/DLNA MediaRenderer (AVTransport, RenderingControl, ConnectionManager, gapless next URI, events) with OpenHome services, HTTP API, web UI, Encore device | matched: UPnP AV and OpenHome (Product, Playlist, Volume, Time, Info) – tested with scripted control points, not yet with BubbleUPnP / Kazoo / mconnect themselves; no Roon |
@@ -218,8 +219,11 @@ to do it:
    bit. Not yet tried on DST files from a real SACD authoring tool (none here). Decoding takes
    about 0.1 core for stereo and at most half a core for 5.1 with the longest filters. SACD ISO,
    CUE sheets and gapless DSD are done too (see "SACD images and CUE sheets").
-6. **Synchronised multi-room** between Cadenza endpoints (sample-accurate clock sync over the LAN).
-   HQPlayer has no multi-room at all.
+6. **Synchronised multi-room** between Cadenza endpoints – done in code (see "Multi-room" under
+   Endpoint). HQPlayer has no multi-room at all. Measured so far only in a simulation on one machine
+   (endpoints with simulated DACs 150 ppm fast and 120 ppm slow): the followers stay within about
+   1.5 samples (30 µs) of the leader at 48 kHz once settled, 5 samples at most in the first two
+   seconds; DSD (DoP) within 6 frames (34 µs). Not yet on real DACs over a real network.
 7. **Room correction built in** – measure with a USB microphone from the web UI (sweep, capture, compute the
    correction FIR). HQPlayer needs REW or Acourate outside the program. Headphone crossfeed and HRTF
    presets in the engine as well.
@@ -582,6 +586,36 @@ sender streams the final words (PCM or DSD, DoP or native) and keeps at most hal
 in flight, paced by the endpoint's acknowledgements, which carry its DAC-clock position –
 no resampling anywhere, one clock. A second sender is refused while one is playing.
 
+### Multi-room
+
+```bash
+cadenza serve --backend "endpoint://Living room+Kitchen+Study"
+```
+
+One stream, rendered once, played in step on several endpoints:
+
+- The **first endpoint is the clock**: it plays bit-perfect on its own DAC, as a single
+  endpoint does. The sender measures every endpoint's clock offset with pings (the fastest
+  recent round trip wins) and fits the leader's DAC timeline from its acknowledgements –
+  which sample it presents when.
+- Every endpoint **starts on the same instant** (scheduled 0.7 s ahead), and each
+  **follower steers onto the leader's timeline**: it measures its own DAC's real rate and
+  plays at (leader's rate ÷ its own) through a 48-tap windowed-sinc resampler (better than
+  −90 dB; a few hundred ppm at most), with a control loop trimming what is left. Errors over
+  10 ms (a seek, a pause, a network stall) are fixed by a jump instead.
+- **DSD** cannot be resampled: a DSD follower slips one native word or one DoP frame pair
+  (keeping the markers right) when it is more than that off. Each slip is 32 DSD bits;
+  it may be audible as a faint tick, a few times a second for a DAC 100 ppm off.
+- Followers are therefore **not bit-perfect** (the leader is). Endpoints need this version
+  (protocol 2); older ones still work on their own. The DACs' own internal delays are
+  not measured: different DAC models may sit a fixed few samples apart.
+
+Tested: three endpoints on one machine with simulated DACs (exact, +150 ppm, −120 ppm),
+recording when each sample reached each "DAC" – within about 1.5 samples at 48 kHz once
+settled; and a DoP group across a seek – within 6 frames. Clock sync over a real LAN adds
+roughly the ping asymmetry (tens of microseconds on wired Ethernet, more on Wi-Fi). Not yet
+tried on real DACs.
+
 ## GPU offload (CUDA)
 
 Build with `--features cuda`. Nothing links against CUDA: `cudarc` loads `libcuda.so.1` /
@@ -712,6 +746,8 @@ SwiftShader, WARP) are slower than the CPU engine and are skipped unless
 - [ ] ASIO output on Windows (native DSD without a driver GUID)
 - [x] UPnP/DLNA MediaRenderer and OpenHome services
 - [x] AirPlay 1 receiver
+- [x] DST-compressed DFF, SACD ISO, CUE sheets, gapless DSD
+- [x] Multi-room sync groups of endpoints
 - [ ] MPRIS, Roon
 - [ ] Non-uniformly partitioned convolution for lower latency with long impulses
 - [ ] "v3"-class modulators and more poly-sinc variants

@@ -8,9 +8,11 @@
 //! network hiccup costs one gap instead of a cascade. Every received block is answered
 //! with an [`Ack`] carrying the player's clock position.
 
-use super::protocol::{Ack, Caps, Message, Open};
-use super::{discovery, EndpointConfig, PROTOCOL_VERSION};
-use crate::output::{self, DeviceInfo, Output, OutputError, OutputFormat};
+use super::protocol::{Ack, Caps, Message, Open, Schedule};
+use super::sync::{Correction, Follower, Resampler, Timeline};
+use super::{discovery, EndpointConfig, MIN_PROTOCOL_VERSION, PROTOCOL_VERSION};
+use crate::output::{self, DeviceInfo, Encoding, Output, OutputError, OutputFormat};
+use cadenza_dsp::dsd::DsdPacking;
 use std::io::{self, BufReader, BufWriter};
 use std::net::{SocketAddr, TcpListener, TcpStream};
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
@@ -100,6 +102,20 @@ impl JitterBuffer {
         Some(out)
     }
 
+    /// The next word, if any.
+    pub fn peek(&self) -> Option<i32> {
+        self.words.front().copied()
+    }
+
+    /// Throw away up to `frames` frames (multi-room: skipping what is already late);
+    /// returns how many.
+    pub fn drop_frames(&mut self, frames: usize) -> usize {
+        let n = frames.min(self.queued_frames());
+        self.words.drain(..n * self.channels);
+        self.played += n as u64;
+        n
+    }
+
     /// Take everything (drain): the remaining words, regardless of prefill.
     pub fn pop_all(&mut self) -> Vec<i32> {
         let out: Vec<i32> = self.words.drain(..).collect();
@@ -108,10 +124,13 @@ impl JitterBuffer {
         out
     }
 
-    /// Drop everything queued (discard) and go back to filling.
+    /// Drop everything queued (discard) and go back to filling. The played / received
+    /// counts start over too, as the sender's do.
     pub fn clear(&mut self) {
         self.words.clear();
         self.running = false;
+        self.played = 0;
+        self.received = 0;
     }
 }
 
@@ -369,6 +388,14 @@ struct Stream {
     last_seq: AtomicU64,
     /// Nanoseconds since the session started, for the acks' clock field.
     started: Instant,
+    /// The timeline to play on (version 2 sync), if the sender set one.
+    schedule: Mutex<Option<Schedule>>,
+    /// Stream position of the first frame after `Open` / `Discard`.
+    base: Mutex<Option<u64>>,
+    /// Set by `Discard`: the player starts its sync state over.
+    reset: AtomicBool,
+    /// The last presentation measurement: (stream position at the DAC, clock ns).
+    presenting: Mutex<(u64, u64)>,
 }
 
 impl Session {
@@ -380,7 +407,7 @@ impl Session {
         // Handshake.
         match Message::read_from(&mut reader)? {
             Message::Hello(h) => {
-                if h.version != PROTOCOL_VERSION {
+                if !(MIN_PROTOCOL_VERSION..=PROTOCOL_VERSION).contains(&h.version) {
                     send(&Message::Error(format!(
                         "protocol version {} not supported (endpoint speaks {PROTOCOL_VERSION})",
                         h.version
@@ -464,6 +491,10 @@ impl Session {
                         device_queued: AtomicU64::new(0),
                         last_seq: AtomicU64::new(0),
                         started: start,
+                        schedule: Mutex::new(None),
+                        base: Mutex::new(None),
+                        reset: AtomicBool::new(false),
+                        presenting: Mutex::new((Ack::UNKNOWN, 0)),
                     });
                     let player = {
                         let st = Arc::clone(&st);
@@ -479,7 +510,7 @@ impl Session {
                 }
                 Message::Frames {
                     seq,
-                    position: _,
+                    position,
                     words,
                 } => {
                     let Some((st, _, _)) = &open else {
@@ -491,6 +522,7 @@ impl Session {
                     }
                     expected_seq = seq + 1;
                     st.last_seq.store(seq, Ordering::Relaxed);
+                    st.base.lock().unwrap().get_or_insert(position);
                     let ack = {
                         let mut b = st.buffer.lock().unwrap();
                         b.push(&words);
@@ -502,6 +534,7 @@ impl Session {
                                 + st.device_queued.load(Ordering::Relaxed),
                             underruns: b.underruns(),
                             mono_ns: start.elapsed().as_nanos() as u64,
+                            presenting: Ack::UNKNOWN,
                         }
                     };
                     st.cv.notify_all();
@@ -516,6 +549,23 @@ impl Session {
                 Message::Discard => {
                     if let Some((st, _, _)) = &open {
                         st.buffer.lock().unwrap().clear();
+                        *st.base.lock().unwrap() = None;
+                        *st.presenting.lock().unwrap() = (Ack::UNKNOWN, 0);
+                        st.reset.store(true, Ordering::Relaxed);
+                        st.cv.notify_all();
+                    }
+                }
+                Message::Sync { id, t0 } => {
+                    // Answered at once: the round trip is the uncertainty.
+                    send(&Message::SyncReply {
+                        id,
+                        t0,
+                        server: start.elapsed().as_nanos() as u64,
+                    })?;
+                }
+                Message::Schedule(sch) => {
+                    if let Some((st, _, _)) = &open {
+                        *st.schedule.lock().unwrap() = Some(sch);
                         st.cv.notify_all();
                     }
                 }
@@ -586,6 +636,10 @@ impl Session {
 /// that has stopped sending (its high-water mark reached) still sees the DAC clock advance
 /// and knows when it may continue. Those acks are what pace the sender; the per-block acks
 /// from the reader only confirm receipt.
+///
+/// With a [`Schedule`] (multi-room) the player starts so that the scheduled position
+/// reaches the DAC on time, and a follower keeps steering to the timeline: PCM through
+/// the variable-ratio [`Resampler`], DSD by slipping whole words, big errors by a jump.
 fn play(
     st: Arc<Stream>,
     mut out: Box<dyn Output>,
@@ -595,13 +649,19 @@ fn play(
 ) -> Box<dyn Output> {
     let clock_ack = |st: &Stream| {
         let b = st.buffer.lock().unwrap();
+        let (presenting, at) = *st.presenting.lock().unwrap();
         let ack = Ack {
             seq: st.last_seq.load(Ordering::Relaxed),
             received: b.received(),
             played: b.played(),
             queued: b.queued_frames() as u64 + st.device_queued.load(Ordering::Relaxed),
             underruns: b.underruns(),
-            mono_ns: st.started.elapsed().as_nanos() as u64,
+            mono_ns: if presenting == Ack::UNKNOWN {
+                st.started.elapsed().as_nanos() as u64
+            } else {
+                at
+            },
+            presenting,
         };
         drop(b);
         // A failed send means the connection is gone; the reader thread reports that.
@@ -620,6 +680,7 @@ fn play(
     // Underrun *events* already counted into `counters` (the jitter buffer counts events;
     // this loop writes many silence chunks per event and must not count each one).
     let mut underruns_seen = 0u64;
+    let mut sync = SyncPlayer::new(format);
     loop {
         if st.stop.load(Ordering::Relaxed) {
             break;
@@ -628,6 +689,11 @@ fn play(
         if paused != paused_device {
             let _ = out.pause(paused);
             paused_device = paused;
+            // The timeline does not survive a pause: start over on the next schedule.
+            sync.restart();
+        }
+        if st.reset.swap(false, Ordering::Relaxed) {
+            sync = SyncPlayer::new(format);
         }
         if st.drain.load(Ordering::Relaxed) {
             let rest = st.buffer.lock().unwrap().pop_all();
@@ -643,6 +709,30 @@ fn play(
             st.drain.store(false, Ordering::Relaxed);
             st.drained.store(true, Ordering::Relaxed);
             continue;
+        }
+        let schedule = *st.schedule.lock().unwrap();
+        if let (Some(sch), false) = (schedule, paused) {
+            match sync.step(&st, &mut *out, sch, chunk_frames) {
+                Ok(Some(frames)) => {
+                    counters
+                        .frames_played
+                        .fetch_add(frames as u64, Ordering::Relaxed);
+                    st.device_queued
+                        .store(out.queued_frames() as u64, Ordering::Relaxed);
+                    clock_ack(&st);
+                    continue;
+                }
+                Ok(None) => {
+                    let b = st.buffer.lock().unwrap();
+                    let _ = st.cv.wait_timeout(b, Duration::from_millis(5));
+                    continue;
+                }
+                Err(e) => {
+                    log::error!("endpoint: output write: {e}");
+                    thread::sleep(Duration::from_millis(100));
+                    continue;
+                }
+            }
         }
         let chunk = {
             let mut b = st.buffer.lock().unwrap();
@@ -696,6 +786,270 @@ fn play(
     }
     let _ = out.discard();
     out
+}
+
+/// The player's multi-room state for one stream.
+struct SyncPlayer {
+    format: OutputFormat,
+    channels: usize,
+    /// DoP frames carry alternating markers: slips and silence come in pairs.
+    dop: bool,
+    started: bool,
+    follower: Follower,
+    resampler: Option<Resampler>,
+    /// Input frames consumed outside the resampler (start trims, drops, DSD).
+    consumed: u64,
+    /// Frames written to the output (silence included).
+    out_written: u64,
+    /// Since output frame `.0`, output frame `n` is stream position `n + .1` (the data
+    /// run in progress; silence, slips and resampling end it).
+    run: Option<(u64, i64)>,
+    /// Our own DAC's clock: output frames presented over time. Its slope is our real
+    /// sample rate, so a follower plays at (leader rate ÷ ours) from the start and the
+    /// control loop only trims what is left.
+    dac: Timeline,
+}
+
+impl SyncPlayer {
+    fn new(format: OutputFormat) -> Self {
+        let dop = matches!(
+            format.encoding,
+            Encoding::Dsd {
+                packing: DsdPacking::Dop,
+                ..
+            }
+        );
+        Self {
+            format,
+            channels: format.channels.max(1) as usize,
+            dop,
+            started: false,
+            follower: Follower::new(format.rate),
+            resampler: None,
+            consumed: 0,
+            out_written: 0,
+            run: None,
+            dac: Timeline::default(),
+        }
+    }
+
+    /// Write data or silence, keeping the output → stream position map.
+    fn write(
+        &mut self,
+        out: &mut dyn Output,
+        words: &[i32],
+        data_at: Option<u64>,
+    ) -> Result<(), OutputError> {
+        let n = (words.len() / self.channels) as u64;
+        match (data_at, self.run) {
+            (Some(p), Some((from, off)))
+                if from as i64 + off <= p as i64 && self.out_written as i64 + off == p as i64 => {}
+            (Some(p), _) => self.run = Some((self.out_written, p as i64 - self.out_written as i64)),
+            (None, _) => self.run = None,
+        }
+        out.write(words)?;
+        self.out_written += n;
+        Ok(())
+    }
+
+    /// Wait for the timeline again (after a pause): the next step re-aligns by jumping.
+    fn restart(&mut self) {
+        self.follower.reset();
+        self.dac.clear();
+    }
+
+    fn unit(&self) -> usize {
+        if self.dop {
+            2
+        } else {
+            1
+        }
+    }
+
+    /// Silence frames, keeping DoP's marker alternation with `next` (the next word).
+    fn silence(&self, frames: usize, next: Option<i32>) -> Vec<i32> {
+        let mut v = Vec::with_capacity(frames * self.channels);
+        if self.dop {
+            let first = next.map_or(0x05, |w| ((w as u32 >> 16) & 0xff) as u8);
+            let other = if first == 0x05 { 0xfa } else { 0x05 };
+            for i in 0..frames {
+                let m = if i % 2 == 0 { first } else { other } as u32;
+                v.extend(std::iter::repeat_n(
+                    ((m << 16) | 0x6969) as i32,
+                    self.channels,
+                ));
+            }
+        } else {
+            let w = if self.format.is_dsd() {
+                0x6969_6969u32 as i32
+            } else {
+                0
+            };
+            v.resize(frames * self.channels, w);
+        }
+        v
+    }
+
+    fn round_unit(&self, frames: usize) -> usize {
+        frames / self.unit() * self.unit()
+    }
+
+    /// Stream position of the next frame to reach the output.
+    fn position(&self, base: u64) -> f64 {
+        base as f64
+            + self.consumed as f64
+            + self.resampler.as_ref().map_or(0.0, |r| r.input_position())
+    }
+
+    /// One step: write something and return the frames written, or `None` to wait.
+    fn step(
+        &mut self,
+        st: &Stream,
+        out: &mut dyn Output,
+        sch: Schedule,
+        chunk: usize,
+    ) -> Result<Option<usize>, OutputError> {
+        let Some(base) = *st.base.lock().unwrap() else {
+            return Ok(None);
+        };
+        let rate = self.format.rate as f64;
+        let now_ns = st.started.elapsed().as_nanos() as f64;
+        let queued = out.queued_frames() as u64;
+        if self.started {
+            self.dac
+                .add(self.out_written.saturating_sub(queued), now_ns as i64);
+        }
+        // Our DAC's real frame period (the nominal one until measured).
+        let own_ns = self
+            .dac
+            .anchor(1e9 / rate)
+            .map_or(1e9 / rate, |a| a.frame_ns);
+        let present_ns = now_ns + queued as f64 * own_ns;
+        let pos = self.position(base);
+        let target = sch.at_ns as f64 + (pos - sch.position as f64) * sch.frame_ns;
+        let late_s = (present_ns - target) / 1e9;
+        let ch = self.channels;
+        let mut b = st.buffer.lock().unwrap();
+        let next_word = b.peek();
+
+        if !self.started {
+            if !b.running() {
+                return Ok(None); // still filling the jitter buffer
+            }
+            if late_s < 0.0 {
+                // Early: silence up to the start (a chunk at a time).
+                let n = self.round_unit(((-late_s * rate).round() as usize).min(chunk));
+                if n == 0 || -late_s * rate < chunk as f64 {
+                    self.started = true;
+                }
+                drop(b);
+                if n > 0 {
+                    let w = self.silence(n, next_word);
+                    self.write(out, &w, None)?;
+                }
+                return Ok(Some(n));
+            }
+            // Late: skip what should already have played.
+            let n = self.round_unit((late_s * rate).round() as usize);
+            let got = b.drop_frames(n);
+            self.consumed += got as u64;
+            if got == n {
+                self.started = true;
+            }
+            return Ok(Some(0));
+        }
+
+        let mut ratio = 1.0;
+        if sch.follow {
+            match self.follower.update(late_s, CHUNK_MS as f64 / 1000.0) {
+                Correction::Drop(n) => {
+                    let n = self.round_unit(n);
+                    match &mut self.resampler {
+                        // Frames the resampler holds come first: skip inside it.
+                        Some(r) => r.skip(n),
+                        None => {
+                            let got = b.drop_frames(n);
+                            self.consumed += got as u64;
+                        }
+                    }
+                    return Ok(Some(0));
+                }
+                Correction::Insert(n) => {
+                    drop(b);
+                    let n = self.round_unit(n);
+                    let w = self.silence(n, next_word);
+                    self.write(out, &w, None)?;
+                    return Ok(Some(n));
+                }
+                // Feed-forward: the leader's rate over ours, trimmed by the loop.
+                Correction::Ratio(r) => ratio = r * own_ns / sch.frame_ns,
+            }
+            if self.format.is_dsd() {
+                // DSD cannot be resampled: slip one unit when off by more than one.
+                let unit_s = self.unit() as f64 / rate;
+                if late_s > unit_s {
+                    let got = b.drop_frames(self.unit());
+                    self.consumed += got as u64;
+                } else if late_s < -unit_s {
+                    drop(b);
+                    let w = self.silence(self.unit(), next_word);
+                    self.write(out, &w, None)?;
+                    return Ok(Some(self.unit()));
+                }
+                ratio = 1.0;
+            }
+        }
+
+        if ratio == 1.0 && self.resampler.is_none() {
+            let Some(words) = b.pop(chunk) else {
+                return Ok(None);
+            };
+            drop(b);
+            let n = words.len() / ch;
+            let at = self.position(base) as u64;
+            self.consumed += n as u64;
+            self.write(out, &words, Some(at))?;
+            self.measure(st, out);
+            return Ok(Some(n));
+        }
+
+        // PCM follower: through the variable-ratio resampler.
+        let r = self.resampler.get_or_insert_with(|| Resampler::new(ch));
+        if r.pending_frames() < chunk + 64 {
+            if let Some(words) = b.pop(chunk) {
+                let scale = (1u64 << (self.format.bits - 1)) as f64;
+                let input: Vec<f64> = words.iter().map(|w| *w as f64 / scale).collect();
+                r.push(&input);
+            }
+        }
+        drop(b);
+        let mut buf = Vec::with_capacity(chunk * ch);
+        let n = r.produce(ratio, chunk, &mut buf);
+        if n == 0 {
+            return Ok(None);
+        }
+        let scale = (1u64 << (self.format.bits - 1)) as f64;
+        let (lo, hi) = (-scale, scale - 1.0);
+        let words: Vec<i32> = buf
+            .iter()
+            .map(|v| (v * scale).round().clamp(lo, hi) as i32)
+            .collect();
+        // Resampled output has no exact position map (and only the leader's matters).
+        self.write(out, &words, None)?;
+        Ok(Some(n))
+    }
+
+    /// Record what the DAC presents now, for the acks (the leader's timeline): known only
+    /// while the frame at the DAC belongs to the current data run.
+    fn measure(&self, st: &Stream, out: &dyn Output) {
+        let now = st.started.elapsed().as_nanos() as u64;
+        let at_dac = self.out_written.saturating_sub(out.queued_frames() as u64);
+        let presenting = match self.run {
+            Some((from, off)) if at_dac >= from => (at_dac as i64 + off) as u64,
+            _ => Ack::UNKNOWN,
+        };
+        *st.presenting.lock().unwrap() = (presenting, now);
+    }
 }
 
 #[cfg(test)]

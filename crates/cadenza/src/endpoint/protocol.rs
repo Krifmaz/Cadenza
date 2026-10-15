@@ -16,6 +16,11 @@
 //! client → Pause/Discard/Drain/Close  server → Drained after a Drain
 //! ```
 //!
+//! Version 2 adds multi-room sync: `Sync` pings (answered at once with the endpoint's
+//! clock), `Schedule` (when a stream position must reach the DAC, in the endpoint's
+//! clock, and whether to follow that timeline or just start on it) and
+//! [`Ack::presenting`]. A version 1 peer simply never sees them.
+//!
 //! `position` is the stream position (frames) of the first frame of the block, `seq`
 //! counts blocks; both let the endpoint spot gaps. [`Ack::played`] is the endpoint's
 //! device clock (frames the local output has consumed), [`Ack::queued`] what still waits
@@ -75,6 +80,28 @@ pub struct Ack {
     pub underruns: u64,
     /// Endpoint monotonic clock, nanoseconds (for latency estimates).
     pub mono_ns: u64,
+    /// Stream position the DAC presents at `mono_ns` ([`Ack::UNKNOWN`] when not measured;
+    /// version 2).
+    pub presenting: u64,
+}
+
+impl Ack {
+    /// `presenting` when the ack carries no measurement.
+    pub const UNKNOWN: u64 = u64::MAX;
+}
+
+/// `Schedule` payload (version 2): stream `position` reaches the DAC at `at_ns` on the
+/// endpoint's clock, and later positions every `frame_ns` after it.
+#[derive(Clone, Copy, Debug, PartialEq, Serialize, Deserialize)]
+pub struct Schedule {
+    /// Stream position.
+    pub position: u64,
+    /// Endpoint clock, ns.
+    pub at_ns: i64,
+    /// Nanoseconds per frame (the group leader's real rate).
+    pub frame_ns: f64,
+    /// Steer to this timeline (a follower); otherwise only start on it (the leader).
+    pub follow: bool,
 }
 
 /// Every message.
@@ -111,6 +138,24 @@ pub enum Message {
     Close,
     /// Either direction.
     Error(String),
+    /// Client → server (v2): a clock ping sent at the client's `t0`.
+    Sync {
+        /// Ping id.
+        id: u64,
+        /// Client clock, ns.
+        t0: u64,
+    },
+    /// Server → client (v2): the answer, with the endpoint's clock when it arrived.
+    SyncReply {
+        /// Ping id.
+        id: u64,
+        /// The client's `t0`, echoed.
+        t0: u64,
+        /// Endpoint clock, ns (the same clock as [`Ack::mono_ns`]).
+        server: u64,
+    },
+    /// Client → server (v2): the timeline to play on.
+    Schedule(Schedule),
 }
 
 const T_HELLO: u8 = 0x01;
@@ -125,6 +170,9 @@ const T_DRAIN: u8 = 0x09;
 const T_DRAINED: u8 = 0x0A;
 const T_CLOSE: u8 = 0x0B;
 const T_ERROR: u8 = 0x0C;
+const T_SYNC: u8 = 0x0D;
+const T_SYNC_REPLY: u8 = 0x0E;
+const T_SCHEDULE: u8 = 0x0F;
 
 fn bad(msg: impl Into<String>) -> io::Error {
     io::Error::new(io::ErrorKind::InvalidData, msg.into())
@@ -187,6 +235,7 @@ impl Message {
                     a.queued,
                     a.underruns,
                     a.mono_ns,
+                    a.presenting,
                 ] {
                     out.extend(v.to_le_bytes());
                 }
@@ -202,6 +251,21 @@ impl Message {
             Message::Error(e) => {
                 out.push(T_ERROR);
                 out.extend(e.as_bytes());
+            }
+            Message::Sync { id, t0 } => {
+                out.push(T_SYNC);
+                out.extend(id.to_le_bytes());
+                out.extend(t0.to_le_bytes());
+            }
+            Message::SyncReply { id, t0, server } => {
+                out.push(T_SYNC_REPLY);
+                for v in [id, t0, server] {
+                    out.extend(v.to_le_bytes());
+                }
+            }
+            Message::Schedule(s) => {
+                out.push(T_SCHEDULE);
+                out.extend(json(s)?);
             }
         }
         Ok(out)
@@ -236,7 +300,19 @@ impl Message {
                 queued: u64_at(p, 24)?,
                 underruns: u64_at(p, 32)?,
                 mono_ns: u64_at(p, 40)?,
+                // Version 1 acks end before it.
+                presenting: u64_at(p, 48).unwrap_or(Ack::UNKNOWN),
             }),
+            T_SYNC => Message::Sync {
+                id: u64_at(p, 0)?,
+                t0: u64_at(p, 8)?,
+            },
+            T_SYNC_REPLY => Message::SyncReply {
+                id: u64_at(p, 0)?,
+                t0: u64_at(p, 8)?,
+                server: u64_at(p, 16)?,
+            },
+            T_SCHEDULE => Message::Schedule(from_json(p)?),
             T_PAUSE => Message::Pause(p.first().copied().unwrap_or(0) != 0),
             T_DISCARD => Message::Discard,
             T_DRAIN => Message::Drain,
@@ -327,7 +403,29 @@ mod tests {
             queued: 40,
             underruns: 1,
             mono_ns: 99,
+            presenting: 55,
         }));
+        round_trip(Message::Sync { id: 3, t0: 1_000 });
+        round_trip(Message::SyncReply {
+            id: 3,
+            t0: 1_000,
+            server: 2_000,
+        });
+        round_trip(Message::Schedule(Schedule {
+            position: 4096,
+            at_ns: -12,
+            frame_ns: 22675.7,
+            follow: true,
+        }));
+        // A version 1 ack (no `presenting`) still parses.
+        let mut v1 = vec![T_ACK];
+        for v in [1u64, 2, 3, 4, 5, 6] {
+            v1.extend(v.to_le_bytes());
+        }
+        match Message::decode(&v1).unwrap() {
+            Message::Ack(a) => assert_eq!((a.mono_ns, a.presenting), (6, Ack::UNKNOWN)),
+            m => panic!("{m:?}"),
+        }
         round_trip(Message::Pause(true));
         round_trip(Message::Pause(false));
         round_trip(Message::Discard);
