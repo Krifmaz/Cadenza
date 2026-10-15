@@ -37,6 +37,8 @@ pub enum DsdContainer {
     Dsf,
     /// Philips DSDIFF.
     Dff,
+    /// A track of an SACD disc image (`album.iso#3`).
+    Sacd,
 }
 
 impl DsdContainer {
@@ -45,8 +47,37 @@ impl DsdContainer {
         match self {
             DsdContainer::Dsf => "DSF",
             DsdContainer::Dff => "DFF",
+            DsdContainer::Sacd => "SACD",
         }
     }
+}
+
+/// `album.iso#3` as a source: the image's own source, multichannel area, track number.
+pub fn sacd_track(source: &Source) -> Option<(Source, bool, u32)> {
+    match source {
+        Source::Path { path } => {
+            let s = path.to_str()?;
+            let (base, mc, n) = super::sacd::parse_fragment(s)?;
+            Some((Source::Path { path: base.into() }, mc, n))
+        }
+        Source::Url { url, headers } => {
+            let (base, mc, n) = super::sacd::parse_fragment(url)?;
+            Some((
+                Source::Url {
+                    url: base.to_string(),
+                    headers: headers.clone(),
+                },
+                mc,
+                n,
+            ))
+        }
+        Source::Live { .. } => None,
+    }
+}
+
+/// Whether a source is DSD: a `.dsf` / `.dff` file or an SACD image track.
+pub fn is_dsd_source(source: &Source) -> bool {
+    source.extension().is_some_and(|e| is_dsd_extension(&e)) || sacd_track(source).is_some()
 }
 
 /// Whether a file extension means DSD.
@@ -77,6 +108,8 @@ pub struct DsdInfo {
     data_len: u64,
     /// DST-compressed DSDIFF.
     dst: Option<DstLayout>,
+    /// A DST-coded SACD area.
+    sacd_dst: bool,
 }
 
 /// Where the DST frames of a DSDIFF file are.
@@ -92,15 +125,16 @@ struct DstLayout {
 impl DsdInfo {
     /// `DSF`, `DFF` or `DFF DST`.
     pub fn codec_label(&self) -> &'static str {
-        match (self.container, &self.dst) {
-            (DsdContainer::Dff, Some(_)) => "DFF DST",
-            (c, _) => c.codec_name(),
+        match (self.container, &self.dst, self.sacd_dst) {
+            (DsdContainer::Dff, Some(_), _) => "DFF DST",
+            (DsdContainer::Sacd, _, true) => "SACD DST",
+            (c, _, _) => c.codec_name(),
         }
     }
 
     /// Whether the data is DST-compressed.
     pub fn is_dst(&self) -> bool {
-        self.dst.is_some()
+        self.dst.is_some() || self.sacd_dst
     }
 
     /// Duration in seconds.
@@ -172,6 +206,17 @@ pub struct DsdReader<R: Read + Seek> {
     /// an HTTP source reopens its connection on every seek).
     file_pos: u64,
     dst: Option<Box<DstState>>,
+    sacd: Option<Box<SacdState>>,
+    /// First frame of the range played (a CUE track); `pos` counts from here.
+    origin: u64,
+}
+
+/// An SACD track being read.
+struct SacdState {
+    track: super::sacd::TrackReader,
+    /// The frame in `frame`, if any.
+    current: Option<u32>,
+    frame: Vec<u8>,
 }
 
 /// DST decoding state: the frames found so far and the last one decoded.
@@ -233,6 +278,51 @@ impl<R: Read + Seek> DsdReader<R> {
             pos: 0,
             file_pos,
             dst,
+            sacd: None,
+            origin: 0,
+        })
+    }
+
+    /// Track `number` (1-based) of an SACD image, from the stereo area or with
+    /// `multichannel` the multichannel one.
+    pub fn new_sacd(mut src: R, multichannel: bool, number: u32) -> Result<Self, DsdDecodeError> {
+        use super::sacd;
+        let disc = sacd::read_disc(&mut src).map_err(|e| bad(e.to_string()))?;
+        let area = disc
+            .area(multichannel)
+            .or_else(|| disc.areas.first().filter(|_| !multichannel))
+            .ok_or_else(|| bad("no such area on the disc"))?;
+        let reader = sacd::TrackReader::new(area, number).map_err(|e| bad(e.to_string()))?;
+        let t = reader.track().clone();
+        let info = DsdInfo {
+            container: DsdContainer::Sacd,
+            rate: sacd::RATE,
+            channels: area.channels,
+            frames: t.frames as u64 * super::dst::bits_per_frame(sacd::RATE) as u64,
+            tags: Tags {
+                title: t.title.clone().or_else(|| Some(format!("Track {number}"))),
+                artist: t.performer.clone().or(disc.artist.clone()),
+                album: disc.title.clone(),
+            },
+            lsb_first: false,
+            block_size: 1,
+            data_offset: 0,
+            data_len: 0,
+            dst: None,
+            sacd_dst: area.dst,
+        };
+        Ok(Self {
+            src,
+            pos: 0,
+            file_pos: u64::MAX,
+            dst: None,
+            origin: 0,
+            sacd: Some(Box::new(SacdState {
+                frame: vec![0; reader.frame_bytes()],
+                track: reader,
+                current: None,
+            })),
+            info,
         })
     }
 
@@ -334,10 +424,43 @@ impl<R: Read + Seek> DsdReader<R> {
         Ok(true)
     }
 
+    fn read_sacd(&mut self, want: usize, planar: &mut [Vec<u8>]) -> Result<(), DsdDecodeError> {
+        let ch = self.info.channels as usize;
+        let frame_bytes = super::dst::bits_per_frame(self.info.rate) / 8;
+        let mut byte_pos = (self.origin + self.pos) / 8;
+        let mut collected = 0;
+        // The track reader seeks the source itself.
+        self.file_pos = u64::MAX;
+        while collected < want {
+            let n = (byte_pos / frame_bytes as u64) as u32;
+            let st = self.sacd.as_mut().expect("SACD state");
+            if st.current != Some(n) {
+                if !st
+                    .track
+                    .read_frame(&mut self.src, n, &mut st.frame)
+                    .map_err(|e| bad(e.to_string()))?
+                {
+                    break;
+                }
+                st.current = Some(n);
+            }
+            let off = (byte_pos % frame_bytes as u64) as usize;
+            let take = (frame_bytes - off).min(want - collected);
+            for i in off..off + take {
+                for (c, p) in planar.iter_mut().enumerate() {
+                    p.push(st.frame[i * ch + c]);
+                }
+            }
+            collected += take;
+            byte_pos += take as u64;
+        }
+        Ok(())
+    }
+
     fn read_dst(&mut self, want: usize, planar: &mut [Vec<u8>]) -> Result<(), DsdDecodeError> {
         let ch = self.info.channels as usize;
         let frame_bytes = super::dst::bits_per_frame(self.info.rate) / 8;
-        let mut byte_pos = self.pos / 8;
+        let mut byte_pos = (self.origin + self.pos) / 8;
         let mut collected = 0;
         while collected < want {
             let n = byte_pos / frame_bytes as u64;
@@ -371,8 +494,9 @@ impl<R: Read + Seek> DsdReader<R> {
         }
         let want = ((max_frames / 8).max(1) as u64).min(remaining_bytes) as usize;
         let mut planar: Vec<Vec<u8>> = (0..ch).map(|_| Vec::with_capacity(want)).collect();
-        let mut byte_pos = self.pos / 8;
+        let mut byte_pos = (self.origin + self.pos) / 8;
         match self.info.container {
+            DsdContainer::Sacd => self.read_sacd(want, &mut planar)?,
             DsdContainer::Dff if self.info.dst.is_some() => self.read_dst(want, &mut planar)?,
             DsdContainer::Dff => {
                 let mut buf = vec![0u8; want * ch];
@@ -418,6 +542,17 @@ impl<R: Read + Seek> DsdReader<R> {
         }
         self.pos = (self.pos + n as u64 * 8).min(self.info.frames.max(self.pos + 1));
         Ok(Some(planar))
+    }
+
+    /// Play only frames `start..end` (`None`: to the end); both are rounded down to whole
+    /// bytes. Positions and seeks are then relative to `start`.
+    pub fn set_range(&mut self, start: u64, end: Option<u64>) {
+        let total = self.origin + self.info.frames;
+        let start = (start.min(total) / 8) * 8;
+        let end = end.map_or(total, |e| (e.min(total) / 8) * 8).max(start);
+        self.origin = start;
+        self.info.frames = end - start;
+        self.pos = 0;
     }
 
     /// Seek to a frame (rounded down to a whole byte); returns the frame reached.
@@ -498,6 +633,7 @@ fn parse_dsf<R: Read + Seek>(src: &mut R) -> Result<DsdInfo, DsdDecodeError> {
         data_offset,
         data_len,
         dst: None,
+        sacd_dst: false,
     })
 }
 
@@ -637,6 +773,7 @@ fn parse_dff<R: Read + Seek>(
             data_offset: layout.first,
             data_len: layout.end - layout.first,
             dst: Some(layout),
+            sacd_dst: false,
         });
     }
     if compressed {
@@ -654,6 +791,7 @@ fn parse_dff<R: Read + Seek>(
         data_offset,
         data_len,
         dst: None,
+        sacd_dst: false,
     })
 }
 
@@ -745,6 +883,10 @@ pub struct DsdDecoder {
     finished: bool,
     /// Frames pushed into the converter since the last reset.
     pushed: u64,
+    /// The next track continues this one: leave the converter's tail for it.
+    continues: bool,
+    /// Converter output that belonged to the previous track (after [`DsdDecoder::adopt`]).
+    out_base: u64,
 }
 
 /// `Read + Seek + Send` as one trait object.
@@ -757,6 +899,16 @@ const CHUNK_FRAMES: usize = 32_768;
 impl DsdDecoder {
     /// Open a local file or URL.
     pub fn open(source: &Source) -> Result<Self, DsdDecodeError> {
+        if let Some((base, mc, n)) = sacd_track(source) {
+            let src: Box<dyn ReadSeek> = match &base {
+                Source::Url { url, headers } => {
+                    Box::new(super::source::HttpSource::open(url, headers)?)
+                }
+                Source::Path { path } => Box::new(io::BufReader::new(std::fs::File::open(path)?)),
+                Source::Live { .. } => unreachable!("not an image"),
+            };
+            return Self::from_dsd_reader(DsdReader::new_sacd(src, mc, n)?);
+        }
         let src: Box<dyn ReadSeek> = match source {
             Source::Path { path } => Box::new(std::fs::File::open(path)?),
             Source::Url { url, headers } => {
@@ -771,7 +923,10 @@ impl DsdDecoder {
 
     /// Open from any seekable byte source.
     pub fn from_reader(src: Box<dyn ReadSeek>) -> Result<Self, DsdDecodeError> {
-        let reader = DsdReader::new(src)?;
+        Self::from_dsd_reader(DsdReader::new(src)?)
+    }
+
+    fn from_dsd_reader(reader: DsdReader<Box<dyn ReadSeek>>) -> Result<Self, DsdDecodeError> {
         let pcm_rate = DsdToPcm::natural_pcm_rate(reader.info().rate);
         let converter = DsdToPcm::new(
             reader.info().rate,
@@ -784,7 +939,44 @@ impl DsdDecoder {
             pcm_rate,
             finished: false,
             pushed: 0,
+            continues: false,
+            out_base: 0,
         })
+    }
+
+    /// Mark that the next track continues this one without a gap (same rate and
+    /// channels): at the end the converter is not flushed but handed on.
+    pub fn set_continues(&mut self, on: bool) {
+        self.continues = on;
+    }
+
+    /// Whether [`DsdDecoder::adopt`] can take `prev`'s converter.
+    pub fn can_continue(&self, prev: &DsdDecoder) -> bool {
+        self.reader.info().rate == prev.reader.info().rate
+            && self.reader.info().channels == prev.reader.info().channels
+            && self.pcm_rate == prev.pcm_rate
+    }
+
+    /// Continue from `prev` (which ended with [`DsdDecoder::set_continues`]): take its
+    /// converter, so the DSD → PCM filters run on across the track change instead of
+    /// starting from silence. Returns `false` (nothing changed) when the formats differ.
+    pub fn adopt(&mut self, prev: &mut DsdDecoder) -> bool {
+        if !prev.continues || !self.can_continue(prev) || self.pushed != 0 {
+            return false;
+        }
+        std::mem::swap(&mut self.converter, &mut prev.converter);
+        self.out_base = self.converter.frames().1;
+        // What the converter still holds of the previous track plays first.
+        self.pushed = 0;
+        true
+    }
+
+    /// Play only DSD frames `start..end` of the file (see [`DsdReader::set_range`]).
+    pub fn set_range(&mut self, start: u64, end: Option<u64>) {
+        self.reader.set_range(start, end);
+        self.converter.reset();
+        self.pushed = 0;
+        self.finished = false;
     }
 
     /// Gain applied in the DSD → PCM conversion (e.g. +6 dB for SACD's 50 % modulation).
@@ -816,7 +1008,7 @@ impl DsdDecoder {
     }
     /// Position of the next PCM frame to be delivered, seconds.
     pub fn position_seconds(&self) -> f64 {
-        let (_, out) = self.converter.frames();
+        let out = self.converter.frames().1.saturating_sub(self.out_base);
         let base = self.reader.position_frames().saturating_sub(self.pushed);
         base as f64 / self.reader.info().rate as f64 + out as f64 / self.pcm_rate as f64
     }
@@ -841,6 +1033,10 @@ impl DsdDecoder {
             }
             None => {
                 self.finished = true;
+                if self.continues {
+                    // The next track takes the converter over, tail and all.
+                    return Ok(None);
+                }
                 self.converter.flush(&mut out);
                 self.pushed = 0;
             }

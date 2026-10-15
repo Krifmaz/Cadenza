@@ -457,7 +457,14 @@ fn devices() {
 }
 
 fn play(config: &Config, items: Vec<String>, seek: f64) -> anyhow::Result<()> {
-    let tracks: Vec<Track> = items.iter().map(|a| Track::from_arg(a)).collect();
+    let mut tracks: Vec<Track> = Vec::new();
+    for a in &items {
+        tracks.extend(
+            Track::from_arg(a)
+                .expand()
+                .map_err(|e| anyhow::anyhow!("{a}: {e}"))?,
+        );
+    }
     let engine = Engine::start(
         config.settings(),
         EngineOptions {

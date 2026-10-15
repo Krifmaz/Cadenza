@@ -396,3 +396,66 @@ fn matrix_preset_changes_the_output_channel_count() {
     e.shutdown();
     let _ = std::fs::remove_dir_all(dir);
 }
+
+/// Two DSD files that are one recording cut in two play to PCM exactly like the whole:
+/// the DSD → PCM converter runs on across the change instead of flushing and restarting.
+#[test]
+fn consecutive_dsd_tracks_play_gaplessly_to_pcm() {
+    use cadenza::decode::dsd::write_dsf;
+    use cadenza::decode::Tags;
+    let dir = temp_dir("dsd-gapless");
+    let bytes = 2_822_400 / 8; // 1 s per channel
+    let planar: Vec<Vec<u8>> = (0..2)
+        .map(|c| {
+            (0..bytes * 2)
+                .map(|i| if (i * 5 + c) % 3 == 0 { 0x96 } else { 0x69 })
+                .collect()
+        })
+        .collect();
+    let half = |r: std::ops::Range<usize>| -> Vec<Vec<u8>> {
+        planar.iter().map(|p| p[r.clone()].to_vec()).collect()
+    };
+    let whole = dir.join("whole.dsf");
+    let a = dir.join("a.dsf");
+    let b = dir.join("b.dsf");
+    write_dsf(&whole, 2_822_400, &planar, true, &Tags::default()).unwrap();
+    write_dsf(&a, 2_822_400, &half(0..bytes), true, &Tags::default()).unwrap();
+    write_dsf(
+        &b,
+        2_822_400,
+        &half(bytes..bytes * 2),
+        true,
+        &Tags::default(),
+    )
+    .unwrap();
+
+    let run = |files: &[&Path], capture: &Path| {
+        let mut s = settings(RateSetting::Auto, 24, "sinc-m", "none", false);
+        s.dsp.dsd_passthrough = false;
+        s.output.device = format!("capture:{}", capture.display());
+        let e = engine(s);
+        let runs = e.status().runs_finished;
+        e.play_queue(
+            files
+                .iter()
+                .map(|f| Track::from_arg(f.to_str().unwrap()))
+                .collect(),
+            0,
+            0.0,
+        );
+        let st = e.wait_until_finished(runs, Duration::from_secs(60));
+        assert_eq!(st.runs_finished, runs + 1, "did not finish");
+        assert_eq!(st.error, None);
+        e.shutdown();
+        std::fs::read(capture).unwrap()
+    };
+    let joined = run(&[&a, &b], &dir.join("joined.raw"));
+    let reference = run(&[&whole], &dir.join("whole.raw"));
+    assert!(reference.len() > 300_000 * 8);
+    assert_eq!(joined.len(), reference.len());
+    assert!(
+        joined == reference,
+        "the samples differ at the track change (converter restarted)"
+    );
+    let _ = std::fs::remove_dir_all(dir);
+}

@@ -402,15 +402,20 @@ async fn queue(
     State(st): State<AppState>,
     Json(body): Json<QueueBody>,
 ) -> Result<Json<Value>, ApiError> {
-    let tracks: Vec<Track> = body
-        .items
-        .into_iter()
-        .map(QueueItem::into_track)
-        .collect::<Result<_, _>>()?;
+    // Disc images and CUE sheets become their tracks; `index` follows.
+    let mut tracks: Vec<Track> = Vec::new();
+    let mut index = body.index;
+    for (i, item) in body.items.into_iter().enumerate() {
+        let expanded = item.into_track()?.expand().map_err(bad)?;
+        if i < body.index {
+            index += expanded.len().saturating_sub(1);
+        }
+        tracks.extend(expanded);
+    }
     match body.mode.as_deref().unwrap_or("replace") {
         "append" | "enqueue" => st.engine.send(Command::Enqueue(tracks)),
         "next" | "play_next" => st.engine.send(Command::PlayNext(tracks)),
-        _ => st.engine.play_queue(tracks, body.index, body.position),
+        _ => st.engine.play_queue(tracks, index, body.position),
     }
     Ok(Json(json!({ "ok": true })))
 }

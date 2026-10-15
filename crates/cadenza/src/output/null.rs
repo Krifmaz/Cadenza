@@ -4,7 +4,9 @@
 //! It pretends to be an ideal exclusive device: PCM at any rate up to 32×, DoP and every
 //! native DSD layout up to DSD1024 (DSD2048 is refused, so the "your device stops at …"
 //! path is exercised too). In DoP it checks the markers of what it is given, so an engine
-//! test that writes a DSD stream to it catches a broken packer.
+//! test that writes a DSD stream to it catches a broken packer. With
+//! [`NullOutput::capture_to`] (`device = "capture:<file>"`) every sample written is
+//! appended to a file as little-endian `i32`, so tests can check what was played.
 
 use super::{DeviceInfo, DsdCaps, Encoding, Output, OutputError, OutputFormat, STANDARD_RATES};
 use cadenza_dsp::dsd::packing::DOP_MARKERS;
@@ -28,6 +30,7 @@ pub struct NullOutput {
     dop_marker: usize,
     /// DoP frames whose marker byte was wrong.
     dop_errors: u64,
+    capture: Option<std::io::BufWriter<std::fs::File>>,
 }
 
 impl NullOutput {
@@ -41,6 +44,28 @@ impl NullOutput {
             paused: false,
             dop_marker: 0,
             dop_errors: 0,
+            capture: None,
+        }
+    }
+
+    /// Append every sample written to `path` (little-endian `i32`).
+    pub fn capture_to(mut self, path: &std::path::Path) -> std::io::Result<Self> {
+        self.capture = Some(std::io::BufWriter::new(std::fs::File::create(path)?));
+        Ok(self)
+    }
+
+    /// A null output for a configured device name: `capture:<file>` captures.
+    pub fn for_device(realtime: bool, device: &str) -> Self {
+        let out = Self::new(realtime);
+        match device.strip_prefix("capture:") {
+            Some(path) => match out.capture_to(std::path::Path::new(path)) {
+                Ok(o) => o,
+                Err(e) => {
+                    log::warn!("null output capture {path}: {e}");
+                    Self::new(realtime)
+                }
+            },
+            None => out,
         }
     }
 
@@ -138,6 +163,14 @@ impl Output for NullOutput {
             }
         }
         self.written.fetch_add(n as u64, Ordering::Relaxed);
+        if let Some(c) = &mut self.capture {
+            use std::io::Write;
+            for s in frames {
+                c.write_all(&s.to_le_bytes())
+                    .map_err(|e| OutputError::Backend(e.to_string()))?;
+            }
+            c.flush().map_err(|e| OutputError::Backend(e.to_string()))?;
+        }
         if self.realtime {
             // Pretend to hold a quarter second of buffer: sleep until the queue is below that.
             let dur = Duration::from_secs_f64(n as f64 / fmt.rate as f64);

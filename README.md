@@ -64,7 +64,7 @@ Dual-licensed under MIT or Apache-2.0.
   itself: a true 1024× PCM stream in 64-bit float that never leaves the pipeline).
 - **DSD input**: DSF and DFF (DSDIFF) readers (both bit orders, ID3 / DIIN tags, seeking,
   local files and HTTP), including **DST-compressed DFF** (our own lossless DST decoder,
-  bit-exact; see below), feeding either DSD → PCM (CIC decimation + compensating FIR + a
+  bit-exact), **SACD disc images** and **CUE sheets** (see below), feeding either DSD → PCM (CIC decimation + compensating FIR + a
   155 dB windowed sinc to 352.8 / 384 kHz; passband ripple < 0.01 dB to 20 kHz), DSD → DSD
   re-modulation at another rate through that PCM path (which is what HQPlayer does too),
   or bit-perfect pass-through.
@@ -151,7 +151,7 @@ implemented and tested here; the notes say where we differ.
 | Dither / noise shaping | TPDF, NS1–NS9, LNS15 | TPDF, EF2, Lipshitz, Wannamaker, Gesemann, `ns5`, `ns9`, `lns15`, `ns-adaptive`, per output rate | matched (our shaper designs; no NS1–NS4 names) |
 | DSD output | DSD64–DSD1024, ASDM5/7 (+ EC, v2/v3 variants) | DSD64–DSD1024 **and DSD2048**, `asdm5`, `asdm7`, `dsd5v2`, `dsd7v2`, error-correction `asdm5ec`, `asdm7ec`, `asdm7ec8` (look-ahead trellis, +6 / +10 dB in-band SNR over the plain loops at DSD64); DoP and native | matched and exceeded on rate; EC matched; no "v3" family yet; EC is CPU-heavy (see `cadenza bench`) |
 | 1024× oversampling | yes (GPU recommended) | `dsd_oversampling = full` (long FIR to the DSD rate), CPU or CUDA | matched; very heavy on a CPU – check `cadenza bench --dsd-upsampling --dsd-full` |
-| DSD input | DSF/DFF (incl. DST), SACD ISO, DSD→PCM, DSD→DSD via PCM, direct | DSF/DFF including DST-compressed DFF, DSD→PCM (CIC + FIR, < 0.01 dB), re-modulation via PCM, bit-perfect pass-through | matched for files; SACD ISO next |
+| DSD input | DSF/DFF (incl. DST), SACD ISO, DSD→PCM, DSD→DSD via PCM, direct | DSF/DFF including DST-compressed DFF, SACD ISO (stereo and multichannel areas, DST or plain), CUE sheets over PCM or DSD files, gapless DSD → PCM across tracks, re-modulation via PCM, bit-perfect pass-through | matched; tested with synthetic images and files, not yet with a real ripped SACD |
 | Convolution | yes | yes, any length, per channel | matched |
 | Parametric EQ | yes (pipeline setup) | 16 biquads global + per matrix output | matched |
 | Pipeline matrix / crossovers | yes | N→N up to 32 ch, LR/Butterworth/linear-phase FIR crossovers, delays, polarity, presets | matched |
@@ -216,8 +216,8 @@ to do it:
    decoder refuses. It is checked against FFmpeg's decoder (an independent implementation): frames
    from our test encoder decode in FFmpeg exactly like the same DSD stored plain, and in ours bit for
    bit. Not yet tried on DST files from a real SACD authoring tool (none here). Decoding takes
-   about 0.1 core for stereo and at most half a core for 5.1 with the longest filters. Next: SACD
-   ISO, CUE sheets, gapless DSD.
+   about 0.1 core for stereo and at most half a core for 5.1 with the longest filters. SACD ISO,
+   CUE sheets and gapless DSD are done too (see "SACD images and CUE sheets").
 6. **Synchronised multi-room** between Cadenza endpoints (sample-accurate clock sync over the LAN).
    HQPlayer has no multi-room at all.
 7. **Room correction built in** – measure with a USB microphone from the web UI (sweep, capture, compute the
@@ -434,6 +434,30 @@ the same device:
   becomes the active one), standby.
 - **Volume** (0–100 with mute; no balance or fade), **Time** (track count, duration,
   seconds) and **Info** (track, codec, bit depth, sample rate), all evented.
+
+## SACD images and CUE sheets
+
+- **SACD disc images** (`.iso` rips): `cadenza play album.iso` (or a path in the API's
+  queue) queues every track of the stereo area, titled from the disc text; `album.iso#3`
+  is one track, `album.iso#m3` one from the multichannel area. DST and plain discs both
+  play, bit-perfect to a DSD output or through the DSD → PCM path. Tracks are cut by the
+  frames' time codes, so they join without a gap or an overlap. Images over HTTP work too
+  (range requests). Disc text in the Japanese / Chinese / Korean character sets is not
+  converted yet.
+- **CUE sheets**: `cadenza play album.cue` queues its tracks; `album.cue#3` is one. A
+  track runs from its `INDEX 01` to the next one's, cut to the exact sample (FLAC seeks
+  land on packet boundaries and are trimmed), so consecutive tracks join sample for
+  sample. The audio file can be anything Cadenza plays, DSF/DFF included (cut on whole
+  bytes). A sheet that still names the `.wav` it was made for finds the same file name
+  with another audio extension. Local files only for now.
+- **Gapless DSD**: when the next track is DSD in the same format, the DSD → PCM converter
+  runs on into it instead of flushing and starting again, so a live album or a
+  continuous work plays without a seam. (Bit-perfect DSD output was already seamless.)
+
+Tested: synthetic SACD images packed the way discs are (DST and plain, several tracks,
+seeking anywhere in long tracks), CUE sheets over WAV, FLAC and DSF whose tracks
+concatenate to the whole file exactly, and two DSD files that are one recording cut in
+two playing to the very same samples as the whole. Not yet tried with real disc rips.
 
 ## AirPlay receiver
 

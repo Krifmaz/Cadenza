@@ -5,7 +5,7 @@
 //! rate, which is what HQPlayer does too) or as the raw 1-bit stream for bit-perfect
 //! pass-through to a DoP / native DSD output.
 
-use crate::decode::dsd::{is_dsd_extension, DsdDecodeError, DsdDecoder};
+use crate::decode::dsd::{is_dsd_source, DsdDecodeError, DsdDecoder};
 use crate::decode::live::LiveDecoder;
 use crate::decode::{DecodeError, Decoder, Source, TrackInfo};
 use cadenza_dsp::dsd::DsdRate;
@@ -36,16 +36,46 @@ pub enum TrackDecoder {
 impl TrackDecoder {
     /// Open a source, picking the reader from the file extension (`.dsf` / `.dff`).
     pub fn open(source: &Source) -> Result<Self, TrackDecodeError> {
+        if let Some((sheet, n)) = crate::decode::cue::cue_track(source) {
+            return Self::open_cue(&sheet, n);
+        }
         if let Source::Live { live } = source {
             return LiveDecoder::open(live)
                 .map(TrackDecoder::Live)
                 .map_err(|e| TrackDecodeError::Pcm(e.into()));
         }
-        let dsd = source.extension().is_some_and(|e| is_dsd_extension(&e));
+        let dsd = is_dsd_source(source);
         if dsd {
             Ok(TrackDecoder::Dsd(DsdDecoder::open(source)?))
         } else {
             Ok(TrackDecoder::Pcm(Decoder::open(source)?))
+        }
+    }
+
+    /// Track `n` (1-based) of the CUE sheet at `sheet`: its file, cut to the track.
+    fn open_cue(sheet: &std::path::Path, n: u32) -> Result<Self, TrackDecodeError> {
+        use crate::decode::cue;
+        let io_err = |m: String| TrackDecodeError::Pcm(std::io::Error::other(m).into());
+        let s = cue::read(sheet).map_err(io_err)?;
+        let t = s
+            .tracks
+            .get(n as usize - 1)
+            .ok_or_else(|| io_err(format!("{}: no track {n}", sheet.display())))?;
+        let file = Source::Path {
+            path: cue::resolve(sheet, &t.file),
+        };
+        // CUE times are 1/75 s: whole samples at the usual rates.
+        let at = |frames: u64, rate: u64| frames * rate / 75;
+        if is_dsd_source(&file) {
+            let mut d = DsdDecoder::open(&file)?;
+            let rate = d.dsd_info().rate as u64;
+            d.set_range(at(t.start, rate), t.end.map(|e| at(e, rate)));
+            Ok(TrackDecoder::Dsd(d))
+        } else {
+            let mut d = Decoder::open(&file)?;
+            let rate = d.info().rate as u64;
+            d.set_range(at(t.start, rate), t.end.map(|e| at(e, rate)))?;
+            Ok(TrackDecoder::Pcm(d))
         }
     }
 
@@ -173,5 +203,213 @@ impl TrackDecoder {
         DsdRate::from_hz(rate)
             .map(|(r, _)| r.label())
             .unwrap_or_else(|| format!("DSD {} kHz", rate_label(rate)))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::decode::dsd::{write_dff, write_dsf};
+    use crate::decode::Tags;
+    use crate::engine::Track;
+    use std::path::{Path, PathBuf};
+
+    fn dir(name: &str) -> PathBuf {
+        let d = std::env::temp_dir().join(format!("cadenza-trk-{}-{name}", std::process::id()));
+        std::fs::create_dir_all(&d).unwrap();
+        d
+    }
+
+    fn all_pcm(d: &mut TrackDecoder) -> Vec<f64> {
+        let mut v = Vec::new();
+        while let Some(c) = d.next_chunk().unwrap() {
+            v.extend(c);
+        }
+        v
+    }
+
+    fn all_dsd(d: &mut TrackDecoder) -> Vec<Vec<u8>> {
+        let mut v: Vec<Vec<u8>> = Vec::new();
+        while let Some(c) = d.next_dsd_chunk().unwrap() {
+            v.resize(c.len(), Vec::new());
+            for (o, p) in v.iter_mut().zip(c) {
+                o.extend(p);
+            }
+        }
+        v
+    }
+
+    fn interleaved(planar: &[Vec<u8>]) -> Vec<u8> {
+        (0..planar[0].len())
+            .flat_map(|i| planar.iter().map(move |p| p[i]))
+            .collect()
+    }
+
+    fn open(path: &Path) -> TrackDecoder {
+        TrackDecoder::open(&Source::Path { path: path.into() }).unwrap()
+    }
+
+    #[test]
+    fn sacd_image_plays_as_tracks() {
+        let d = dir("sacd");
+        let img = crate::decode::sacd::tests::image(&[5, 7, 3], true);
+        let iso = d.join("Disc.iso");
+        std::fs::write(&iso, &img.bytes).unwrap();
+        let tracks = Track::from_arg(iso.to_str().unwrap()).expand().unwrap();
+        assert_eq!(tracks.len(), 3);
+        assert_eq!(tracks[1].title, "Track 2");
+        assert_eq!(tracks[1].album, "Test Album");
+        assert_eq!(tracks[1].artist, "Quartet");
+        assert_eq!(tracks[2].duration, Some(3.0 / 75.0));
+        for (t, want) in tracks.iter().zip(&img.tracks) {
+            let mut dec = TrackDecoder::open(&t.source).unwrap();
+            assert!(dec.is_dsd());
+            assert!(dec.source_label().starts_with("SACD DST DSD64"));
+            assert_eq!(interleaved(&all_dsd(&mut dec)), *want);
+        }
+        let _ = std::fs::remove_dir_all(d);
+    }
+
+    #[test]
+    fn dsd_tracks_continue_through_the_converter_gaplessly() {
+        // Three SACD tracks decoded to PCM with the converter handed on give exactly
+        // what the same DSD decoded as one file gives.
+        let d = dir("gapless");
+        let img = crate::decode::sacd::tests::image(&[5, 7, 3], false);
+        let iso = d.join("Disc.iso");
+        std::fs::write(&iso, &img.bytes).unwrap();
+        let tracks = Track::from_arg(iso.to_str().unwrap()).expand().unwrap();
+        let mut joined = Vec::new();
+        let mut prev: Option<DsdDecoder> = None;
+        for (i, t) in tracks.iter().enumerate() {
+            let TrackDecoder::Dsd(mut dec) = TrackDecoder::open(&t.source).unwrap() else {
+                panic!()
+            };
+            if let Some(p) = prev.as_mut() {
+                assert!(dec.adopt(p));
+            }
+            dec.set_continues(i + 1 < tracks.len());
+            while let Some(c) = dec.next_chunk().unwrap() {
+                joined.extend(c);
+            }
+            prev = Some(dec);
+        }
+        let all: Vec<u8> = img.tracks.concat();
+        let planar: Vec<Vec<u8>> = (0..2)
+            .map(|c| all.iter().skip(c).step_by(2).copied().collect())
+            .collect();
+        let whole = d.join("whole.dff");
+        write_dff(&whole, 2_822_400, &planar, &Tags::default()).unwrap();
+        let reference = all_pcm(&mut open(&whole));
+        assert_eq!(joined.len(), reference.len());
+        let worst = joined
+            .iter()
+            .zip(&reference)
+            .map(|(a, b)| (a - b).abs())
+            .fold(0.0, f64::max);
+        assert!(worst < 1e-12, "{worst}");
+        let _ = std::fs::remove_dir_all(d);
+    }
+
+    fn write_wav(path: &Path, frames: usize) -> Vec<f64> {
+        let spec = hound::WavSpec {
+            channels: 2,
+            sample_rate: 44100,
+            bits_per_sample: 16,
+            sample_format: hound::SampleFormat::Int,
+        };
+        let mut w = hound::WavWriter::create(path, spec).unwrap();
+        let mut v = Vec::new();
+        for i in 0..frames * 2 {
+            let s = ((i as i64 * 7919) % 60000 - 30000) as i16;
+            w.write_sample(s).unwrap();
+            v.push(s as f64 / 32768.0);
+        }
+        w.finalize().unwrap();
+        v
+    }
+
+    const CUE: &str = "TITLE \"Live\"\nPERFORMER \"Band\"\nFILE \"live.wav\" WAVE\n\
+        TRACK 01 AUDIO\n TITLE \"One\"\n INDEX 01 00:00:00\n\
+        TRACK 02 AUDIO\n TITLE \"Two\"\n INDEX 00 00:00:70\n INDEX 01 00:01:03\n\
+        TRACK 03 AUDIO\n TITLE \"Three\"\n INDEX 01 00:02:37\n";
+
+    fn cue_tracks(cue: &Path) -> Vec<Vec<f64>> {
+        let tracks = Track::from_arg(cue.to_str().unwrap()).expand().unwrap();
+        assert_eq!(tracks.len(), 3);
+        assert_eq!(
+            (tracks[1].title.as_str(), tracks[1].album.as_str()),
+            ("Two", "Live")
+        );
+        assert_eq!(tracks[0].duration, Some(78.0 / 75.0));
+        tracks
+            .iter()
+            .map(|t| all_pcm(&mut TrackDecoder::open(&t.source).unwrap()))
+            .collect()
+    }
+
+    #[test]
+    fn cue_tracks_join_sample_exact() {
+        let d = dir("cue");
+        let full = write_wav(&d.join("live.wav"), 44100 * 3 + 123);
+        std::fs::write(d.join("live.cue"), CUE).unwrap();
+        let parts = cue_tracks(&d.join("live.cue"));
+        // Track 2 starts at 1 s + 3/75 s = 45 864 frames.
+        assert_eq!(parts[0].len() / 2, 45_864);
+        assert_eq!(parts.concat(), full);
+
+        // The same through FLAC, where seeks land on packet boundaries and are trimmed.
+        let flac = std::process::Command::new("ffmpeg")
+            .args(["-v", "error", "-y", "-i"])
+            .arg(d.join("live.wav"))
+            .arg(d.join("live.flac"))
+            .status();
+        if flac.is_ok_and(|s| s.success()) {
+            std::fs::remove_file(d.join("live.wav")).unwrap();
+            // The sheet still says live.wav: the converted file is found by its name.
+            let parts = cue_tracks(&d.join("live.cue"));
+            assert_eq!(parts.concat(), full);
+            // Seeking inside a track is relative to the track.
+            let tracks = Track::from_arg(d.join("live.cue").to_str().unwrap())
+                .expand()
+                .unwrap();
+            let mut t2 = TrackDecoder::open(&tracks[1].source).unwrap();
+            let at = t2.seek(0.5).unwrap();
+            assert!((0.4..=0.5).contains(&at), "{at}");
+        } else {
+            eprintln!("ffmpeg not installed: FLAC CUE check skipped");
+        }
+        let _ = std::fs::remove_dir_all(d);
+    }
+
+    #[test]
+    fn cue_over_a_dsf_cuts_whole_bytes() {
+        let d = dir("cue-dsd");
+        let bytes = 2_822_400 / 8 * 3; // 3 s
+        let planar: Vec<Vec<u8>> = (0..2)
+            .map(|c| (0..bytes).map(|i| (i * 13 + c * 7) as u8).collect())
+            .collect();
+        write_dsf(
+            &d.join("live.dsf"),
+            2_822_400,
+            &planar,
+            true,
+            &Tags::default(),
+        )
+        .unwrap();
+        std::fs::write(d.join("live.cue"), CUE.replace("live.wav", "live.dsf")).unwrap();
+        let tracks = Track::from_arg(d.join("live.cue").to_str().unwrap())
+            .expand()
+            .unwrap();
+        let mut joined: Vec<Vec<u8>> = vec![Vec::new(), Vec::new()];
+        for t in &tracks {
+            let mut dec = TrackDecoder::open(&t.source).unwrap();
+            assert!(dec.is_dsd());
+            for (o, p) in joined.iter_mut().zip(all_dsd(&mut dec)) {
+                o.extend(p);
+            }
+        }
+        assert_eq!(joined, planar);
+        let _ = std::fs::remove_dir_all(d);
     }
 }

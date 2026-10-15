@@ -55,6 +55,24 @@ impl Default for Source {
 }
 
 impl Track {
+    /// A disc image or CUE sheet as its tracks (anything else as itself).
+    pub fn expand(self) -> Result<Vec<Track>, String> {
+        match crate::decode::expand(&self.source) {
+            None => Ok(vec![self]),
+            Some(entries) => Ok(entries?
+                .into_iter()
+                .map(|e| Track {
+                    source: e.source,
+                    title: e.title,
+                    artist: e.artist,
+                    album: e.album,
+                    duration: e.duration,
+                    ..Default::default()
+                })
+                .collect()),
+        }
+    }
+
     /// A track from a CLI argument (path or URL), titled after its file name.
     pub fn from_arg(arg: &str) -> Self {
         let source = Source::parse(arg);

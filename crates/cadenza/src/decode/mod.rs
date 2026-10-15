@@ -1,9 +1,11 @@
 //! Decoding with Symphonia: any supported container/codec, from a file or an HTTP URL,
 //! to interleaved `f64` PCM.
 
+pub mod cue;
 pub mod dsd;
 pub mod dst;
 pub mod live;
+pub mod sacd;
 pub mod source;
 
 pub use source::Source;
@@ -91,6 +93,8 @@ pub struct Decoder {
     /// Timestamp (in `time_base` units) of the next frame to be delivered.
     next_ts: u64,
     finished: bool,
+    /// Play only frames `start..end` (a CUE track).
+    range: (u64, Option<u64>),
 }
 
 impl Decoder {
@@ -177,6 +181,7 @@ impl Decoder {
             buf: None,
             next_ts: 0,
             finished: false,
+            range: (0, None),
         })
     }
 
@@ -187,13 +192,29 @@ impl Decoder {
 
     /// Where the next returned frame sits in the track, in seconds.
     pub fn position_seconds(&self) -> f64 {
-        match self.time_base {
+        let abs = match self.time_base {
             Some(tb) => {
                 let t = tb.calc_time(self.next_ts);
                 t.seconds as f64 + t.frac
             }
             None => self.next_ts as f64 / self.info.rate as f64,
+        };
+        (abs - self.range.0 as f64 / self.info.rate as f64).max(0.0)
+    }
+
+    /// Play only sample frames `start..end` (`None`: to the end), exactly: the first and
+    /// last packets are trimmed. Seeks and positions are then relative to `start`.
+    pub fn set_range(&mut self, start: u64, end: Option<u64>) -> Result<(), DecodeError> {
+        let total = self
+            .info
+            .duration
+            .map(|d| (d * self.info.rate as f64).round() as u64);
+        self.range = (start, end);
+        if let Some(len) = end.or(total).map(|e| e.saturating_sub(start)) {
+            self.info.duration = Some(len as f64 / self.info.rate as f64);
         }
+        self.seek(0.0)?;
+        Ok(())
     }
 
     /// Decode the next packet. `Ok(None)` at the end of the stream. Decode errors in the
@@ -223,6 +244,7 @@ impl Decoder {
             if packet.track_id() != self.track_id {
                 continue;
             }
+            let first = ts_frames(self.time_base, self.info.rate, packet.ts());
             match self.decoder.decode(&packet) {
                 Ok(audio) => {
                     let spec = *audio.spec();
@@ -238,7 +260,21 @@ impl Decoder {
                     };
                     buf.copy_interleaved_ref(audio);
                     self.next_ts = packet.ts() + packet.dur();
-                    return Ok(Some(buf.samples().to_vec()));
+                    let (start, end) = self.range;
+                    if start == 0 && end.is_none() {
+                        return Ok(Some(buf.samples().to_vec()));
+                    }
+                    let ch = spec.channels.count();
+                    if end.is_some_and(|e| first >= e) {
+                        self.finished = true;
+                        return Ok(None);
+                    }
+                    let skip = (start.saturating_sub(first) as usize).min(frames);
+                    let keep = end.map_or(frames, |e| ((e - first) as usize).min(frames));
+                    if skip >= keep {
+                        continue;
+                    }
+                    return Ok(Some(buf.samples()[skip * ch..keep * ch].to_vec()));
                 }
                 Err(SymphoniaError::DecodeError(e)) => {
                     log::warn!("skipping undecodable packet: {e}");
@@ -260,7 +296,7 @@ impl Decoder {
 
     /// Seek to `seconds`; returns where the stream actually landed (packet boundary).
     pub fn seek(&mut self, seconds: f64) -> Result<f64, DecodeError> {
-        let seconds = seconds.max(0.0);
+        let seconds = seconds.max(0.0) + self.range.0 as f64 / self.info.rate as f64;
         let time = Time::new(seconds.trunc() as u64, seconds.fract());
         let seeked = self.reader.seek(
             SeekMode::Accurate,
@@ -278,6 +314,95 @@ impl Decoder {
     /// Duration as a `Duration`, when known.
     pub fn duration(&self) -> Option<Duration> {
         self.info.duration.map(Duration::from_secs_f64)
+    }
+}
+
+/// One playable entry of a disc image or CUE sheet.
+#[derive(Clone, Debug, PartialEq)]
+pub struct Entry {
+    /// `album.iso#3` / `album.cue#3`.
+    pub source: Source,
+    /// Title.
+    pub title: String,
+    /// Artist.
+    pub artist: String,
+    /// Album.
+    pub album: String,
+    /// Seconds.
+    pub duration: Option<f64>,
+}
+
+/// The tracks of a bare `.iso` (SACD image) or `.cue` sheet, in order; `None` for any
+/// other source (and for a single track such as `album.iso#3`).
+pub fn expand(source: &Source) -> Option<Result<Vec<Entry>, String>> {
+    let Source::Path { path } = source else {
+        return None;
+    };
+    let s = path.to_str()?;
+    let lower = s.to_ascii_lowercase();
+    if lower.ends_with(".iso") {
+        let res = (|| {
+            let mut f =
+                std::io::BufReader::new(std::fs::File::open(path).map_err(|e| e.to_string())?);
+            let disc = sacd::read_disc(&mut f).map_err(|e| e.to_string())?;
+            // The stereo area when there is one.
+            let area = disc
+                .area(false)
+                .or(disc.areas.first())
+                .ok_or("no audio area")?;
+            let prefix = if area.multichannel { "m" } else { "" };
+            Ok(area
+                .tracks
+                .iter()
+                .map(|t| Entry {
+                    source: Source::Path {
+                        path: format!("{s}#{prefix}{}", t.number).into(),
+                    },
+                    title: t
+                        .title
+                        .clone()
+                        .unwrap_or_else(|| format!("Track {}", t.number)),
+                    artist: t
+                        .performer
+                        .clone()
+                        .or(disc.artist.clone())
+                        .unwrap_or_default(),
+                    album: disc.title.clone().unwrap_or_default(),
+                    duration: Some(t.frames as f64 / 75.0),
+                })
+                .collect())
+        })();
+        return Some(res);
+    }
+    if lower.ends_with(".cue") {
+        return Some(cue::read(path).map(|sheet| {
+            sheet
+                .tracks
+                .iter()
+                .enumerate()
+                .map(|(i, t)| Entry {
+                    source: Source::Path {
+                        path: format!("{s}#{}", i + 1).into(),
+                    },
+                    title: t
+                        .title
+                        .clone()
+                        .unwrap_or_else(|| format!("Track {}", t.number)),
+                    artist: t.performer.clone().unwrap_or_default(),
+                    album: sheet.title.clone().unwrap_or_default(),
+                    duration: t.end.map(|e| (e - t.start) as f64 / 75.0),
+                })
+                .collect()
+        }));
+    }
+    None
+}
+
+/// Sample frames from a timestamp.
+fn ts_frames(tb: Option<TimeBase>, rate: u32, ts: u64) -> u64 {
+    match tb {
+        Some(tb) => (ts as u128 * rate as u128 * tb.numer as u128 / tb.denom.max(1) as u128) as u64,
+        None => ts,
     }
 }
 

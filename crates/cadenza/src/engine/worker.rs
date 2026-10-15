@@ -557,7 +557,7 @@ impl Worker {
             self.settings.output.device.as_str(),
         );
         let out: Box<dyn Output> = match backend {
-            "null" => Box::new(output::null::NullOutput::new(self.realtime)),
+            "null" => Box::new(output::null::NullOutput::for_device(self.realtime, device)),
             _ => match output::open_backend(backend, device) {
                 Ok(o) => o,
                 Err(e) => {
@@ -868,6 +868,15 @@ impl Worker {
             return;
         };
         let passthrough = self.chain.as_ref().is_some_and(Chain::is_passthrough);
+        // Gapless DSD → PCM: when the next track (already opened) is DSD in the same
+        // format, this one leaves its converter running for it.
+        if let TrackDecoder::Dsd(d) = decoder {
+            let next = match &self.prefetched {
+                Some((_, TrackDecoder::Dsd(n))) => n.can_continue(d),
+                _ => false,
+            };
+            d.set_continues(next && !passthrough);
+        }
         let chunk = if passthrough {
             decoder.next_dsd_chunk().map(|c| c.map(Chunk::Dsd))
         } else {
@@ -974,6 +983,14 @@ impl Worker {
                 }
             },
         };
+        let mut decoder = decoder;
+        if let (Some(TrackDecoder::Dsd(old)), TrackDecoder::Dsd(new)) =
+            (self.decoder.as_mut(), &mut decoder)
+        {
+            if new.adopt(old) {
+                log::debug!("gapless DSD: the converter runs on into the next track");
+            }
+        }
         let key = decoder.format_key();
         let label = decoder.source_label();
         let same_format = self.info.as_ref().is_some_and(|old| old.0 == key);
