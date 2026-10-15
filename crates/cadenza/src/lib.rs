@@ -15,4 +15,5 @@ pub mod endpoint;
 pub mod engine;
 pub mod output;
 pub mod render;
+pub mod room;
 pub mod upnp;

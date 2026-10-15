@@ -155,6 +155,28 @@
     <table><thead><tr><th>Type</th><th>Frequency (Hz)</th><th>Gain (dB)</th><th>Q</th><th></th></tr></thead><tbody id="eq"></tbody></table>
     <div class="row" style="margin-top:8px"><button id="eq-add">Add band</button><button class="primary" id="eq-save">Apply EQ</button></div>
   </section>
+  <section class="card wide">
+    <h2>Room correction <span class="badge" id="room-badge"></span></h2>
+    <div class="row">
+      <label class="field" style="flex:2"><span>Microphone</span><select id="room_input"></select></label>
+      <label class="field" style="width:110px"><span>Level (dBFS)</span><input type="number" id="room_level" value="-12" min="-40" max="-3"></label>
+      <label class="field" style="width:110px"><span>Sweep (s)</span><input type="number" id="room_seconds" value="6" min="2" max="20"></label>
+    </div>
+    <div class="row" style="margin-top:8px">
+      <button id="room-left">Measure left</button><button id="room-right">Measure right</button>
+      <button data-forget="left">Forget left</button><button data-forget="right">Forget right</button>
+    </div>
+    <div class="row" style="margin-top:8px">
+      <label class="field"><span>Correct up to (Hz)</span><input type="number" id="room_high_hz" min="100" max="20000"></label>
+      <label class="field"><span>Max boost (dB)</span><input type="number" id="room_max_boost_db" min="0" max="12" step="0.5"></label>
+      <label class="field"><span>Max cut (dB)</span><input type="number" id="room_max_cut_db" min="0" max="30" step="0.5"></label>
+      <label class="field"><span>Tilt (dB/octave)</span><input type="number" id="room_tilt_db_per_octave" min="-3" max="3" step="0.1"></label>
+    </div>
+    <svg id="room-plot" viewBox="0 0 600 260" style="width:100%;margin-top:10px;background:var(--bg,transparent)"></svg>
+    <div class="small" id="room-legend"></div>
+    <div class="row" style="margin-top:8px"><button class="primary" id="room-apply">Apply correction</button><button id="room-remove">Remove</button></div>
+    <div class="hint" id="room-status" style="margin-top:8px">Put a measurement microphone at the listening seat. Each measurement plays a sine sweep from one speaker (turn the volume down first). The correction is a minimum-phase FIR that only cuts peaks and fills dips up to the set limits, then loads as the convolution filter.</div>
+  </section>
 </main>
 <script>
 const $ = (id) => document.getElementById(id);
@@ -385,6 +407,49 @@ $('eq').oninput = (e) => { const tr = e.target.closest('tr[data-i]'); const k = 
 $('eq').onclick = (e) => { const b = e.target.closest('[data-rm]'); if (b) { eqBands.splice(+b.dataset.rm, 1); paintEq(); } };
 $('eq-add').onclick = () => { eqBands.push({ kind: 'peaking', freq: 1000, gain_db: 0, q: 0.707 }); paintEq(); };
 $('eq-save').onclick = () => save({ dsp: { eq: eqBands, eq_enabled: $('eq_enabled').checked } });
+
+// Room correction.
+const ROOM_OPTS = ['high_hz', 'max_boost_db', 'max_cut_db', 'tilt_db_per_octave'];
+let room = null;
+function paintRoom(r) {
+  room = r;
+  const cur = $('room_input').value;
+  $('room_input').innerHTML = '<option value="">Default input</option>' + (r.inputs || []).map(n => `<option>${esc(n)}</option>`).join('');
+  $('room_input').value = cur;
+  ROOM_OPTS.forEach(k => { if (document.activeElement !== $('room_' + k)) $('room_' + k).value = r.options[k]; });
+  const chans = (r.channels || []).filter(Boolean);
+  $('room-badge').textContent = r.applied ? 'applied' : chans.length ? 'measured' : '';
+  const W = 600, H = 260, f0 = 20, f1 = 20000, db = 20;
+  const x = (f) => (Math.log(f / f0) / Math.log(f1 / f0)) * W;
+  const y = (v) => H / 2 - (Math.max(-db, Math.min(db, v)) / db) * (H / 2);
+  const line = (vals, color, dash) => `<polyline fill="none" stroke="${color}" stroke-width="1.5" ${dash ? 'stroke-dasharray="5 3"' : ''} points="${r.freqs.map((f, i) => `${x(f).toFixed(1)},${y(vals[i]).toFixed(1)}`).join(' ')}"/>`;
+  let g = '';
+  [20, 50, 100, 200, 500, 1000, 2000, 5000, 10000, 20000].forEach(f => { g += `<line x1="${x(f)}" x2="${x(f)}" y1="0" y2="${H}" stroke="#8884"/>${f > 20 ? `<text x="${x(f) + 2}" y="${H - 3}" font-size="10" fill="#888">${f >= 1000 ? f / 1000 + 'k' : f}</text>` : ''}`; });
+  [-20, -10, 0, 10, 20].forEach(v => { g += `<line x1="0" x2="${W}" y1="${y(v)}" y2="${y(v)}" stroke="#8884"/><text x="2" y="${v === 20 ? 11 : y(v) - 2}" font-size="10" fill="#888">${v} dB</text>`; });
+  g += line(r.target, '#888', false);
+  const colors = { left: '#3b82f6', right: '#ef4444' };
+  chans.forEach(c => { g += line(c.measured, colors[c.channel], false) + line(c.corrected, colors[c.channel], true); });
+  $('room-plot').innerHTML = g;
+  $('room-legend').innerHTML = chans.length
+    ? 'Solid: measured · dashed: corrected · gray: target. ' + chans.map(c => `<span style="color:${colors[c.channel]}">${c.channel}</span> peak ${c.peak_dbfs ?? '?'} dBFS at ${khz(c.rate)}`).join(' · ')
+    : 'No measurements yet.';
+}
+async function roomCall(method, path, body, busy) {
+  const btns = document.querySelectorAll('#room-left,#room-right,#room-apply,#room-remove,[data-forget]');
+  btns.forEach(b => b.disabled = true);
+  if (busy) $('room-status').textContent = busy;
+  try { paintRoom(await api(method, path, body)); if (busy) $('room-status').textContent = 'Done.'; }
+  catch (e) { $('room-status').textContent = e.message; }
+  finally { btns.forEach(b => b.disabled = false); }
+}
+const measure = (channel) => roomCall('POST', '/api/room/measure', { channel, input: $('room_input').value, level_db: num('room_level'), seconds: num('room_seconds') }, `Measuring ${channel}… keep quiet.`);
+$('room-left').onclick = () => measure('left');
+$('room-right').onclick = () => measure('right');
+document.querySelectorAll('[data-forget]').forEach(b => b.onclick = () => roomCall('POST', '/api/room/forget', { channel: b.dataset.forget }));
+ROOM_OPTS.forEach(k => $('room_' + k).onchange = () => roomCall('POST', '/api/room/options', { [k]: num('room_' + k) }));
+$('room-apply').onclick = () => roomCall('POST', '/api/room/apply', null, 'Writing the filter…');
+$('room-remove').onclick = () => roomCall('POST', '/api/room/remove', null, 'Removed.');
+api('GET', '/api/room').then(paintRoom).catch(e => { $('room-status').textContent = e.message; });
 
 (async () => {
   try {

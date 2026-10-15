@@ -21,6 +21,7 @@ pub mod matrix;
 pub mod pipeline;
 pub mod resampler;
 pub mod rng;
+pub mod room;
 pub mod signal_path;
 pub mod volume;
 

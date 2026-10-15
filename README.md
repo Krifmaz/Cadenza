@@ -153,6 +153,8 @@ implemented and tested here; the notes say where we differ.
 | 1024× oversampling | yes (GPU recommended) | `dsd_oversampling = full` (long FIR to the DSD rate), CPU or CUDA | matched; very heavy on a CPU – check `cadenza bench --dsd-upsampling --dsd-full` |
 | DSD input | DSF/DFF (incl. DST), SACD ISO, DSD→PCM, DSD→DSD via PCM, direct | DSF/DFF including DST-compressed DFF, SACD ISO (stereo and multichannel areas, DST or plain), CUE sheets over PCM or DSD files, gapless DSD → PCM across tracks, re-modulation via PCM, bit-perfect pass-through | matched; tested with synthetic images and files, not yet with a real ripped SACD |
 | Convolution | yes | yes, any length, per channel | matched |
+| Room measurement | none (REW / Acourate outside) | Built in: sweep from the web UI through any USB microphone, impulse by deconvolution, minimum-phase correction FIR with boost / cut limits, response plots, one click to apply | ahead: HQPlayer has none. Tested against a simulated room (flat within 1.5 dB from 30 to 400 Hz); not yet tried with a real microphone in a real room |
+| Headphones | none | Crossfeed (bs2b, Chu Moy, Meier) and KEMAR HRTF at ±30 / 45 / 60° | ahead: HQPlayer has none |
 | Parametric EQ | yes (pipeline setup) | 16 biquads global + per matrix output | matched |
 | Pipeline matrix / crossovers | yes | N→N up to 32 ch, LR/Butterworth/linear-phase FIR crossovers, delays, polarity, presets | matched |
 | Exclusive output | ASIO/WASAPI, CoreAudio hog, ALSA | ASIO (own loader, no SDK), WASAPI exclusive, CoreAudio hog + integer mode, ALSA hw: | matched; ASIO tested against a fake driver only, not yet with a real one |
@@ -224,9 +226,10 @@ to do it:
    (endpoints with simulated DACs 150 ppm fast and 120 ppm slow): the followers stay within about
    1.5 samples (30 µs) of the leader at 48 kHz once settled, 5 samples at most in the first two
    seconds; DSD (DoP) within 6 frames (34 µs). Not yet on real DACs over a real network.
-7. **Room correction built in** – measure with a USB microphone from the web UI (sweep, capture, compute the
-   correction FIR). HQPlayer needs REW or Acourate outside the program. Headphone crossfeed and HRTF
-   presets in the engine as well – these two are done (`headphones`, see below); room correction next.
+7. **Room correction built in** – done (see "Room correction" below): measure with a USB microphone from
+   the web UI (sweep, capture, compute the correction FIR, plots, apply). HQPlayer needs REW or Acourate
+   outside the program. Headphone crossfeed and HRTF presets in the engine as well – also done
+   (`headphones`). Tested against a simulated room only; not yet with a real microphone.
 8. **Filter designer** – pick transition width, stopband depth and phase and Cadenza designs and caches the
    filter; live response plots (passband ripple, stopband, impulse) for every filter in the web UI.
    HQPlayer only offers fixed catalogue entries.
@@ -439,6 +442,36 @@ the same device:
   becomes the active one), standby.
 - **Volume** (0–100 with mute; no balance or fade), **Time** (track count, duration,
   seconds) and **Info** (track, codec, bit depth, sample rate), all evented.
+
+## Room correction
+
+The "Room correction" card in the web UI measures your speakers and builds the filter:
+
+1. Put a measurement microphone (any USB one the OS sees, e.g. a UMIK-1) at the listening seat,
+   pick it, turn the volume down and press **Measure left**, then **Measure right**.
+   Each plays a 10 Hz–22 kHz exponential sine sweep from one speaker (6 s, −12 dBFS by
+   default) while recording. The engine's EQ, convolution and headphone stages are switched
+   off during the sweep and restored after.
+2. The recording is divided by the sweep in the frequency domain, which gives the room's
+   impulse response. Its response (1/6-octave smoothed) is plotted against the target.
+3. The correction is a minimum-phase FIR (16384 taps) that pulls the response to the target
+   between 20 Hz and *Correct up to* (500 Hz by default – above that a single microphone
+   position says little). It cuts peaks by at most *Max cut* and fills dips by at most *Max
+   boost*, never boosts below the speaker's own roll-off, and fades out over half an octave
+   at both ends. *Tilt* slopes the target (e.g. −0.5 dB/octave for a warmer house curve).
+   The dashed lines show the predicted result.
+4. **Apply correction** writes `correction-<time>.wav` into `~/.config/cadenza/room/` and
+   loads it as the convolution filter (CPU or GPU, resampled to the stream's rate when it
+   differs). **Remove** turns it off. Measurements are kept there as `left.wav` / `right.wav`.
+
+API: `GET /api/room`, `POST /api/room/measure {channel, input, level_db, seconds}`,
+`POST /api/room/options {high_hz, max_boost_db, max_cut_db, tilt_db_per_octave, …}`,
+`POST /api/room/apply`, `POST /api/room/remove`, `POST /api/room/forget {channel}`.
+
+Tested: in a simulated room with two modes and a dip, the corrected response is flat within
+1.5 dB from 30 to 400 Hz, measured through the whole engine (sweep played, captured with
+latency and noise, filter applied). Not yet tried with a real microphone in a real room;
+there is no microphone calibration file support yet.
 
 ## Headphones: crossfeed and HRTF
 
@@ -769,6 +802,7 @@ SwiftShader, WARP) are slower than the CPU engine and are skipped unless
 - [x] AirPlay 1 receiver
 - [x] DST-compressed DFF, SACD ISO, CUE sheets, gapless DSD
 - [x] Multi-room sync groups of endpoints
+- [x] Room measurement and correction from the web UI; headphone crossfeed and HRTF
 - [ ] MPRIS, Roon
 - [ ] Non-uniformly partitioned convolution for lower latency with long impulses
 - [ ] "v3"-class modulators and more poly-sinc variants

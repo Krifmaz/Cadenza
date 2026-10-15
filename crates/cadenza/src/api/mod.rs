@@ -19,6 +19,7 @@ use futures_util::stream::{Stream, StreamExt};
 use serde::Deserialize;
 use serde_json::{json, Value};
 use std::convert::Infallible;
+use std::sync::{Arc, Mutex};
 use std::time::Duration;
 use tokio_stream::wrappers::BroadcastStream;
 
@@ -28,6 +29,7 @@ pub const INDEX_HTML: &str = include_str!("../../static/index.html");
 #[derive(Clone)]
 struct AppState {
     engine: Engine,
+    room: Arc<Mutex<crate::room::Room>>,
 }
 
 /// A JSON error with a status code.
@@ -45,6 +47,15 @@ fn bad(msg: impl Into<String>) -> ApiError {
 
 /// Build the router.
 pub fn router(engine: Engine) -> Router {
+    let room = crate::room::Room::new(
+        crate::room::Room::default_dir(),
+        crate::room::capture::system(),
+    );
+    router_with_room(engine, room)
+}
+
+/// [`router`] with a given room-correction state (tests use a simulated room).
+pub fn router_with_room(engine: Engine, room: crate::room::Room) -> Router {
     Router::new()
         .route("/", get(index))
         .route("/api/status", get(status))
@@ -60,7 +71,16 @@ pub fn router(engine: Engine) -> Router {
         .route("/api/control", post(control))
         .route("/api/events", get(events))
         .route("/api/live/{id}/cover", get(live_cover))
-        .with_state(AppState { engine })
+        .route("/api/room", get(room_report))
+        .route("/api/room/options", post(room_options))
+        .route("/api/room/measure", post(room_measure))
+        .route("/api/room/apply", post(room_apply))
+        .route("/api/room/remove", post(room_remove))
+        .route("/api/room/forget", post(room_forget))
+        .with_state(AppState {
+            engine,
+            room: Arc::new(Mutex::new(room)),
+        })
 }
 
 /// Run the server on `listen` until the process ends.
@@ -76,6 +96,96 @@ pub async fn serve(listen: &str, engine: Engine) -> anyhow::Result<()> {
 
 async fn index() -> Html<&'static str> {
     Html(INDEX_HTML)
+}
+
+/// Run `f` on the room state off the async runtime (measurements take seconds).
+async fn with_room<T: Send + 'static>(
+    st: &AppState,
+    f: impl FnOnce(&mut crate::room::Room, &Engine) -> Result<T, String> + Send + 'static,
+) -> Result<T, ApiError> {
+    let (room, engine) = (Arc::clone(&st.room), st.engine.clone());
+    tokio::task::spawn_blocking(move || {
+        let mut r = room.lock().unwrap_or_else(|e| e.into_inner());
+        f(&mut r, &engine)
+    })
+    .await
+    .map_err(|e| ApiError(StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?
+    .map_err(bad)
+}
+
+async fn room_report(State(st): State<AppState>) -> Result<Json<Value>, ApiError> {
+    with_room(&st, |r, e| Ok(r.report(e))).await.map(Json)
+}
+
+/// Change some of the design options (the others stay).
+async fn room_options(
+    State(st): State<AppState>,
+    Json(body): Json<Value>,
+) -> Result<Json<Value>, ApiError> {
+    with_room(&st, move |r, e| {
+        let mut cur = serde_json::to_value(&r.options).map_err(|e| e.to_string())?;
+        if let (Some(c), Some(b)) = (cur.as_object_mut(), body.as_object()) {
+            for (k, v) in b {
+                c.insert(k.clone(), v.clone());
+            }
+        }
+        let o: cadenza_dsp::room::DesignOptions =
+            serde_json::from_value(cur).map_err(|e| e.to_string())?;
+        if !(o.low_hz > 0.0 && o.high_hz > o.low_hz && o.taps >= 1024 && o.taps <= 1 << 18) {
+            return Err("options out of range".into());
+        }
+        r.options = o;
+        Ok(r.report(e))
+    })
+    .await
+    .map(Json)
+}
+
+async fn room_measure(
+    State(st): State<AppState>,
+    Json(req): Json<crate::room::MeasureRequest>,
+) -> Result<Json<Value>, ApiError> {
+    with_room(&st, move |r, e| {
+        r.measure(e, &req)?;
+        Ok(r.report(e))
+    })
+    .await
+    .map(Json)
+}
+
+async fn room_apply(State(st): State<AppState>) -> Result<Json<Value>, ApiError> {
+    with_room(&st, |r, e| {
+        r.apply(e)?;
+        Ok(r.report(e))
+    })
+    .await
+    .map(Json)
+}
+
+async fn room_remove(State(st): State<AppState>) -> Result<Json<Value>, ApiError> {
+    with_room(&st, |r, e| {
+        r.remove(e);
+        Ok(r.report(e))
+    })
+    .await
+    .map(Json)
+}
+
+#[derive(Deserialize)]
+struct ChannelBody {
+    channel: String,
+}
+
+async fn room_forget(
+    State(st): State<AppState>,
+    Json(b): Json<ChannelBody>,
+) -> Result<Json<Value>, ApiError> {
+    with_room(&st, move |r, e| {
+        r.forget(&b.channel)?;
+        Ok(r.report(e))
+    })
+    .await
+    .map(Json)
 }
 
 /// Cover art a live stream (AirPlay) received from its sender.

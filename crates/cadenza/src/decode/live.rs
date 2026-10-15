@@ -86,6 +86,13 @@ impl LiveStream {
         }
     }
 
+    /// No upper limit on what is buffered (a prepared signal pushed whole, such as a
+    /// measurement sweep, rather than a live sender).
+    pub fn unbounded(mut self) -> Self {
+        self.max_frames = usize::MAX;
+        self
+    }
+
     /// Append interleaved samples (`-1.0..1.0`).
     pub fn push(&self, samples: Vec<f64>) {
         if samples.is_empty() {

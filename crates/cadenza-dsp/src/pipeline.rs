@@ -364,18 +364,28 @@ impl Pipeline {
             }
         };
         let convolution = match (&config.convolution, bp) {
-            (Some(spec), false) => {
-                if let Some(r) = spec.rate {
-                    if r != input.rate {
-                        log::warn!(
-                            "impulse {} was measured at {r} Hz but the stream is {} Hz",
-                            spec.name,
-                            input.rate
-                        );
-                    }
+            (Some(spec), false) => match spec.rate {
+                // An impulse made at another rate is resampled to the stream's, so its
+                // corrections stay at the same frequencies.
+                Some(r) if r != input.rate => {
+                    log::info!(
+                        "impulse {} resampled from {r} Hz to {} Hz",
+                        spec.name,
+                        input.rate
+                    );
+                    let resampled = ConvolutionSpec {
+                        name: spec.name.clone(),
+                        rate: Some(input.rate),
+                        channels: spec
+                            .channels
+                            .iter()
+                            .map(|h| crate::headphone::resample_ir(h, r as f64, input.rate as f64))
+                            .collect(),
+                    };
+                    Some(ConvolutionStage::new(&resampled, ch, &gpu)?)
                 }
-                Some(ConvolutionStage::new(spec, ch, &gpu)?)
-            }
+                _ => Some(ConvolutionStage::new(spec, ch, &gpu)?),
+            },
             _ => None,
         };
         let headphone = (!bp && ch == 2)
@@ -1099,6 +1109,53 @@ mod tests {
         let sp = p.signal_path();
         let st = sp.stages.iter().find(|s| s.id == "headphone").unwrap();
         assert!(!st.active && st.detail.contains("stereo sources only"));
+    }
+
+    #[test]
+    fn an_impulse_at_another_rate_is_resampled_to_the_stream() {
+        // A 48 kHz correction with a +6 dB shelf below 1 kHz, on a 44.1 kHz stream: the
+        // boost must stay at the same frequencies.
+        let h48 = crate::room::min_phase(4096, 48000.0, |f| if f < 1000.0 { 6.0 } else { 0.0 });
+        let spec = Arc::new(ConvolutionSpec {
+            name: "room".into(),
+            rate: Some(48000),
+            channels: vec![h48],
+        });
+        let cache = CoefficientCache::disabled();
+        let mut p = Pipeline::new(
+            InputFormat {
+                rate: 44100,
+                bits: 24,
+                channels: 1,
+                codec: "PCM".into(),
+            },
+            PipelineConfig {
+                convolution: Some(spec),
+                output_bits: 32,
+                dither: DitherKind::None,
+                headroom_db: Some(-12.0),
+                ..Default::default()
+            },
+            &cache,
+        )
+        .unwrap();
+        let level = |p: &mut Pipeline, f: f64| {
+            p.reset();
+            let x: Vec<f64> = (0..44100)
+                .map(|n| 0.1 * (2.0 * std::f64::consts::PI * f * n as f64 / 44100.0).sin())
+                .collect();
+            let mut y = p.process(&x);
+            y.extend(p.flush());
+            let v: Vec<f64> = y[22050..40000].iter().map(|w| *w as f64).collect();
+            (v.iter().map(|x| x * x).sum::<f64>() / v.len() as f64).sqrt()
+        };
+        let lo = level(&mut p, 300.0);
+        let hi = level(&mut p, 5000.0);
+        let db = 20.0 * (lo / hi).log10();
+        assert!((db - 6.0).abs() < 0.3, "{db:.2} dB");
+        // Just below the 1 kHz edge (at 48 kHz) is still boosted: not shifted by 9 %.
+        let edge = 20.0 * (level(&mut p, 900.0) / hi).log10();
+        assert!(edge > 3.0, "{edge:.2} dB at 900 Hz");
     }
 
     #[test]
