@@ -96,6 +96,7 @@
       <label class="switch" style="flex:1;margin-top:18px"><input type="checkbox" id="soft_clip"> <b>Soft clipper</b> <span class="muted small">last guard</span></label>
     </div>
     <label class="field"><span>Convolution (impulse response file, WAV or text; empty = off)</span><input type="text" id="convolution" placeholder="/path/to/room.wav"></label>
+    <label class="field"><span>Headphones (stereo sources)</span><select id="headphones"></select></label>
   </section>
 
   <section class="card">
@@ -298,6 +299,7 @@ function loadSettings(set) {
   $('convolution').value = d.convolution || '';
   $('headroom_db').value = d.headroom_db ?? '';
   $('soft_clip').checked = d.soft_clip !== false;
+  if (options) $('headphones').value = d.headphones || 'off';
   $('bits').value = String(o.bits);
   $('dsd_modulator').value = d.dsd_modulator; $('dsd_packing').value = d.dsd_packing; $('dsd_oversampling').value = d.dsd_oversampling;
   $('dsd_gain_db').value = d.dsd_gain_db ?? -3; $('dsd_passthrough').checked = d.dsd_passthrough !== false;
@@ -317,7 +319,7 @@ function loadSettings(set) {
 }
 function lockDsp() {
   const bp = $('bitperfect').checked, dsd = $('output_mode').value === 'dsd';
-  for (const id of ['filter', 'convolution', 'headroom_db', 'soft_clip', 'output_mode', 'matrix_enabled', 'matrix_preset', 'gpu', 'gpu_device', 'gpu_precision']) $(id).disabled = bp;
+  for (const id of ['filter', 'convolution', 'headphones', 'headroom_db', 'soft_clip', 'output_mode', 'matrix_enabled', 'matrix_preset', 'gpu', 'gpu_device', 'gpu_precision']) $(id).disabled = bp;
   for (const id of ['dither', 'bits']) $(id).disabled = bp || dsd;
   $('rate').disabled = bp || dsd;
   for (const id of ['dsd_rate', 'dsd_modulator', 'dsd_packing', 'dsd_gain_db', 'dsd_oversampling']) $(id).disabled = bp || !dsd;
@@ -373,6 +375,7 @@ $('gpu').onchange = () => save({ dsp: { gpu: $('gpu').value } });
 $('gpu_device').onchange = () => save({ dsp: { gpu_device: num('gpu_device') } });
 $('gpu_precision').onchange = () => save({ dsp: { gpu_precision: $('gpu_precision').value } });
 $('matrix_enabled').onchange = () => { lockDsp(); save({ matrix: { enabled: $('matrix_enabled').checked } }); };
+$('headphones').onchange = () => save({ dsp: { headphones: $('headphones').value } });
 $('matrix_preset').onchange = () => { matrixInfo(); save({ matrix: { preset: $('matrix_preset').value } }); };
 const stereo = () => ({ mono: $('m_mono').checked, swap: $('m_swap').checked, balance_db: num('m_balance'), mid_side: $('m_mid_side').value });
 for (const id of ['m_mono', 'm_swap', 'm_balance', 'm_mid_side']) $(id).onchange = () => save({ matrix: { stereo: stereo() } });
@@ -397,6 +400,7 @@ $('eq-save').onclick = () => save({ dsp: { eq: eqBands, eq_enabled: $('eq_enable
     $('gpu').innerHTML = opts(options.gpu_modes);
     $('gpu_precision').innerHTML = opts(options.gpu_precisions);
     $('matrix_preset').innerHTML = opts(options.matrix_presets) + '<option value="custom">custom</option>';
+    $('headphones').innerHTML = opts(options.headphone_modes || []);
     $('crossover-kinds').textContent = 'crossover kinds: ' + options.crossover_kinds.map(k => `${k.id} (${k.slopes.join('/')} dB/oct)`).join(', ');
     gpuInfo(); paintEndpoints();
     paint(await api('GET', '/api/status'));

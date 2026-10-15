@@ -243,6 +243,10 @@ pub fn patch_settings(s: &mut Settings, set: &serde_json::Map<String, Value>) ->
                     None => bad("gpu must be auto, on or off:"),
                 }
             }
+            "headphones" => match v.as_str().and_then(cadenza_dsp::HeadphoneMode::from_id) {
+                Some(m) => s.dsp.headphones = m,
+                None => bad("unknown headphones mode"),
+            },
             "matrix" => {
                 let id = match v {
                     Value::Null | Value::Bool(false) => Some("off".to_string()),

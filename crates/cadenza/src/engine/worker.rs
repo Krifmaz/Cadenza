@@ -819,6 +819,7 @@ impl Worker {
             dsd: dsd.unwrap_or_else(|| s.dsp.dsd()),
             gpu: s.dsp.gpu,
             matrix: s.matrix.clone(),
+            headphone: s.dsp.headphones,
         };
         let pipeline =
             Pipeline::new(input, config, &self.cache).map_err(|e: PipelineError| e.to_string())?;

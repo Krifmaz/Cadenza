@@ -74,6 +74,8 @@ pub struct EngineSettings {
     pub soft_clip: bool,
     /// GPU mode and device.
     pub gpu: GpuConfig,
+    /// Crossfeed / HRTF for headphone listening.
+    pub headphones: cadenza_dsp::HeadphoneMode,
 }
 
 impl Default for EngineSettings {
@@ -84,6 +86,7 @@ impl Default for EngineSettings {
             headroom_db: 0.0,
             soft_clip: true,
             gpu: GpuConfig::default(),
+            headphones: cadenza_dsp::HeadphoneMode::Off,
         }
     }
 }
@@ -92,11 +95,12 @@ impl Default for EngineSettings {
 pub const HEADROOM_RANGE: (f64, f64) = (-12.0, 0.0);
 
 /// The schema keys, in display order.
-pub const KEYS: [&str; 7] = [
+pub const KEYS: [&str; 8] = [
     "filter",
     "dither",
     "headroom_db",
     "soft_clip",
+    "headphones",
     "gpu",
     "gpu_device",
     "gpu_precision",
@@ -151,6 +155,18 @@ impl EngineSettings {
                 self.soft_clip = parse_bool(v)
                     .ok_or_else(|| format!("bad value {v:?} for soft_clip (true or false)"))?
             }
+            "headphones" => {
+                self.headphones = cadenza_dsp::HeadphoneMode::from_id(v).ok_or_else(|| {
+                    format!(
+                        "bad value {v:?} for headphones ({})",
+                        cadenza_dsp::HeadphoneMode::ALL
+                            .iter()
+                            .map(|m| m.1)
+                            .collect::<Vec<_>>()
+                            .join(", ")
+                    )
+                })?
+            }
             "gpu" => self.gpu.mode = parse_gpu(v)?,
             "gpu_device" => {
                 self.gpu.device = v
@@ -198,6 +214,7 @@ impl EngineSettings {
             headroom_db: Some(self.headroom_db),
             soft_clip: self.soft_clip,
             gpu: self.gpu,
+            headphone: self.headphones,
             ..PipelineConfig::default()
         }
     }
@@ -302,6 +319,12 @@ pub fn settings_schema(devices: &[(usize, String)]) -> Vec<Value> {
         json!({
             "key": "soft_clip", "label": "Soft clipper", "type": "bool", "default": d.soft_clip,
             "help": "Transparent soft clipper before quantisation, so intersample peaks never wrap or hard-clip.",
+        }),
+        json!({
+            "key": "headphones", "label": "Headphones", "type": "select",
+            "options": cadenza_dsp::HeadphoneMode::ALL.iter().map(|m| json!([m.1, m.2])).collect::<Vec<_>>(),
+            "default": d.headphones.id(),
+            "help": "For headphone listening (stereo only): crossfeed blends a little of each channel into the other ear; HRTF places two virtual speakers in front of you.",
         }),
     ];
     if cadenza_dsp::gpu::COMPILED_IN {
@@ -533,9 +556,9 @@ mod tests {
         if cadenza_dsp::gpu::WGPU_COMPILED_IN {
             assert_eq!(keys, KEYS);
         } else if cadenza_dsp::gpu::COMPILED_IN {
-            assert_eq!(keys, &KEYS[..6]);
+            assert_eq!(keys, &KEYS[..7]);
         } else {
-            assert_eq!(keys, &KEYS[..4]);
+            assert_eq!(keys, &KEYS[..5]);
         }
         for s in &schema {
             assert!(s["label"].as_str().is_some_and(|l| !l.is_empty()));

@@ -1,7 +1,7 @@
 //! The processing chain a player runs:
 //!
 //! ```text
-//! source PCM (f64) → volume → EQ → convolution → matrix → resampler → headroom/true-peak/soft clip → quantiser (dither) → integers
+//! source PCM (f64) → volume → EQ → convolution → headphones → matrix → resampler → headroom/true-peak/soft clip → quantiser (dither) → integers
 //! ```
 //!
 //! Every stage is optional. With `bit_perfect` requested nothing is built at all and the
@@ -90,6 +90,9 @@ pub struct PipelineConfig {
     /// Pipeline matrix (`[matrix]` table / `matrix_preset`): routing, per-output chains and
     /// crossovers; may change the channel count (PART matrix, [`crate::matrix`]).
     pub matrix: MatrixConfig,
+    /// Crossfeed or HRTF virtual speakers for headphones (stereo sources only,
+    /// [`crate::headphone`]).
+    pub headphone: crate::headphone::HeadphoneMode,
 }
 
 impl Default for PipelineConfig {
@@ -112,6 +115,7 @@ impl Default for PipelineConfig {
             dsd: DsdConfig::default(),
             gpu: GpuConfig::default(),
             matrix: MatrixConfig::default(),
+            headphone: crate::headphone::HeadphoneMode::Off,
         }
     }
 }
@@ -297,6 +301,8 @@ pub struct Pipeline {
     volume: Volume,
     eq: Option<Equalizer>,
     convolution: Option<ConvolutionStage>,
+    /// Crossfeed / HRTF (stereo only).
+    headphone: Option<crate::headphone::HeadphoneStage>,
     /// Routing / crossovers; present only when it changes something. Every stage after it
     /// runs with `out_channels` channels.
     matrix: Option<MatrixStage>,
@@ -372,6 +378,9 @@ impl Pipeline {
             }
             _ => None,
         };
+        let headphone = (!bp && ch == 2)
+            .then(|| crate::headphone::HeadphoneStage::new(config.headphone, input.rate))
+            .flatten();
         // Matrix: routing, per-output chains, crossovers. Built from the preset; skipped
         // when it is an identity so the chain can stay bit-perfect. From here on the chain
         // has `out_ch` channels.
@@ -412,8 +421,11 @@ impl Pipeline {
                 default_headroom_db(resampler.is_some())
             }
         });
-        let processing =
-            resampler.is_some() || convolution.is_some() || eq.is_some() || matrix.is_some();
+        let processing = resampler.is_some()
+            || convolution.is_some()
+            || eq.is_some()
+            || matrix.is_some()
+            || headphone.is_some();
         let headroom = (!bp && (headroom_db != 0.0 || processing))
             .then(|| Headroom::new(out_ch, headroom_db, config.soft_clip));
         Ok(Self {
@@ -422,6 +434,7 @@ impl Pipeline {
             volume,
             eq,
             convolution,
+            headphone,
             matrix,
             out_channels: out_ch,
             resampler,
@@ -529,6 +542,7 @@ impl Pipeline {
         self.volume.is_unity()
             && self.eq.is_none()
             && self.convolution.is_none()
+            && self.headphone.is_none()
             && self.matrix.is_none()
             && self.resampler.is_none()
             && self.headroom.as_ref().is_none_or(Headroom::is_transparent)
@@ -544,6 +558,11 @@ impl Pipeline {
             .as_ref()
             .map(|c| c.block() as f64 / self.input.rate as f64)
             .unwrap_or(0.0);
+        let conv = conv
+            + self
+                .headphone
+                .as_ref()
+                .map_or(0.0, |h| h.latency_frames() as f64 / self.input.rate as f64);
         conv + self
             .matrix
             .as_ref()
@@ -582,6 +601,9 @@ impl Pipeline {
         if let Some(c) = &mut self.convolution {
             c.reset();
         }
+        if let Some(h) = &mut self.headphone {
+            h.reset();
+        }
         if let Some(m) = &mut self.matrix {
             m.reset();
         }
@@ -606,6 +628,9 @@ impl Pipeline {
         }
         if let Some(c) = &mut self.convolution {
             self.scratch = c.run(&self.scratch, flush);
+        }
+        if let Some(h) = &mut self.headphone {
+            self.scratch = h.run(&self.scratch, flush);
         }
         if let Some(m) = &mut self.matrix {
             self.scratch = m.process(&self.scratch, flush);
@@ -688,6 +713,23 @@ impl Pipeline {
                 )),
                 params: json!({ "name": spec.name, "taps": taps, "rate": spec.rate, "channels": spec.channels.len() }),
                 active: self.convolution.is_some(),
+            });
+        }
+
+        if self.config.headphone != crate::headphone::HeadphoneMode::Off {
+            stages.push(Stage {
+                id: "headphone".into(),
+                name: "Headphones".into(),
+                detail: if self.headphone.is_some() {
+                    self.config.headphone.label().into()
+                } else {
+                    bypass(&format!(
+                        "{} · stereo sources only",
+                        self.config.headphone.label()
+                    ))
+                },
+                params: json!({ "mode": self.config.headphone.id() }),
+                active: self.headphone.is_some(),
             });
         }
 
@@ -999,6 +1041,64 @@ mod tests {
         assert_eq!(gpu.active, p.gpu_in_use());
         assert!(path.latency_seconds > 0.0);
         serde_json::to_string(&path).unwrap();
+    }
+
+    #[test]
+    fn headphone_stage_runs_on_stereo_only_and_shows_in_the_signal_path() {
+        use crate::headphone::HeadphoneMode;
+        let cache = CoefficientCache::disabled();
+        let input = InputFormat {
+            rate: 44100,
+            bits: 16,
+            channels: 2,
+            codec: "FLAC".into(),
+        };
+        let mut p = Pipeline::new(
+            input.clone(),
+            PipelineConfig {
+                headphone: HeadphoneMode::CrossfeedMeier,
+                ..Default::default()
+            },
+            &cache,
+        )
+        .unwrap();
+        assert!(!p.bit_perfect());
+        // A hard-left low tone reaches the right channel.
+        let pcm: Vec<f64> = (0..8820)
+            .flat_map(|i| [0.5 * (i as f64 * 0.01).sin(), 0.0])
+            .collect();
+        let out = p.process(&pcm);
+        assert!(out.iter().skip(2001).step_by(2).any(|w| w.abs() > 1000));
+        let sp = p.signal_path();
+        let st = sp.stages.iter().find(|s| s.id == "headphone").unwrap();
+        assert!(st.active && st.detail.contains("Meier"));
+        // HRTF, and its latency counted.
+        let p = Pipeline::new(
+            input.clone(),
+            PipelineConfig {
+                headphone: HeadphoneMode::Hrtf30,
+                ..Default::default()
+            },
+            &cache,
+        )
+        .unwrap();
+        assert!(p.latency_seconds() > 0.0);
+        // Mono: shown as bypassed.
+        let p = Pipeline::new(
+            InputFormat {
+                channels: 1,
+                ..input
+            },
+            PipelineConfig {
+                headphone: HeadphoneMode::Hrtf30,
+                ..Default::default()
+            },
+            &cache,
+        )
+        .unwrap();
+        let sp = p.signal_path();
+        let st = sp.stages.iter().find(|s| s.id == "headphone").unwrap();
+        assert!(!st.active && st.detail.contains("stereo sources only"));
     }
 
     #[test]

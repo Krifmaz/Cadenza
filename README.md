@@ -226,7 +226,7 @@ to do it:
    seconds; DSD (DoP) within 6 frames (34 µs). Not yet on real DACs over a real network.
 7. **Room correction built in** – measure with a USB microphone from the web UI (sweep, capture, compute the
    correction FIR). HQPlayer needs REW or Acourate outside the program. Headphone crossfeed and HRTF
-   presets in the engine as well.
+   presets in the engine as well – these two are done (`headphones`, see below); room correction next.
 8. **Filter designer** – pick transition width, stopband depth and phase and Cadenza designs and caches the
    filter; live response plots (passband ripple, stopband, impulse) for every filter in the web UI.
    HQPlayer only offers fixed catalogue entries.
@@ -302,6 +302,7 @@ eq = []                 # [{ kind = "peaking", freq = 100.0, gain_db = -3.0, q =
 eq_enabled = true
 # headroom_db = -3.0    # absent = automatic (-3 dB when upsampling, 0 otherwise)
 soft_clip = true        # transparent soft clipper as the last guard
+headphones = "off"      # off | crossfeed-bs2b | crossfeed-chu-moy | crossfeed-meier | hrtf-30 | hrtf-45 | hrtf-60
 output_mode = "pcm"     # pcm | dsd
 dsd_rate = "dsd256"     # dsd64 | dsd128 | dsd256 | dsd512 | dsd1024 | dsd2048 (native only)
 dsd_modulator = "asdm7" # asdm5 | asdm7 | dsd5v2 | dsd7v2 | asdm5ec | asdm7ec | asdm7ec8
@@ -382,7 +383,7 @@ ffmpeg -i song.flac -f f64le -acodec pcm_f64le - |
   output = value << 8), exactly what Encore's in-process engine produces for the same
   settings, sample for sample. The resampler tail is flushed at EOF.
 - `--set key=value` (repeatable) sets any key of the settings schema: `filter`, `dither`,
-  `headroom_db` (default 0), `soft_clip`, `gpu` (auto/on/off, GPU builds), `gpu_device`
+  `headroom_db` (default 0), `soft_clip`, `headphones`, `gpu` (auto/on/off, GPU builds), `gpu_device`
   (when a GPU is present) and `gpu_precision` (wgpu builds). Unknown keys are ignored with a warning; a bad value
   exits 2. `--filter`, `--dither`, `--headroom-db` and `--gpu` are aliases.
 - `cadenza render --describe` prints one JSON line: name, version, `protocol` (1), input
@@ -438,6 +439,26 @@ the same device:
   becomes the active one), standby.
 - **Volume** (0–100 with mute; no balance or fade), **Time** (track count, duration,
   seconds) and **Info** (track, codec, bit depth, sample rate), all evented.
+
+## Headphones: crossfeed and HRTF
+
+`headphones` (web UI, config, Encore, and `cadenza render --set headphones=…`) works on
+stereo sources, at the source rate before the upsampler:
+
+- **Crossfeed** – Bauer's method as bs2b implements it: each ear also gets the other
+  channel low-passed, its own channel slightly high-boosted, and the whole normalised so a
+  centred bass note keeps its level. `crossfeed-bs2b` (700 Hz, 4.5 dB), `crossfeed-chu-moy`
+  (700 Hz, 6 dB), `crossfeed-meier` (650 Hz, 9.5 dB, the strongest).
+- **HRTF** – the two channels played through measured head-related impulse responses of
+  loudspeakers at ±30°, ±45° or ±60° (`hrtf-30` …): MIT's KEMAR dummy head (Bill Gardner
+  and Keith Martin, MIT Media Lab), the diffuse-field-equalised set, resampled to the
+  source rate and scaled so nothing can come out louder than it went in. A dummy head is
+  nobody's own head: it moves the sound out of the head for most people, but not
+  perfectly in front.
+
+Tested: crossfeed separation at 100 Hz equals the preset's feed within 1 dB, and at
+8 kHz it is at least 8 dB more; HRTF puts a left-channel 3 kHz tone at least 5 dB louder
+in the left ear at 44.1, 48, 96 and 352.8 kHz; the impulse resampling keeps the response.
 
 ## SACD images and CUE sheets
 

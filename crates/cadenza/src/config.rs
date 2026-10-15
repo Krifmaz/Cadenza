@@ -148,6 +148,9 @@ pub struct DspConfig {
     /// `staged` (long FIR to f_dsd/8 or /16, then a short polyphase stage) or `full`
     /// (the long FIR runs to the DSD rate itself: 1024×/2048× PCM inside the pipeline).
     pub dsd_oversampling: DsdOversampling,
+    /// Headphones: `off`, `crossfeed-bs2b`, `crossfeed-chu-moy`, `crossfeed-meier`,
+    /// `hrtf-30`, `hrtf-45`, `hrtf-60`.
+    pub headphones: cadenza_dsp::HeadphoneMode,
     /// DSD sources (DSF/DFF) go to a DSD output untouched when the rates match and
     /// nothing else needs to touch the samples; off = always re-modulate through PCM.
     pub dsd_passthrough: bool,
@@ -172,6 +175,7 @@ impl Default for DspConfig {
             eq_enabled: true,
             headroom_db: None,
             soft_clip: true,
+            headphones: cadenza_dsp::HeadphoneMode::Off,
             output_mode: OutputMode::Pcm,
             dsd_rate: dsd.rate,
             dsd_modulator: dsd.modulator,

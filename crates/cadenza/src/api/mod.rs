@@ -311,6 +311,10 @@ pub fn options(settings: &crate::config::Settings) -> Value {
         "gpu_cuda_compiled_in": cadenza_dsp::gpu::CUDA_COMPILED_IN,
         "gpu_wgpu_compiled_in": cadenza_dsp::gpu::WGPU_COMPILED_IN,
         "matrix_presets": matrix_presets,
+        "headphone_modes": cadenza_dsp::HeadphoneMode::ALL
+            .iter()
+            .map(|m| json!({ "id": m.1, "label": m.2 }))
+            .collect::<Vec<_>>(),
         "crossover_kinds": crossover_kinds,
         "backends": crate::output::backends(),
         "pcm_rates": cadenza_dsp::resampler::pcm_output_rates(),

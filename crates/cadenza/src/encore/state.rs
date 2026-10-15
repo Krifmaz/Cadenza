@@ -227,6 +227,7 @@ pub fn engine_description(client: &Client, s: &Status, embedded: bool) -> Value 
         },
         "headroom_db": settings.dsp.headroom_db,
         "soft_clip": settings.dsp.soft_clip,
+        "headphones": settings.dsp.headphones.id(),
         "gpu": gpu_mode_id(settings.dsp.gpu.mode),
         "gpu_available": gpu_available,
         "gpu_in_use": gpu_in_use,
