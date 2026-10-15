@@ -28,6 +28,11 @@ pub enum Source {
         #[serde(default, skip_serializing_if = "Vec::is_empty")]
         headers: Vec<(String, String)>,
     },
+    /// PCM pushed in by a receiver in this process (AirPlay); see [`super::live`].
+    Live {
+        /// The registered stream's id.
+        live: String,
+    },
 }
 
 impl Source {
@@ -50,6 +55,7 @@ impl Source {
         match self {
             Source::Path { path } => path.display().to_string(),
             Source::Url { url, .. } => url.split('?').next().unwrap_or(url).to_string(),
+            Source::Live { live } => format!("live:{live}"),
         }
     }
 
@@ -63,6 +69,7 @@ impl Source {
                 .rsplit('/')
                 .next()?
                 .to_string(),
+            Source::Live { .. } => return None,
         };
         let (_, ext) = name.rsplit_once('.')?;
         (!ext.is_empty() && ext.len() <= 5).then(|| ext.to_ascii_lowercase())
@@ -77,6 +84,9 @@ impl Source {
                 let mime = src.content_type.clone();
                 Ok((Box::new(src), mime))
             }
+            Source::Live { live } => Err(io::Error::other(format!(
+                "live stream {live} is not a byte source"
+            ))),
         }
     }
 }

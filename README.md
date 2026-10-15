@@ -160,6 +160,7 @@ implemented and tested here; the notes say where we differ.
 | GPU offload | CUDA only (64-bit) | CUDA (64-bit, driver only – no toolkit) **and wgpu: Vulkan / Metal / DX12 on AMD, Intel, Apple Silicon and NVIDIA** (64-bit where the card has it, double-f32 ≈48-bit elsewhere); also builds and runs without a GPU; the upsampler's FFT polyphase core, the time-domain 44.1 ↔ 48 kHz stage and the room convolution run on it, verified against the CPU engine (CUDA through a CPU model of the exact kernels; wgpu on real Vulkan in CI with Mesa's software driver: 1.2–2.4e-15 relative in f64, 1–3e-14 in double-f32) and benchmarked (`cadenza bench`, row `upsampling (GPU)`) | exceeded on hardware: HQPlayer has no AMD / Intel / Apple GPU support. Not yet measured on real AMD / Intel / Apple cards, and the CUDA kernels are not yet run on an NVIDIA card since the rational stage was added (none here) |
 | 64-bit processing | yes | yes everywhere | matched |
 | UPnP / Roon / control | UPnP renderer, Roon via NAA | UPnP/DLNA MediaRenderer (AVTransport, RenderingControl, ConnectionManager, gapless next URI, events) with OpenHome services, HTTP API, web UI, Encore device | matched: UPnP AV and OpenHome (Product, Playlist, Volume, Time, Info) – tested with scripted control points, not yet with BubbleUPnP / Kazoo / mconnect themselves; no Roon |
+| AirPlay | no | AirPlay 1 receiver (ALAC, encrypted, volume, title / artist / album, progress) into the full engine | ahead: HQPlayer has none. Tested with a scripted sender, not yet with an iPhone or Mac; AirPlay 2 is not implemented |
 | Licence / price | proprietary | MIT / Apache-2.0, free | – |
 
 ### Notes: how Cadenza gets ahead
@@ -202,8 +203,11 @@ to do it:
    machine here). The WASAPI native-DSD GUID stays opt-in (`CADENZA_WASAPI_DSD_GUID`): there is no
    standard one to ship.
 4. **UPnP / OpenHome renderer and AirPlay receiver** in the player and the endpoint, so Audirvana,
-   mconnect, BubbleUPnP and phones can play into Cadenza. The UPnP/DLNA MediaRenderer and the OpenHome
-   services are done (`[upnp] enabled = true`, see below); next AirPlay. Roon talks to
+   mconnect, BubbleUPnP and phones can play into Cadenza. Done: the UPnP/DLNA MediaRenderer, the OpenHome
+   services (`[upnp] enabled = true`) and an AirPlay 1 receiver (`[airplay] enabled = true`), see below.
+   They run in the player (`cadenza serve`), so everything they receive goes through the DSP; to play
+   them on a DAC box, point the player's output at a `cadenza endpoint`. The endpoint itself stays a
+   plain output with no receivers of its own. Roon talks to
    HQPlayer only through the closed NAA protocol; Cadenza becomes a Roon zone through Encore's Roon
    extension instead.
 5. **DST-compressed DFF and SACD ISO** input (we refuse DST today), CUE sheets, gapless DSD.
@@ -332,6 +336,13 @@ enabled = false         # opens a port on the network, so off by default
 name = ""               # shown in control apps; empty = "Cadenza (<hostname>)"
 port = 49494            # descriptions, control and events (0 = any free port)
 
+[airplay]               # AirPlay 1 receiver in `cadenza serve`
+enabled = false         # opens ports on the network, so off by default
+name = ""               # shown on iPhones / Macs; empty = "Cadenza (<hostname>)"
+port = 5000             # RTSP (0 = any free port); audio uses three more UDP ports
+latency_ms = 2000       # buffered before playing (senders schedule 2 s ahead)
+volume = true           # follow the sender's volume slider
+
 [endpoint]              # `cadenza endpoint` on the DAC box
 name = ""               # advertised name; empty = "Cadenza endpoint on <hostname>"
 listen = "0.0.0.0:8778"
@@ -416,6 +427,40 @@ the same device:
   becomes the active one), standby.
 - **Volume** (0–100 with mute; no balance or fade), **Time** (track count, duration,
   seconds) and **Info** (track, codec, bit depth, sample rate), all evented.
+
+## AirPlay receiver
+
+With `[airplay] enabled = true`, `cadenza serve` shows up as a speaker on iPhones, iPads,
+Macs and in iTunes / Music, and what they play goes through the engine like any other
+source: upsampling, DSD, EQ, matrix, the signal path.
+
+- **AirPlay 1** (RAOP): advertised as `_raop._tcp` over mDNS; RTSP on `[airplay] port`;
+  Apple Lossless (or 16-bit PCM) over RTP/UDP, 44.1 kHz / 16 bit stereo – that is what
+  AirPlay 1 carries.
+- **Encryption**: senders only play to receivers that answer their challenge with the
+  AirPort Express key, and they wrap each session's AES key with it. That key was pulled
+  from the device in 2011 and has been public since; shairport-sync and every other open
+  AirPlay 1 receiver embed it, and so does Cadenza. It protects nothing here.
+- **Network**: lost packets are asked for again once; one still missing after 250 ms is
+  played as silence. The buffer (`latency_ms`) absorbs Wi-Fi jitter. The sender's clock
+  and the DAC's drift apart slowly: when the buffer runs a second over, the oldest audio
+  is dropped, and an empty buffer is bridged with silence. There is no sample-accurate
+  clock sync to the sender yet, so a long session can click once in a while.
+- **Control**: the sender's volume slider sets the engine volume (−30…0 dB, and mute;
+  `volume = false` leaves it alone); title, artist and album, duration and position show
+  in the web UI and the API. Pause and seek on the phone flush the buffer. A second sender
+  takes over from the first, as on an AirPort Express. Cover art is not shown yet, and
+  play/pause/next from Cadenza's own UI do not reach the phone (that needs DACP).
+- **AirPlay 2** (multi-room from the Home app, AAC, buffered audio) is a different, closed
+  protocol and is not implemented. Apple devices have kept playing to AirPlay 1 speakers
+  (shairport-sync still lists AirPlay 1 as supported); whether iOS 26 still does is not
+  confirmed here.
+
+Tested here: the key (the `Apple-Response` matches OpenSSL byte for byte), RSA-OAEP key
+unwrapping, AES-CBC packets, ALAC decoding, the reorder buffer and resend requests, and a
+scripted sender that runs a whole encrypted session against a real engine – challenge,
+SDP, setup, timing, a lost and resent packet, volume, metadata, progress, flush, takeover
+by a second sender, teardown. **Not yet tried with a real iPhone or Mac** (none here).
 
 ## ASIO (Windows)
 
@@ -632,7 +677,8 @@ SwiftShader, WARP) are slower than the CPU engine and are skipped unless
 
 - [ ] ASIO output on Windows (native DSD without a driver GUID)
 - [x] UPnP/DLNA MediaRenderer and OpenHome services
-- [ ] AirPlay receiver, MPRIS, Roon
+- [x] AirPlay 1 receiver
+- [ ] MPRIS, Roon
 - [ ] Non-uniformly partitioned convolution for lower latency with long impulses
 - [ ] "v3"-class modulators and more poly-sinc variants
 - [x] The resampler's FFT polyphase stages on the GPU (CUDA)

@@ -540,6 +540,9 @@ impl DsdDecoder {
             Source::Url { url, headers } => {
                 Box::new(super::source::HttpSource::open(url, headers)?)
             }
+            Source::Live { live } => {
+                return Err(std::io::Error::other(format!("live stream {live} is not DSD")).into())
+            }
         };
         Self::from_reader(src)
     }

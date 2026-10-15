@@ -545,6 +545,18 @@ fn serve(config: Config, path: std::path::PathBuf) -> anyhow::Result<()> {
     } else {
         None
     };
+    // The AirPlay receiver, likewise.
+    let _airplay = if config.airplay.enabled {
+        match cadenza::airplay::start(engine.clone(), &config.airplay, true) {
+            Ok(r) => Some(r),
+            Err(e) => {
+                log::error!("AirPlay receiver: {e}");
+                None
+            }
+        }
+    } else {
+        None
+    };
     runtime.block_on(cadenza::api::serve(&config.server.listen, engine))
 }
 

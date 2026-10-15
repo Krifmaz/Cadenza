@@ -4,6 +4,7 @@
 //! drive the real engine with the null output.
 #![warn(missing_docs)]
 
+pub mod airplay;
 pub mod api;
 pub mod bench;
 pub mod config;

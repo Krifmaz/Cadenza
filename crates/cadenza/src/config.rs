@@ -282,6 +282,8 @@ pub struct Config {
     pub endpoint: EndpointConfig,
     /// UPnP / DLNA renderer (`cadenza serve`).
     pub upnp: crate::upnp::UpnpConfig,
+    /// AirPlay 1 receiver (`cadenza serve`).
+    pub airplay: crate::airplay::AirplayConfig,
 }
 
 impl Config {

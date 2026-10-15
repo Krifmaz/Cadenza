@@ -92,7 +92,7 @@ pub struct Renderer {
 fn url_of(t: &Track) -> Option<&str> {
     match &t.source {
         Source::Url { url, .. } => Some(url),
-        Source::Path { .. } => None,
+        Source::Path { .. } | Source::Live { .. } => None,
     }
 }
 

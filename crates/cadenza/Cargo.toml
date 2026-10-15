@@ -55,6 +55,11 @@ mdns-sd = "0.13"
 # UPnP renderer: SSDP socket options and the interface list.
 socket2 = { version = "0.6", features = ["all"] }
 if-addrs = "0.13"
+rsa = "0.9"
+sha1 = "0.10"
+aes = "0.8"
+cbc = "0.1"
+base64 = "0.22"
 
 [target.'cfg(target_os = "linux")'.dependencies]
 alsa = { version = "0.9", optional = true }

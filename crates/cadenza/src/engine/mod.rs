@@ -186,6 +186,9 @@ pub enum Command {
     Remove(usize),
     /// Replace the settings (the worker rebuilds what changed).
     UpdateSettings(Box<Settings>),
+    /// Replace the title, artist, album, cover and duration of the playing entry, if its
+    /// source is this track's (live streams announce their metadata as they go).
+    SetTrackInfo(Box<Track>),
     /// Exit the worker thread.
     Shutdown,
 }

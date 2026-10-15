@@ -6,6 +6,7 @@
 //! pass-through to a DoP / native DSD output.
 
 use crate::decode::dsd::{is_dsd_extension, DsdDecodeError, DsdDecoder};
+use crate::decode::live::LiveDecoder;
 use crate::decode::{DecodeError, Decoder, Source, TrackInfo};
 use cadenza_dsp::dsd::DsdRate;
 use cadenza_dsp::signal_path::rate_label;
@@ -28,11 +29,18 @@ pub enum TrackDecoder {
     Pcm(Decoder),
     /// DSF / DFF.
     Dsd(DsdDecoder),
+    /// PCM pushed in by a receiver (AirPlay).
+    Live(LiveDecoder),
 }
 
 impl TrackDecoder {
     /// Open a source, picking the reader from the file extension (`.dsf` / `.dff`).
     pub fn open(source: &Source) -> Result<Self, TrackDecodeError> {
+        if let Source::Live { live } = source {
+            return LiveDecoder::open(live)
+                .map(TrackDecoder::Live)
+                .map_err(|e| TrackDecodeError::Pcm(e.into()));
+        }
         let dsd = source.extension().is_some_and(|e| is_dsd_extension(&e));
         if dsd {
             Ok(TrackDecoder::Dsd(DsdDecoder::open(source)?))
@@ -50,7 +58,7 @@ impl TrackDecoder {
     pub fn dsd_rate(&self) -> Option<u32> {
         match self {
             TrackDecoder::Dsd(d) => Some(d.dsd_info().rate),
-            TrackDecoder::Pcm(_) => None,
+            TrackDecoder::Pcm(_) | TrackDecoder::Live(_) => None,
         }
     }
 
@@ -59,6 +67,7 @@ impl TrackDecoder {
         match self {
             TrackDecoder::Pcm(d) => d.info().clone(),
             TrackDecoder::Dsd(d) => d.info(),
+            TrackDecoder::Live(d) => d.info(),
         }
     }
 
@@ -66,6 +75,7 @@ impl TrackDecoder {
     pub fn source_label(&self) -> String {
         match self {
             TrackDecoder::Pcm(d) => d.info().label(),
+            TrackDecoder::Live(d) => d.info().label(),
             TrackDecoder::Dsd(d) => {
                 let info = d.dsd_info();
                 let name = DsdRate::from_hz(info.rate)
@@ -94,6 +104,15 @@ impl TrackDecoder {
                 }
             }
             TrackDecoder::Dsd(d) => d.pcm_input_format(),
+            TrackDecoder::Live(d) => {
+                let i = d.info();
+                InputFormat {
+                    rate: i.rate,
+                    bits: i.bits,
+                    channels: i.channels,
+                    codec: i.codec,
+                }
+            }
         }
     }
 
@@ -108,6 +127,7 @@ impl TrackDecoder {
         match self {
             TrackDecoder::Pcm(d) => d.info().duration,
             TrackDecoder::Dsd(d) => d.duration().map(|d| d.as_secs_f64()),
+            TrackDecoder::Live(_) => None,
         }
     }
 
@@ -116,6 +136,7 @@ impl TrackDecoder {
         match self {
             TrackDecoder::Pcm(d) => d.position_seconds(),
             TrackDecoder::Dsd(d) => d.position_seconds(),
+            TrackDecoder::Live(d) => d.position_seconds(),
         }
     }
 
@@ -124,6 +145,8 @@ impl TrackDecoder {
         Ok(match self {
             TrackDecoder::Pcm(d) => d.seek(seconds)?,
             TrackDecoder::Dsd(d) => d.seek(seconds)?,
+            // A live stream plays on from where it is.
+            TrackDecoder::Live(d) => d.position_seconds(),
         })
     }
 
@@ -132,6 +155,7 @@ impl TrackDecoder {
         Ok(match self {
             TrackDecoder::Pcm(d) => d.next_chunk()?,
             TrackDecoder::Dsd(d) => d.next_chunk()?,
+            TrackDecoder::Live(d) => d.next_chunk(),
         })
     }
 
@@ -139,7 +163,7 @@ impl TrackDecoder {
     /// end, and always `None` for a PCM source.
     pub fn next_dsd_chunk(&mut self) -> Result<Option<Vec<Vec<u8>>>, TrackDecodeError> {
         Ok(match self {
-            TrackDecoder::Pcm(_) => None,
+            TrackDecoder::Pcm(_) | TrackDecoder::Live(_) => None,
             TrackDecoder::Dsd(d) => d.next_dsd_chunk()?,
         })
     }

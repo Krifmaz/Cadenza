@@ -340,6 +340,14 @@ impl Worker {
                 }
             }
             Command::UpdateSettings(new) => self.update_settings(*new),
+            Command::SetTrackInfo(t) => {
+                if let Some(cur) = self.index.and_then(|i| self.queue.get_mut(i)) {
+                    if cur.source == t.source {
+                        let source = std::mem::take(&mut cur.source);
+                        *cur = Track { source, ..*t };
+                    }
+                }
+            }
             Command::Shutdown => {}
         }
     }
