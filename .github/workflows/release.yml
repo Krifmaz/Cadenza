@@ -138,6 +138,9 @@ jobs:
       - name: SHA256SUMS
         working-directory: dist
         run: |
+          # The desktop installers arrive in per-format folders (deb/, msi/, …): flatten.
+          find . -mindepth 2 -type f -exec mv -t . {} +
+          find . -mindepth 1 -type d -empty -delete
           ls -la
           sha256sum * > SHA256SUMS
           cat SHA256SUMS
