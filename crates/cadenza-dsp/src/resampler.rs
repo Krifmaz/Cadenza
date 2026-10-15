@@ -927,6 +927,48 @@ fn cascade_split(l: usize, m: usize) -> Option<usize> {
         .filter(|l1| l / l1 >= 2)
 }
 
+/// The filter of one stage from its `l/m` ratio and the fraction of its input band that
+/// carries signal (1 for the first stage, less for the second stage of a cascade).
+pub(crate) type StageSpec<'a> = &'a dyn Fn(usize, usize, f64) -> FirSpec;
+
+/// The stages a conversion `in_rate → out_rate` runs: each stage's rates and filter.
+pub(crate) fn plan(in_rate: u32, out_rate: u32, spec: StageSpec) -> Vec<(u32, u32, FirSpec)> {
+    let g = gcd(in_rate, out_rate);
+    let (l, m) = ((out_rate / g) as usize, (in_rate / g) as usize);
+    let one = |a: u32, b: u32, band: f64| {
+        let g = gcd(a, b);
+        let (l, m) = ((b / g) as usize, (a / g) as usize);
+        let mut s = spec(l, m, band);
+        if !use_fft(l, m) && s.taps.div_ceil(l) > MAX_TIME_DOMAIN_SUBFILTER {
+            // A 4M-tap bank at L=160 would cost 26k multiplies per output sample; cap it.
+            let capped = FirSpec::with_window(
+                MAX_TIME_DOMAIN_SUBFILTER * l,
+                s.cutoff,
+                s.attenuation_db,
+                s.phase,
+                s.window,
+            );
+            log::warn!(
+                "{} is too long for the {l}/{m} time-domain converter; using {} taps",
+                s.taps,
+                capped.taps
+            );
+            s = capped;
+        }
+        (a, b, s)
+    };
+    match cascade_split(l, m) {
+        Some(l1) => {
+            let mid_rate = (in_rate as u64 * l1 as u64 / m as u64) as u32;
+            vec![
+                one(in_rate, mid_rate, 1.0),
+                one(mid_rate, out_rate, m as f64 / l1 as f64),
+            ]
+        }
+        None => vec![one(in_rate, out_rate, 1.0)],
+    }
+}
+
 /// A streaming, gapless, multi-channel sample-rate converter.
 pub struct Resampler {
     in_rate: u32,
@@ -973,6 +1015,43 @@ impl Resampler {
         cache: &CoefficientCache,
         gpu: Option<&dyn PolyphaseFactory>,
     ) -> Result<Self, ResampleError> {
+        let spec = |l: usize, m: usize, band: f64| {
+            // The second stage of a cascade must pass everything the first one produced,
+            // so it is never apodizing; its transition lies above the source band.
+            let k = if band < 1.0 {
+                FilterKind {
+                    apodizing: false,
+                    ..kind
+                }
+            } else {
+                kind
+            };
+            k.spec_for_ratio(l, m, attenuation_db)
+        };
+        Self::build(in_rate, out_rate, channels, &spec, cache, gpu)
+    }
+
+    /// A converter with a filter from the designer (see [`crate::design`]).
+    pub fn with_design(
+        in_rate: u32,
+        out_rate: u32,
+        channels: usize,
+        design: &crate::design::FilterDesign,
+        cache: &CoefficientCache,
+        gpu: Option<&dyn PolyphaseFactory>,
+    ) -> Result<Self, ResampleError> {
+        let spec = |l: usize, m: usize, band: f64| design.spec_for_stage(l, m, band);
+        Self::build(in_rate, out_rate, channels, &spec, cache, gpu)
+    }
+
+    fn build(
+        in_rate: u32,
+        out_rate: u32,
+        channels: usize,
+        spec: StageSpec,
+        cache: &CoefficientCache,
+        gpu: Option<&dyn PolyphaseFactory>,
+    ) -> Result<Self, ResampleError> {
         if in_rate == 0 || out_rate == 0 {
             return Err(ResampleError::Invalid("sample rate is zero"));
         }
@@ -984,46 +1063,13 @@ impl Resampler {
         }
         let g = gcd(in_rate, out_rate);
         let (l, m) = ((out_rate / g) as usize, (in_rate / g) as usize);
-
-        let stages = match cascade_split(l, m) {
-            Some(l1) => {
-                let mid_rate = (in_rate as u64 * l1 as u64 / m as u64) as u32;
-                let first = Self::stage(
-                    in_rate,
-                    mid_rate,
-                    channels,
-                    kind,
-                    attenuation_db,
-                    cache,
-                    gpu,
-                );
-                // The second stage must pass everything the first one produced, so it is
-                // never apodizing; its transition lies above the source band.
-                let second_kind = FilterKind {
-                    apodizing: false,
-                    ..kind
-                };
-                let second = Self::stage(
-                    mid_rate,
-                    out_rate,
-                    channels,
-                    second_kind,
-                    attenuation_db,
-                    cache,
-                    gpu,
-                );
-                vec![first, second]
-            }
-            None => vec![Self::stage(
-                in_rate,
-                out_rate,
-                channels,
-                kind,
-                attenuation_db,
-                cache,
-                gpu,
-            )],
-        };
+        let stages = plan(in_rate, out_rate, spec)
+            .into_iter()
+            .map(|(a, b, spec)| {
+                let h = cache.get_or_design(&spec);
+                Stage::new(a, b, channels, spec, &h, gpu)
+            })
+            .collect();
         Ok(Self {
             in_rate,
             out_rate,
@@ -1034,39 +1080,6 @@ impl Resampler {
             input_frames: 0,
             output_frames: 0,
         })
-    }
-
-    #[allow(clippy::too_many_arguments)]
-    fn stage(
-        in_rate: u32,
-        out_rate: u32,
-        channels: usize,
-        kind: FilterKind,
-        attenuation_db: f64,
-        cache: &CoefficientCache,
-        gpu: Option<&dyn PolyphaseFactory>,
-    ) -> Stage {
-        let g = gcd(in_rate, out_rate);
-        let (l, m) = ((out_rate / g) as usize, (in_rate / g) as usize);
-        let mut spec = kind.spec_for_ratio(l, m, attenuation_db);
-        if !use_fft(l, m) && spec.taps.div_ceil(l) > MAX_TIME_DOMAIN_SUBFILTER {
-            // A 4M-tap bank at L=160 would cost 26k multiplies per output sample; cap it.
-            let capped = FirSpec::with_window(
-                MAX_TIME_DOMAIN_SUBFILTER * l,
-                spec.cutoff,
-                spec.attenuation_db,
-                spec.phase,
-                spec.window,
-            );
-            log::warn!(
-                "{} is too long for the {l}/{m} time-domain converter; using {} taps",
-                spec.taps,
-                capped.taps
-            );
-            spec = capped;
-        }
-        let h = cache.get_or_design(&spec);
-        Stage::new(in_rate, out_rate, channels, spec, &h, gpu)
     }
 
     /// Build a single-stage converter around an explicit linear- or minimum-phase low-pass

@@ -789,8 +789,11 @@ impl Worker {
         let got = self.output_format.unwrap();
 
         let convolution = self.load_convolution();
+        let filter_design = cadenza_dsp::design::FilterDesign::parse(&s.dsp.filter);
         let filter = FilterKind::parse(&s.dsp.filter).unwrap_or_else(|| {
-            log::warn!("unknown filter {:?}, using the default", s.dsp.filter);
+            if filter_design.is_none() {
+                log::warn!("unknown filter {:?}, using the default", s.dsp.filter);
+            }
             FilterKind::default()
         });
         let dither = DitherKind::parse(&s.dsp.dither).unwrap_or_else(|| {
@@ -820,6 +823,7 @@ impl Worker {
             gpu: s.dsp.gpu,
             matrix: s.matrix.clone(),
             headphone: s.dsp.headphones,
+            filter_design,
         };
         let pipeline =
             Pipeline::new(input, config, &self.cache).map_err(|e: PipelineError| e.to_string())?;

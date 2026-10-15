@@ -65,6 +65,7 @@ pub fn router_with_room(engine: Engine, room: crate::room::Room) -> Router {
         )
         .route("/api/devices", get(devices))
         .route("/api/filters", get(filters))
+        .route("/api/filters/response", get(filter_response))
         .route("/api/dithers", get(dithers))
         .route("/api/options", get(options_route))
         .route("/api/queue", post(queue))
@@ -231,7 +232,7 @@ pub fn validate(settings: &crate::config::Settings) -> Result<(), String> {
     if !matches!(settings.output.bits, 16 | 24 | 32) {
         return Err("bits must be 16, 24 or 32".into());
     }
-    if FilterKind::parse(&d.filter).is_none() {
+    if !cadenza_dsp::design::is_filter_id(&d.filter) {
         return Err(format!("unknown filter {:?}", d.filter));
     }
     if DitherKind::parse(&d.dither).is_none() {
@@ -315,6 +316,52 @@ pub struct FilterQuery {
     pub out_rate: Option<u32>,
     /// Stopband attenuation in dB.
     pub attenuation_db: Option<f64>,
+}
+
+/// `?id=…&in_rate=…&out_rate=…` for `/api/filters/response`.
+#[derive(Deserialize)]
+struct ResponseQuery {
+    id: String,
+    in_rate: Option<u32>,
+    out_rate: Option<u32>,
+}
+
+/// The response plots of any filter (catalogue or designed) for a conversion, with its
+/// description; designs it first if needed (into the engine's filter cache).
+async fn filter_response(
+    State(st): State<AppState>,
+    Query(q): Query<ResponseQuery>,
+) -> Result<Json<Value>, ApiError> {
+    use cadenza_dsp::design::{response, Filter, MAX_PLOT_TAPS};
+    let f = Filter::parse(&q.id).ok_or_else(|| bad(format!("unknown filter {:?}", q.id)))?;
+    let (in_rate, out_rate) = match (q.in_rate, q.out_rate) {
+        (Some(i), Some(o)) if i >= 8000 && o > i && o <= 6_144_000 => (i, o),
+        (None, None) => (44_100, 705_600),
+        _ => {
+            return Err(bad(
+                "in_rate and out_rate must be given, out_rate above in_rate",
+            ))
+        }
+    };
+    let att = st.engine.settings().dsp.attenuation_db;
+    let cache = st.engine.cache();
+    tokio::task::spawn_blocking(move || {
+        let (spec, rate) = f.primary(in_rate, out_rate, att);
+        let info = f.describe(in_rate, out_rate, att);
+        if spec.taps > MAX_PLOT_TAPS {
+            return Err(bad(format!(
+                "{} taps at this rate: too long to plot (up to {} here)",
+                spec.taps,
+                MAX_PLOT_TAPS - 1
+            )));
+        }
+        let h = cache.get_or_design(&spec);
+        let (p, s) = f.edges(in_rate, out_rate, att);
+        let r = response(&h, rate, in_rate as f64 / 2.0, p, s);
+        Ok(Json(json!({ "info": info, "response": r })))
+    })
+    .await
+    .map_err(|e| ApiError(StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?
 }
 
 /// Every filter with taps, transition band, stopband and latency (see `FilterInfo`).
@@ -698,5 +745,67 @@ mod tests {
         );
         assert!(control_command("seek", None).is_err());
         assert!(control_command("dance", None).is_err());
+    }
+
+    #[test]
+    fn designed_filters_plot_and_can_be_selected() {
+        use crate::engine::{Engine, EngineOptions};
+        let mut s = crate::config::Settings::default();
+        s.output.backend = "null".into();
+        let engine = Engine::start(
+            s,
+            EngineOptions {
+                cache: cadenza_dsp::CoefficientCache::disabled(),
+                realtime: false,
+                persist: None,
+            },
+        );
+        let api = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let addr = api.local_addr().unwrap();
+        api.set_nonblocking(true).unwrap();
+        let app = router(engine.clone());
+        std::thread::spawn(move || {
+            let rt = tokio::runtime::Builder::new_current_thread()
+                .enable_all()
+                .build()
+                .unwrap();
+            rt.block_on(async move {
+                let l = tokio::net::TcpListener::from_std(api).unwrap();
+                axum::serve(l, app).await.unwrap();
+            });
+        });
+        let id = "custom-kaiser-l-c100-t10-s120";
+        let j: Value = ureq::get(&format!(
+            "http://{addr}/api/filters/response?id={id}&in_rate=48000&out_rate=192000"
+        ))
+        .call()
+        .unwrap()
+        .into_json()
+        .unwrap();
+        assert_eq!(j["info"]["id"], id);
+        assert_eq!(j["info"]["family"], "custom");
+        assert_eq!(j["response"]["filter_rate"], 192000.0);
+        assert!(j["response"]["stopband_db"].as_f64().unwrap() < -119.0);
+        assert_eq!(j["response"]["transition"].as_array().unwrap().len(), 800);
+        // Catalogue filters plot too; unknown ids and silly rates are refused.
+        assert!(
+            ureq::get(&format!("http://{addr}/api/filters/response?id=sinc-l-16k"))
+                .call()
+                .is_ok()
+        );
+        for q in ["id=nope", "id=sinc-l-16k&in_rate=48000&out_rate=44100"] {
+            assert!(matches!(
+                ureq::get(&format!("http://{addr}/api/filters/response?{q}")).call(),
+                Err(ureq::Error::Status(400, _))
+            ));
+        }
+        // The design is accepted as the filter setting.
+        ureq::put(&format!("http://{addr}/api/settings"))
+            .send_json(json!({ "dsp": { "filter": id } }))
+            .unwrap();
+        assert_eq!(engine.settings().dsp.filter, id);
+        assert!(ureq::put(&format!("http://{addr}/api/settings"))
+            .send_json(json!({ "dsp": { "filter": "custom-kaiser-l-c100-t10-s999" } }))
+            .is_err());
     }
 }

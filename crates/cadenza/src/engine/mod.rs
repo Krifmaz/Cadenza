@@ -237,6 +237,7 @@ impl Default for EngineOptions {
 pub(crate) struct Shared {
     pub status: Mutex<Arc<Status>>,
     pub events: broadcast::Sender<Event>,
+    pub cache: CoefficientCache,
 }
 
 /// Handle to the player.
@@ -259,6 +260,7 @@ impl Engine {
         let shared = Arc::new(Shared {
             status: Mutex::new(Arc::new(status)),
             events,
+            cache: options.cache.clone(),
         });
         let worker_shared = Arc::clone(&shared);
         std::thread::Builder::new()
@@ -266,6 +268,11 @@ impl Engine {
             .spawn(move || worker::run(rx, worker_shared, settings, options))
             .expect("spawn player thread");
         Engine { tx, shared }
+    }
+
+    /// Where the engine keeps designed filters (the filter designer's plots share it).
+    pub fn cache(&self) -> CoefficientCache {
+        self.shared.cache.clone()
     }
 
     /// The latest snapshot.

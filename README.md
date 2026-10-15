@@ -147,6 +147,7 @@ implemented and tested here; the notes say where we differ.
 | | HQPlayer | Cadenza | |
 |---|---|---|---|
 | Upsampling filters | sinc-M / L / Lm, closed-form, poly-sinc-gauss, xtr, ext3, min-phase & apodizing | `sinc`, `sinc-mx`, `sinc-xtr` (8M/16M), `closed-form`, `poly-sinc-gauss` (short/long/xla), `poly-sinc-ext3`; l / m / la / ma variants of each (64 catalogue entries) | matched – ours are our own designs, not copies of HQPlayer's exact responses |
+| Filter designer | none (fixed catalogue) | Any window (Kaiser, Dolph–Chebyshev, Gaussian, 3-term cosine), linear or minimum phase, cutoff, transition width and stopband (60–250 dB); length worked out per ratio; response, passband and impulse plots for every filter in the web UI | ahead: HQPlayer has no designer. Tested: every window and phase meets the asked stopband within 1 dB from the asked edge |
 | PCM output | up to 1.536 MHz | up to 1.536 MHz (32×), every multiple of both families, rational cross-family | matched |
 | Dither / noise shaping | TPDF, NS1–NS9, LNS15 | TPDF, EF2, Lipshitz, Wannamaker, Gesemann, `ns5`, `ns9`, `lns15`, `ns-adaptive`, per output rate | matched (our shaper designs; no NS1–NS4 names) |
 | DSD output | DSD64–DSD1024, ASDM5/7 (+ EC, v2/v3 variants) | DSD64–DSD1024 **and DSD2048**, `asdm5`, `asdm7`, `dsd5v2`, `dsd7v2`, error-correction `asdm5ec`, `asdm7ec`, `asdm7ec8` (look-ahead trellis, +6 / +10 dB in-band SNR over the plain loops at DSD64); DoP and native | matched and exceeded on rate; EC matched; no "v3" family yet; EC is CPU-heavy (see `cadenza bench`) |
@@ -230,9 +231,9 @@ to do it:
    the web UI (sweep, capture, compute the correction FIR, plots, apply). HQPlayer needs REW or Acourate
    outside the program. Headphone crossfeed and HRTF presets in the engine as well – also done
    (`headphones`). Tested against a simulated room only; not yet with a real microphone.
-8. **Filter designer** – pick transition width, stopband depth and phase and Cadenza designs and caches the
-   filter; live response plots (passband ripple, stopband, impulse) for every filter in the web UI.
-   HQPlayer only offers fixed catalogue entries.
+8. **Filter designer** – done (see "Filter designer" below): pick window, phase, cutoff, transition
+   width and stopband depth; Cadenza designs and caches the filter, and plots the response, passband
+   ripple and impulse of any filter in the web UI. HQPlayer only offers fixed catalogue entries.
 9. **Noise shaping "auto"** – the remaining named shapers for parity, then a per-DAC automatic choice of
    shaper and dither from the output's measured noise floor.
 10. **System-wide upsampler (standalone, no library, no player)** – Cadenza stays strictly an upsampler:
@@ -296,7 +297,7 @@ max_rate = 1536000      # cap for "auto"
 
 [dsp]
 bit_perfect = false
-filter = "sinc-l-64k"   # <family>-<phase>-<len>, see `cadenza filters`
+filter = "sinc-l-64k"   # <family>-<phase>-<len>, see `cadenza filters`; or a design, e.g. custom-kaiser-l-c100-t5-s150
 attenuation_db = 150.0  # design stopband for the sinc family
 dither = "tpdf"         # … ns5 | ns9 | lns15 | ns-adaptive, see `cadenza dithers`
 volume_db = 0.0
@@ -442,6 +443,41 @@ the same device:
   becomes the active one), standby.
 - **Volume** (0–100 with mute; no balance or fade), **Time** (track count, duration,
   seconds) and **Info** (track, codec, bit depth, sample rate), all evented.
+
+## Filter designer
+
+The "Filter designer" card in the web UI makes an upsampling filter to measure:
+
+- **Window**: Kaiser, Dolph–Chebyshev (equiripple stopband), Gaussian (no sidelobes, least
+  ringing) or Nuttall's 3-term cosine (fixed 71.5 dB).
+- **Phase**: linear (symmetric, pre- and post-ringing) or minimum (no pre-ringing).
+- **Cutoff**: where the response is −6 dB, 80–100 % of the source Nyquist (below 100 % is
+  "apodizing").
+- **Transition**: how wide the slope from passband to stopband is, 0.01–50 % of the source
+  Nyquist.
+- **Stopband**: 60–250 dB (deeper is below what 64-bit coefficients can hold).
+
+Cadenza works out the length at each ratio, so the filter has the same shape in Hz at every
+output rate (a 5 % Kaiser at 150 dB is about 7k taps at ×16). The design is a filter id like
+the catalogue's – `custom-kaiser-l-c100-t5-s150` – so it is used everywhere a filter id is:
+config, `PUT /api/settings`, Encore, and `cadenza render --set filter=…`.
+
+**Plot** shows, for a chosen conversion, the magnitude up to twice the source Nyquist (the
+peak level per point, so no sidelobe hides between points), the passband ripple and the
+impulse around its peak, with the measured stopband and ripple. **Plot selected filter** does
+the same for any catalogue filter (up to 2M taps at that rate). API:
+`GET /api/filters/response?id=…&in_rate=…&out_rate=…`.
+
+Tested: every window in both phases meets the asked stopband within 1 dB, measured from the
+asked-for stopband edge, with passband ripple under 0.01 dB; doubling the ratio or halving the
+transition doubles the length; a design runs through the resampler (including a 44.1 → 192 kHz
+cascade) and the whole pipeline. Kaiser's usual length estimate falls short for deep stopbands
+(up to 17 dB at 250 dB), so the designer lengthens Kaiser designs by up to 30 %.
+
+Minimum-phase filters up to 256k taps are now converted with 16× padding instead of 4×: at 17k
+taps that took the stopband from 3 dB short to on target and the passband ripple from 8e-4 to
+2e-5 dB. Minimum-phase filters already in the cache keep their old coefficients until the cache
+is cleared.
 
 ## Room correction
 
@@ -803,6 +839,7 @@ SwiftShader, WARP) are slower than the CPU engine and are skipped unless
 - [x] DST-compressed DFF, SACD ISO, CUE sheets, gapless DSD
 - [x] Multi-room sync groups of endpoints
 - [x] Room measurement and correction from the web UI; headphone crossfeed and HRTF
+- [x] Filter designer with response plots
 - [ ] MPRIS, Roon
 - [ ] Non-uniformly partitioned convolution for lower latency with long impulses
 - [ ] "v3"-class modulators and more poly-sinc variants

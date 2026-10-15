@@ -156,6 +156,29 @@
     <div class="row" style="margin-top:8px"><button id="eq-add">Add band</button><button class="primary" id="eq-save">Apply EQ</button></div>
   </section>
   <section class="card wide">
+    <h2>Filter designer</h2>
+    <div class="row">
+      <label class="field"><span>Window</span><select id="fd_window"><option value="kaiser">Kaiser</option><option value="dolph-chebyshev">Dolph–Chebyshev (closed-form)</option><option value="gaussian">Gaussian (no sidelobes)</option><option value="cosine3">3-term cosine (71.5 dB)</option></select></label>
+      <label class="field"><span>Phase</span><select id="fd_phase"><option value="l">Linear</option><option value="m">Minimum</option></select></label>
+      <label class="field"><span>Cutoff (% of source Nyquist)</span><input type="number" id="fd_cutoff" value="100" min="80" max="100" step="0.5"></label>
+      <label class="field"><span>Transition (% of source Nyquist)</span><input type="number" id="fd_transition" value="5" min="0.01" max="50" step="0.5"></label>
+      <label class="field"><span>Stopband (dB)</span><input type="number" id="fd_stopband" value="150" min="60" max="250" step="10"></label>
+    </div>
+    <div class="row" style="margin-top:8px">
+      <label class="field" style="flex:1"><span>Plot for</span><select id="fd_rates">
+        <option value="44100,705600">44.1 → 705.6 kHz (×16)</option><option value="44100,176400">44.1 → 176.4 kHz (×4)</option><option value="44100,352800">44.1 → 352.8 kHz (×8)</option>
+        <option value="48000,768000">48 → 768 kHz (×16)</option><option value="48000,192000">48 → 192 kHz (×4)</option><option value="96000,384000">96 → 384 kHz (×4)</option><option value="44100,48000">44.1 → 48 kHz</option></select></label>
+      <button id="fd-plot" class="primary">Plot design</button><button id="fd-plot-current">Plot selected filter</button><button id="fd-use">Use this design</button>
+    </div>
+    <div class="small" id="fd-info" style="margin-top:8px"></div>
+    <svg id="fd-transition" viewBox="0 0 600 240" style="width:100%;margin-top:8px"></svg>
+    <div class="row">
+      <svg id="fd-passband" viewBox="0 0 300 200" style="flex:1;min-width:260px"></svg>
+      <svg id="fd-impulse" viewBox="0 0 300 200" style="flex:1;min-width:260px"></svg>
+    </div>
+    <div class="hint">Pick a transition width, stopband depth, cutoff, window and phase; Cadenza works out the length (it grows with the ratio, so the filter has the same shape in Hz at every output rate), designs it in 64-bit and caches it. Top: the response up to twice the source Nyquist (peak level per point, so no sidelobe hides between points). Left: the passband ripple. Right: the impulse around its peak. Filters over 2M taps at the chosen rate are not plotted.</div>
+  </section>
+  <section class="card wide">
     <h2>Room correction <span class="badge" id="room-badge"></span></h2>
     <div class="row">
       <label class="field" style="flex:2"><span>Microphone</span><select id="room_input"></select></label>
@@ -279,6 +302,7 @@ function fillDsdRates() {
 
 function filterInfo() {
   const f = filters.find(x => x.id === $('filter').value);
+  if (!f && $('filter').value.startsWith('custom-')) { $('filter-info').textContent = 'A filter from the filter designer (below).'; return; }
   $('filter-info').textContent = f ? `${f.family} · ${f.taps_at_rate?.toLocaleString()} taps at ×${Math.round(f.out_rate / f.in_rate)} · transition ${Math.round(f.transition_hz)} Hz (${(f.transition_percent ?? 0).toFixed(3)} %) · stopband ${Math.round(f.stopband_db)} dB · latency ${((f.latency_seconds || 0) * 1000).toFixed(1)} ms · ${f.window} window` : '';
 }
 function ditherInfo() {
@@ -316,7 +340,7 @@ function loadSettings(set) {
   const d = set.dsp, o = set.output, m = set.matrix || {};
   $('bitperfect').checked = !!d.bit_perfect;
   $('output_mode').value = d.output_mode || 'pcm';
-  $('filter').value = d.filter; filterInfo();
+  ensureFilterOption(d.filter); $('filter').value = d.filter; filterInfo();
   $('dither').value = d.dither; ditherInfo();
   $('convolution').value = d.convolution || '';
   $('headroom_db').value = d.headroom_db ?? '';
@@ -407,6 +431,49 @@ $('eq').oninput = (e) => { const tr = e.target.closest('tr[data-i]'); const k = 
 $('eq').onclick = (e) => { const b = e.target.closest('[data-rm]'); if (b) { eqBands.splice(+b.dataset.rm, 1); paintEq(); } };
 $('eq-add').onclick = () => { eqBands.push({ kind: 'peaking', freq: 1000, gain_db: 0, q: 0.707 }); paintEq(); };
 $('eq-save').onclick = () => save({ dsp: { eq: eqBands, eq_enabled: $('eq_enabled').checked } });
+
+// Filter designer.
+const fdNum = (x) => Number(x).toFixed(4).replace(/0+$/, '').replace(/\.$/, '');
+const fdId = () => `custom-${$('fd_window').value}-${$('fd_phase').value}-c${fdNum(num('fd_cutoff'))}-t${fdNum(num('fd_transition'))}-s${fdNum(num('fd_stopband'))}`;
+function ensureFilterOption(id) {
+  if (!id || !id.startsWith('custom-') || [...$('filter').options].some(o => o.value === id)) return;
+  let g = $('filter').querySelector('optgroup[label="designed"]');
+  if (!g) { g = document.createElement('optgroup'); g.label = 'designed'; $('filter').appendChild(g); }
+  g.innerHTML = `<option value="${esc(id)}">${esc(id)}</option>`;
+}
+function plotXY(svg, W, H, series, o) {
+  const x = (v) => 30 + (v - o.x0) / (o.x1 - o.x0) * (W - 34);
+  const y = (v) => 20 + (1 - (Math.max(o.y0, Math.min(o.y1, v)) - o.y0) / (o.y1 - o.y0)) * (H - 36);
+  let g = '';
+  (o.gx || []).forEach(v => { g += `<line x1="${x(v)}" x2="${x(v)}" y1="20" y2="${H - 16}" stroke="#8884"/><text x="${x(v) - 8}" y="${H - 4}" font-size="9" fill="#888">${o.fx ? o.fx(v) : v}</text>`; });
+  (o.gy || []).forEach(v => { g += `<line x1="30" x2="${W - 4}" y1="${y(v)}" y2="${y(v)}" stroke="#8884"/><text x="1" y="${y(v) + 3}" font-size="9" fill="#888">${o.fy ? o.fy(v) : v}</text>`; });
+  (o.vx || []).forEach(([v, c]) => { g += `<line x1="${x(v)}" x2="${x(v)}" y1="20" y2="${H - 16}" stroke="${c}" stroke-dasharray="3 3"/>`; });
+  series.forEach(s => { g += `<polyline fill="none" stroke="${s.c}" stroke-width="1.3" points="${s.p.map(p => `${x(p[0]).toFixed(1)},${y(p[1]).toFixed(1)}`).join(' ')}"/>`; });
+  if (o.title) g += `<text x="30" y="12" font-size="10" fill="#888">${esc(o.title)}</text>`;
+  svg.innerHTML = g;
+}
+const ticks = (a, b, n) => { const st = Math.pow(10, Math.floor(Math.log10((b - a) / n))); const m = [1, 2, 5, 10].find(k => (b - a) / (st * k) <= n) * st; const out = []; for (let v = Math.ceil(a / m) * m; v <= b + 1e-12; v += m) out.push(+v.toPrecision(12)); return out; };
+let fdShown = null;
+async function fdPlot(id) {
+  const [ir, or] = $('fd_rates').value.split(',');
+  $('fd-info').textContent = 'Designing…';
+  try {
+    const j = await api('GET', `/api/filters/response?id=${encodeURIComponent(id)}&in_rate=${ir}&out_rate=${or}`);
+    const i = j.info, r = j.response;
+    fdShown = i.id;
+    $('fd-info').textContent = `${i.label} · ${i.taps_at_rate.toLocaleString()} taps at ${khz(r.filter_rate)} · transition ${Math.round(i.transition_hz)} Hz · measured stopband ${r.stopband_db.toFixed(1)} dB (from ${(r.stopband_hz / 1000).toFixed(2)} kHz) · passband ripple ${r.ripple_db.toExponential(1)} dB (to ${(r.passband_hz / 1000).toFixed(2)} kHz) · latency ${(i.latency_seconds * 1000).toFixed(2)} ms`;
+    const floor = Math.max(-300, Math.floor((r.stopband_db - 30) / 20) * 20);
+    const kx = (v) => (v / 1000).toFixed(v < 10000 ? 1 : 0) + 'k';
+    plotXY($('fd-transition'), 600, 240, [{ p: r.transition, c: '#6366f1' }], { x0: 0, x1: r.transition[r.transition.length - 1][0], y0: floor, y1: 5, gx: ticks(0, 2 * r.nyquist, 8), fx: kx, gy: ticks(floor, 0, 6), vx: [[r.nyquist, '#888'], [r.passband_hz, '#22c55e'], [r.stopband_hz, '#ef4444']], title: 'Magnitude (dB) · gray: source Nyquist · green / red: passband / stopband edge' });
+    const pv = r.passband.map(p => p[1]); let lo = Math.min(...pv), hi = Math.max(...pv); const pad = Math.max((hi - lo) * 0.2, 1e-9); lo -= pad; hi += pad;
+    plotXY($('fd-passband'), 300, 200, [{ p: r.passband, c: '#22c55e' }], { x0: 0, x1: r.passband_hz, y0: lo, y1: hi, gx: ticks(0, r.passband_hz, 4), fx: kx, gy: ticks(lo, hi, 4), fy: (v) => v.toExponential(0), title: 'Passband (dB)' });
+    const iv = r.impulse.map(p => p[1]);
+    plotXY($('fd-impulse'), 300, 200, [{ p: r.impulse, c: '#f59e0b' }], { x0: r.impulse[0][0], x1: r.impulse[r.impulse.length - 1][0], y0: Math.min(...iv) - 0.05, y1: 1.05, gx: ticks(r.impulse[0][0], r.impulse[r.impulse.length - 1][0], 4), fx: (v) => v + ' ms', gy: [0, 0.5, 1], title: 'Impulse' });
+  } catch (e) { $('fd-info').textContent = e.message; }
+}
+$('fd-plot').onclick = () => fdPlot(fdId());
+$('fd-plot-current').onclick = () => fdPlot($('filter').value);
+$('fd-use').onclick = async () => { const id = fdId(); ensureFilterOption(id); $('filter').value = id; filterInfo(); await save({ dsp: { filter: id } }); };
 
 // Room correction.
 const ROOM_OPTS = ['high_hz', 'max_boost_db', 'max_cut_db', 'tilt_db_per_octave'];

@@ -140,6 +140,19 @@ pub fn gpu_mode_id(mode: GpuMode) -> &'static str {
     }
 }
 
+/// The catalogue as `[id, label]` pairs, plus the current filter when it is a design (so
+/// Encore's picker can show it).
+fn filter_options(current: &str) -> Vec<Value> {
+    let mut v: Vec<Value> = FilterKind::catalog()
+        .iter()
+        .map(|k| json!([k.id(), k.label()]))
+        .collect();
+    if let Some(d) = cadenza_dsp::design::FilterDesign::parse(current) {
+        v.push(json!([d.id(), d.label()]));
+    }
+    v
+}
+
 /// The `engine` object: the v2 engine description the Encore UIs render.
 pub fn engine_description(client: &Client, s: &Status, embedded: bool) -> Value {
     let settings: &Settings = &s.settings;
@@ -204,7 +217,7 @@ pub fn engine_description(client: &Client, s: &Status, embedded: bool) -> Value 
         "output_id": output_id(&settings.output.backend, &settings.output.device),
         "bitperfect": settings.dsp.bit_perfect,
         "filter": settings.dsp.filter,
-        "filters": FilterKind::catalog().iter().map(|k| json!([k.id(), k.label()])).collect::<Vec<_>>(),
+        "filters": filter_options(&settings.dsp.filter),
         "dither": settings.dsp.dither,
         "dithers": DitherKind::catalog().iter().map(|d| json!([d.id(), d.label()])).collect::<Vec<_>>(),
         "rate": rate,

@@ -93,6 +93,8 @@ pub struct PipelineConfig {
     /// Crossfeed or HRTF virtual speakers for headphones (stereo sources only,
     /// [`crate::headphone`]).
     pub headphone: crate::headphone::HeadphoneMode,
+    /// A filter from the designer; when set it is used instead of `filter`.
+    pub filter_design: Option<crate::design::FilterDesign>,
 }
 
 impl Default for PipelineConfig {
@@ -116,6 +118,7 @@ impl Default for PipelineConfig {
             gpu: GpuConfig::default(),
             matrix: MatrixConfig::default(),
             headphone: crate::headphone::HeadphoneMode::Off,
+            filter_design: None,
         }
     }
 }
@@ -403,15 +406,19 @@ impl Pipeline {
             .map(MatrixStage::output_channels)
             .unwrap_or(ch);
         let resampler = if pcm_rate != input.rate {
-            Some(Resampler::new_on(
-                input.rate,
-                pcm_rate,
-                out_ch,
-                config.filter,
-                config.attenuation_db,
-                cache,
-                gpu.is_gpu().then_some(&gpu as &dyn PolyphaseFactory),
-            )?)
+            let on = gpu.is_gpu().then_some(&gpu as &dyn PolyphaseFactory);
+            Some(match &config.filter_design {
+                Some(d) => Resampler::with_design(input.rate, pcm_rate, out_ch, d, cache, on)?,
+                None => Resampler::new_on(
+                    input.rate,
+                    pcm_rate,
+                    out_ch,
+                    config.filter,
+                    config.attenuation_db,
+                    cache,
+                    on,
+                )?,
+            })
         } else {
             None
         };
@@ -667,6 +674,21 @@ impl Pipeline {
         ints
     }
 
+    /// The upsampling filter's id (designed or catalogue).
+    fn filter_id(&self) -> String {
+        match &self.config.filter_design {
+            Some(d) => d.id(),
+            None => self.config.filter.id(),
+        }
+    }
+
+    fn filter_label(&self) -> String {
+        match &self.config.filter_design {
+            Some(d) => d.label(),
+            None => self.config.filter.label(),
+        }
+    }
+
     /// Describe the chain.
     pub fn signal_path(&self) -> SignalPath {
         let bp = self.bit_perfect();
@@ -782,15 +804,18 @@ impl Pipeline {
                     name: "Upsampler".into(),
                     detail: format!(
                         "{} · {ratio} → {} kHz · {engine}",
-                        self.config.filter.label(),
+                        self.filter_label(),
                         rate_label(r.out_rate())
                     ),
                     params: json!({
-                        "filter": self.config.filter.id(),
-                        "label": self.config.filter.label(),
+                        "filter": self.filter_id(),
+                        "label": self.filter_label(),
                         "taps": r.spec().taps,
                         "phase": r.spec().phase.name(),
-                        "apodizing": self.config.filter.apodizing,
+                        "apodizing": match &self.config.filter_design {
+                            Some(d) => d.cutoff < 1.0,
+                            None => self.config.filter.apodizing,
+                        },
                         "attenuation_db": r.spec().attenuation_db,
                         "transition_hz": r.spec().transition_width() * r.in_rate() as f64 * l as f64,
                         "cutoff_hz": r.spec().cutoff * r.in_rate() as f64 * l as f64,
@@ -800,7 +825,11 @@ impl Pipeline {
                         "on_gpu": r.on_gpu(),
                         "stages": r.stages(),
                         "window": r.spec().window.name(),
-                        "family": self.config.filter.family.id(),
+                        "family": if self.config.filter_design.is_some() {
+                            "custom"
+                        } else {
+                            self.config.filter.family.id()
+                        },
                         "stopband_db": r.spec().attenuation_db,
                         "latency_seconds": r.latency_seconds(),
                     }),
@@ -811,7 +840,7 @@ impl Pipeline {
                 id: "resampler".into(),
                 name: "Upsampler".into(),
                 detail: bypass(&format!("{} kHz unchanged", rate_label(self.input.rate))),
-                params: json!({ "filter": self.config.filter.id(), "rate": self.input.rate }),
+                params: json!({ "filter": self.filter_id(), "rate": self.input.rate }),
                 active: false,
             }),
         }
@@ -888,7 +917,7 @@ impl Pipeline {
                 input.format,
                 input.short(),
                 rate_label(d.pcm_rate()),
-                self.config.filter.id(),
+                self.filter_id(),
                 d.modulator().label(),
                 d.output_label()
             ),
@@ -1576,5 +1605,36 @@ mod tests {
         assert_eq!(out.len(), n * 4 * 4);
         assert!(p.latency_seconds() > 0.0);
         assert_eq!(p.signal_path().output.channels, 4);
+    }
+
+    #[test]
+    fn a_designed_filter_replaces_the_catalogue_one() {
+        let d = crate::design::FilterDesign::parse("custom-gaussian-m-c95-t10-s140").unwrap();
+        let cache = CoefficientCache::disabled();
+        let p = Pipeline::new(
+            InputFormat {
+                rate: 44100,
+                bits: 16,
+                channels: 2,
+                codec: "FLAC".into(),
+            },
+            PipelineConfig {
+                output_rate: Some(176_400),
+                filter_design: Some(d.clone()),
+                ..Default::default()
+            },
+            &cache,
+        )
+        .unwrap();
+        let path = p.signal_path();
+        let r = path.stages.iter().find(|s| s.id == "resampler").unwrap();
+        assert!(r.active);
+        assert_eq!(r.params["filter"], d.id());
+        assert_eq!(r.params["family"], "custom");
+        assert_eq!(r.params["apodizing"], true);
+        assert_eq!(r.params["phase"], "minimum");
+        assert_eq!(r.params["window"], "gaussian");
+        let cutoff = r.params["cutoff_hz"].as_f64().unwrap();
+        assert!((cutoff - 0.95 * 22050.0).abs() < 1.0, "{cutoff}");
     }
 }

@@ -7,7 +7,7 @@ use crate::engine::{Command, Engine, Track};
 use crate::output::split_backend;
 use cadenza_dsp::dsd::{DsdModulator, DsdOversampling, DsdPacking, DsdRate, OutputMode};
 use cadenza_dsp::gpu::GpuMode;
-use cadenza_dsp::{DitherKind, FilterKind};
+use cadenza_dsp::DitherKind;
 use serde_json::Value;
 use std::collections::VecDeque;
 use std::sync::Mutex;
@@ -146,7 +146,10 @@ pub fn patch_settings(s: &mut Settings, set: &serde_json::Map<String, Value>) ->
                 Some(b) => s.dsp.bit_perfect = b,
                 None => bad("not a boolean"),
             },
-            "filter" => match v.as_str().filter(|id| FilterKind::parse(id).is_some()) {
+            "filter" => match v
+                .as_str()
+                .filter(|id| cadenza_dsp::design::is_filter_id(id))
+            {
                 Some(id) => s.dsp.filter = id.to_string(),
                 None => bad("unknown filter"),
             },

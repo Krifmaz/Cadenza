@@ -438,8 +438,12 @@ pub fn minimum_phase(h: &[f64], floor_db: f64) -> Vec<f64> {
         1
     } else if n > (1 << 20) {
         2
-    } else {
+    } else if n > (1 << 18) {
         4
+    } else {
+        // Short designs get more room: the cepstrum's time aliasing shows as passband
+        // ripple and a shallower stopband (measured: 3 dB short at 17k taps with 4×).
+        16
     };
     let m = next_pow2(n) * pad;
     let mut fft = RealFft::new(m);

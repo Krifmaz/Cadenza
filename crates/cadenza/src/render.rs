@@ -66,6 +66,8 @@ pub const OUT_FORMATS: [&str; 1] = ["s32le"];
 pub struct EngineSettings {
     /// Upsampling filter.
     pub filter: FilterKind,
+    /// A designed filter (`custom-…`), used instead of `filter` when set.
+    pub filter_design: Option<cadenza_dsp::design::FilterDesign>,
     /// Dither / noise shaper.
     pub dither: DitherKind,
     /// Level after the resampler in dB (0 = the original level, as Encore renders).
@@ -82,6 +84,7 @@ impl Default for EngineSettings {
     fn default() -> Self {
         Self {
             filter: FilterKind::default(),
+            filter_design: None,
             dither: DitherKind::Tpdf,
             headroom_db: 0.0,
             soft_clip: true,
@@ -127,11 +130,18 @@ impl EngineSettings {
     pub fn set(&mut self, key: &str, value: &str) -> Result<bool, String> {
         let v = value.trim();
         match key.trim() {
-            "filter" => {
-                self.filter = FilterKind::parse(v).ok_or_else(|| {
-                    format!("unknown filter {v:?} (see `cadenza filters` or --describe)")
-                })?
-            }
+            "filter" => match cadenza_dsp::design::Filter::parse(v) {
+                Some(cadenza_dsp::design::Filter::Catalog(k)) => {
+                    self.filter = k;
+                    self.filter_design = None;
+                }
+                Some(cadenza_dsp::design::Filter::Designed(d)) => self.filter_design = Some(d),
+                None => {
+                    return Err(format!(
+                        "unknown filter {v:?} (see `cadenza filters` or --describe)"
+                    ))
+                }
+            },
             "dither" => {
                 self.dither = DitherKind::parse(v).ok_or_else(|| {
                     format!("unknown dither {v:?} (see `cadenza dithers` or --describe)")
@@ -215,6 +225,7 @@ impl EngineSettings {
             soft_clip: self.soft_clip,
             gpu: self.gpu,
             headphone: self.headphones,
+            filter_design: self.filter_design.clone(),
             ..PipelineConfig::default()
         }
     }
@@ -304,7 +315,7 @@ pub fn settings_schema(devices: &[(usize, String)]) -> Vec<Value> {
         json!({
             "key": "filter", "label": "Upsampling filter", "type": "select",
             "options": filters, "default": d.filter.id(),
-            "help": "The interpolation filter. Longer filters are sharper and use more CPU (or GPU).",
+            "help": "The interpolation filter. Longer filters are sharper and use more CPU (or GPU). A filter made in Cadenza's filter designer (an id starting custom-) is accepted too.",
         }),
         json!({
             "key": "dither", "label": "Dither / noise shaping", "type": "select",
@@ -530,6 +541,17 @@ mod tests {
         assert_eq!(s.gpu.device, 1);
         assert_eq!(s.set("from_the_future", "x"), Ok(false));
         assert!(s.set("filter", "nope").is_err());
+        assert_eq!(s.set("filter", "custom-gaussian-m-c95-t3-s160"), Ok(true));
+        assert_eq!(
+            s.pipeline_config(176_400, 24)
+                .filter_design
+                .map(|d| d.id())
+                .as_deref(),
+            Some("custom-gaussian-m-c95-t3-s160")
+        );
+        assert_eq!(s.set("filter", "sinc-m-256k"), Ok(true));
+        assert!(s.filter_design.is_none());
+        assert!(s.set("filter", "custom-gaussian-m-c95-t3-s999").is_err());
         assert!(s.set("dither", "nope").is_err());
         assert!(s.set("headroom_db", "loud").is_err());
         assert!(s.set("headroom_db", "6").is_err());

@@ -8,6 +8,7 @@
 pub mod bench;
 pub mod cache;
 pub mod convolution;
+pub mod design;
 pub mod dither;
 pub mod dsd;
 pub mod eq;
