@@ -660,7 +660,7 @@ dependencies = [
 
 [[package]]
 name = "cadenza"
-version = "2.4.1"
+version = "2.5.0"
 dependencies = [
  "aes",
  "alsa",
@@ -707,7 +707,7 @@ dependencies = [
 
 [[package]]
 name = "cadenza-desktop"
-version = "2.4.1"
+version = "2.5.0"
 dependencies = [
  "cadenza",
  "env_logger",
@@ -723,7 +723,7 @@ dependencies = [
 
 [[package]]
 name = "cadenza-dsp"
-version = "2.4.1"
+version = "2.5.0"
 dependencies = [
  "cudarc",
  "dirs 6.0.0",
