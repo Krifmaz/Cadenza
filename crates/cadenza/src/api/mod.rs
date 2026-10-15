@@ -803,6 +803,11 @@ mod tests {
         ureq::put(&format!("http://{addr}/api/settings"))
             .send_json(json!({ "dsp": { "filter": id } }))
             .unwrap();
+        // The engine applies settings on its own thread.
+        let t = std::time::Instant::now();
+        while engine.settings().dsp.filter != id && t.elapsed().as_secs() < 10 {
+            std::thread::sleep(std::time::Duration::from_millis(10));
+        }
         assert_eq!(engine.settings().dsp.filter, id);
         assert!(ureq::put(&format!("http://{addr}/api/settings"))
             .send_json(json!({ "dsp": { "filter": "custom-kaiser-l-c100-t10-s999" } }))
