@@ -9,7 +9,9 @@
 //!   ID3v2 block the header points to.
 //! * **DFF** (Philips DSDIFF): big-endian IFF; `FRM8` → `FVER`, `PROP` (`FS  `, `CHNL`,
 //!   `CMPR`), `DSD ` data interleaved **one byte per channel per frame**, MSB oldest.
-//!   `DST ` compressed data is refused. Artist/title come from the `DIIN` chunk.
+//!   or a `DST ` chunk of DST-compressed frames (1/75 s each, decoded losslessly by
+//!   [`super::dst`]; a `DSTI` index, when present, makes seeking direct). Artist/title come
+//!   from the `DIIN` chunk.
 //!
 //! Three ways to play DSD, selected by the player:
 //!
@@ -73,9 +75,34 @@ pub struct DsdInfo {
     data_offset: u64,
     /// Length of the sample data in bytes.
     data_len: u64,
+    /// DST-compressed DSDIFF.
+    dst: Option<DstLayout>,
+}
+
+/// Where the DST frames of a DSDIFF file are.
+#[derive(Clone, Debug, PartialEq)]
+struct DstLayout {
+    /// Frames (1/75 s each).
+    frames: u64,
+    /// First sub-chunk after `FRTE`, and the end of the `DST ` chunk.
+    first: u64,
+    end: u64,
 }
 
 impl DsdInfo {
+    /// `DSF`, `DFF` or `DFF DST`.
+    pub fn codec_label(&self) -> &'static str {
+        match (self.container, &self.dst) {
+            (DsdContainer::Dff, Some(_)) => "DFF DST",
+            (c, _) => c.codec_name(),
+        }
+    }
+
+    /// Whether the data is DST-compressed.
+    pub fn is_dst(&self) -> bool {
+        self.dst.is_some()
+    }
+
     /// Duration in seconds.
     pub fn duration(&self) -> f64 {
         self.frames as f64 / self.rate as f64
@@ -83,7 +110,7 @@ impl DsdInfo {
     /// The decoder's [`TrackInfo`] (codec `DSF`/`DFF`, 1 bit, DSD rate).
     pub fn track_info(&self) -> TrackInfo {
         TrackInfo {
-            codec: self.container.codec_name().into(),
+            codec: self.codec_label().into(),
             rate: self.rate,
             bits: 1,
             channels: self.channels,
@@ -102,9 +129,9 @@ pub enum DsdDecodeError {
     /// Not a DSF/DFF file, or a damaged one.
     #[error("not a DSD file: {0}")]
     Format(String),
-    /// DST-compressed DSDIFF.
-    #[error("DST-compressed DSDIFF is not supported")]
-    Dst,
+    /// A DST frame that does not decode.
+    #[error("DST: {0}")]
+    Dst(#[from] super::dst::DstError),
     /// The DSP refused the rates.
     #[error("{0}")]
     Dsp(#[from] cadenza_dsp::dsd::DsdError),
@@ -144,6 +171,25 @@ pub struct DsdReader<R: Read + Seek> {
     /// Where the source's cursor is (seeks are only issued when it has to move, because
     /// an HTTP source reopens its connection on every seek).
     file_pos: u64,
+    dst: Option<Box<DstState>>,
+}
+
+/// DST decoding state: the frames found so far and the last one decoded.
+struct DstState {
+    decoder: super::dst::DstDecoder,
+    /// `(data offset, length)` of the `DSTF` chunks found so far, in order.
+    found: Vec<(u64, u32)>,
+    /// Where scanning for the next `DSTF` continues.
+    scan: u64,
+    /// The `DSTI` index: `(offset, length)` per frame, as stored.
+    index: Option<Vec<(u64, u32)>>,
+    /// Its offset convention: `Some(true)` when the entries point at the frame data,
+    /// `Some(false)` at the chunk header (worked out from the first frame).
+    index_at_data: Option<bool>,
+    /// The frame in `frame` (byte-interleaved), if any.
+    current: Option<u64>,
+    frame: Vec<u8>,
+    raw: Vec<u8>,
 }
 
 impl<R: Read + Seek> DsdReader<R> {
@@ -152,9 +198,10 @@ impl<R: Read + Seek> DsdReader<R> {
         src.seek(SeekFrom::Start(0))?;
         let mut magic = [0u8; 4];
         src.read_exact(&mut magic)?;
+        let mut index = None;
         let info = match &magic {
             b"DSD " => parse_dsf(&mut src)?,
-            b"FRM8" => parse_dff(&mut src)?,
+            b"FRM8" => parse_dff(&mut src, &mut index)?,
             _ => return Err(bad("neither DSF nor DSDIFF magic")),
         };
         if info.channels == 0 || info.channels > 32 {
@@ -164,11 +211,28 @@ impl<R: Read + Seek> DsdReader<R> {
             return Err(bad(format!("implausible DSD rate {} Hz", info.rate)));
         }
         let file_pos = src.stream_position()?;
+        let dst = match &info.dst {
+            Some(l) => {
+                let decoder = super::dst::DstDecoder::new(info.channels, info.rate)?;
+                Some(Box::new(DstState {
+                    frame: vec![0; decoder.frame_bytes()],
+                    decoder,
+                    found: Vec::new(),
+                    scan: l.first,
+                    index: index.take(),
+                    index_at_data: None,
+                    current: None,
+                    raw: Vec::new(),
+                }))
+            }
+            None => None,
+        };
         Ok(Self {
             src,
             info,
             pos: 0,
             file_pos,
+            dst,
         })
     }
 
@@ -196,6 +260,104 @@ impl<R: Read + Seek> DsdReader<R> {
         Ok(got)
     }
 
+    /// `(offset, length)` of the data of DST frame `n`, scanning the chunk list (or using
+    /// the index) as far as needed.
+    fn dst_locate(&mut self, n: u64) -> Result<Option<(u64, u32)>, DsdDecodeError> {
+        let end = self.info.dst.as_ref().map_or(0, |l| l.end);
+        loop {
+            let st = self.dst.as_mut().expect("DST state");
+            if let Some(found) = st.found.get(n as usize) {
+                return Ok(Some(*found));
+            }
+            // With an index, trust it once the first frame has shown which offset it means.
+            if let (Some(index), Some(at_data)) = (&st.index, st.index_at_data) {
+                return Ok(index
+                    .get(n as usize)
+                    .map(|(o, l)| (if at_data { *o } else { o + 12 }, *l)));
+            }
+            let scan = st.scan;
+            if scan + 12 > end {
+                return Ok(None);
+            }
+            let mut hdr = [0u8; 12];
+            if self.read_at(scan, &mut hdr)? < 12 {
+                return Ok(None);
+            }
+            let size = u64be(&hdr[4..]);
+            let st = self.dst.as_mut().expect("DST state");
+            if &hdr[0..4] == b"DSTF" {
+                st.found.push((scan + 12, size.min(u32::MAX as u64) as u32));
+                if st.found.len() == 1 {
+                    st.index_at_data =
+                        st.index
+                            .as_ref()
+                            .and_then(|i| i.first())
+                            .and_then(|(o, _)| {
+                                if *o == scan + 12 {
+                                    Some(true)
+                                } else if *o == scan {
+                                    Some(false)
+                                } else {
+                                    None
+                                }
+                            });
+                }
+            }
+            st.scan = scan + 12 + size + (size & 1);
+        }
+    }
+
+    /// Decode DST frame `n` into the frame buffer (if not there already).
+    fn dst_load(&mut self, n: u64) -> Result<bool, DsdDecodeError> {
+        if self.dst.as_ref().is_some_and(|s| s.current == Some(n)) {
+            return Ok(true);
+        }
+        let Some((off, len)) = self.dst_locate(n)? else {
+            return Ok(false);
+        };
+        let mut raw = std::mem::take(&mut self.dst.as_mut().expect("DST state").raw);
+        raw.resize(len as usize, 0);
+        let got = self.read_at(off, &mut raw)?;
+        raw.truncate(got);
+        let st = self.dst.as_mut().expect("DST state");
+        let res = st.decoder.decode(&raw, &mut st.frame);
+        st.raw = raw;
+        match res {
+            Ok(()) => {}
+            Err(e) => {
+                // One bad frame: play silence for it rather than stop.
+                log::warn!("DST frame {n}: {e}");
+                st.frame.fill(0x69);
+            }
+        }
+        st.current = Some(n);
+        Ok(true)
+    }
+
+    fn read_dst(&mut self, want: usize, planar: &mut [Vec<u8>]) -> Result<(), DsdDecodeError> {
+        let ch = self.info.channels as usize;
+        let frame_bytes = super::dst::bits_per_frame(self.info.rate) / 8;
+        let mut byte_pos = self.pos / 8;
+        let mut collected = 0;
+        while collected < want {
+            let n = byte_pos / frame_bytes as u64;
+            if !self.dst_load(n)? {
+                break;
+            }
+            let st = self.dst.as_ref().expect("DST state");
+            let off = (byte_pos % frame_bytes as u64) as usize;
+            let take = (frame_bytes - off).min(want - collected);
+            for i in off..off + take {
+                for (c, p) in planar.iter_mut().enumerate() {
+                    p.push(st.frame[i * ch + c]);
+                }
+            }
+            collected += take;
+            byte_pos += take as u64;
+        }
+        Ok(())
+    }
+
     /// Read up to `max_frames` frames (whole bytes, at least one) as planar MSB-first
     /// bytes, one `Vec` per channel. `Ok(None)` at the end.
     pub fn read_frames(
@@ -211,6 +373,7 @@ impl<R: Read + Seek> DsdReader<R> {
         let mut planar: Vec<Vec<u8>> = (0..ch).map(|_| Vec::with_capacity(want)).collect();
         let mut byte_pos = self.pos / 8;
         match self.info.container {
+            DsdContainer::Dff if self.info.dst.is_some() => self.read_dst(want, &mut planar)?,
             DsdContainer::Dff => {
                 let mut buf = vec![0u8; want * ch];
                 let got = self.read_at(self.info.data_offset + byte_pos * ch as u64, &mut buf)?;
@@ -334,10 +497,14 @@ fn parse_dsf<R: Read + Seek>(src: &mut R) -> Result<DsdInfo, DsdDecodeError> {
         block_size,
         data_offset,
         data_len,
+        dst: None,
     })
 }
 
-fn parse_dff<R: Read + Seek>(src: &mut R) -> Result<DsdInfo, DsdDecodeError> {
+fn parse_dff<R: Read + Seek>(
+    src: &mut R,
+    index: &mut Option<Vec<(u64, u32)>>,
+) -> Result<DsdInfo, DsdDecodeError> {
     // "FRM8" already consumed.
     let head = read_exact(src, 12)?;
     let form_size = u64be(&head[0..]);
@@ -349,6 +516,8 @@ fn parse_dff<R: Read + Seek>(src: &mut R) -> Result<DsdInfo, DsdDecodeError> {
     let mut channels = 0u32;
     let mut compressed = false;
     let mut data: Option<(u64, u64)> = None;
+    let mut dst: Option<DstLayout> = None;
+    let mut dst_index: Option<Vec<(u64, u32)>> = None;
     let mut tags = Tags::default();
     loop {
         let pos = src.stream_position()?;
@@ -389,7 +558,38 @@ fn parse_dff<R: Read + Seek>(src: &mut R) -> Result<DsdInfo, DsdDecodeError> {
                 }
             }
             b"DSD " => data = Some((body_start, size)),
-            b"DST " => return Err(DsdDecodeError::Dst),
+            b"DST " => {
+                // FRTE (frame count, rate) first, then DSTF / DSTC chunks.
+                let mut h = [0u8; 12];
+                src.read_exact(&mut h)?;
+                if &h[0..4] != b"FRTE" || u64be(&h[4..]) < 6 {
+                    return Err(bad("DSDIFF: DST chunk without FRTE"));
+                }
+                let frte = read_exact(src, 6)?;
+                let frames = u32be(&frte[0..]) as u64;
+                let fps = u16be(&frte[4..]);
+                if fps as u32 != super::dst::FRAMES_PER_SECOND {
+                    return Err(bad(format!("DSDIFF: DST at {fps} frames/s")));
+                }
+                let frte_size = u64be(&h[4..]);
+                dst = Some(DstLayout {
+                    frames,
+                    first: body_start + 12 + frte_size + (frte_size & 1),
+                    end: body_start + size,
+                });
+            }
+            b"DSTI" => {
+                // Index: (offset u64, length u32) per frame. Up to an hour and a half at
+                // 75 frames/s is about 5 MB; larger indexes are ignored.
+                if size % 12 == 0 && size <= 12 * 75 * 6000 {
+                    let body = read_exact(src, size as usize)?;
+                    dst_index = Some(
+                        body.chunks_exact(12)
+                            .map(|e| (u64be(&e[0..]), u32be(&e[8..])))
+                            .collect(),
+                    );
+                }
+            }
             b"DIIN" => {
                 let diin_end = body_start + size;
                 while src.stream_position()? + 12 <= diin_end {
@@ -415,13 +615,34 @@ fn parse_dff<R: Read + Seek>(src: &mut R) -> Result<DsdInfo, DsdDecodeError> {
         }
         src.seek(SeekFrom::Start(next))?;
     }
-    if compressed {
-        return Err(DsdDecodeError::Dst);
-    }
-    let (data_offset, data_len) = data.ok_or_else(|| bad("DSDIFF: no DSD data chunk"))?;
     if channels == 0 || rate == 0 {
         return Err(bad("DSDIFF: missing FS/CHNL properties"));
     }
+    if let Some(layout) = dst {
+        if !compressed {
+            return Err(bad("DSDIFF: DST chunk in an uncompressed file"));
+        }
+        if layout.frames == 0 {
+            return Err(bad("DSDIFF: no DST frames"));
+        }
+        *index = dst_index.filter(|i| i.len() as u64 >= layout.frames);
+        return Ok(DsdInfo {
+            container: DsdContainer::Dff,
+            rate,
+            channels,
+            frames: layout.frames * super::dst::bits_per_frame(rate) as u64,
+            tags,
+            lsb_first: false,
+            block_size: 1,
+            data_offset: layout.first,
+            data_len: layout.end - layout.first,
+            dst: Some(layout),
+        });
+    }
+    if compressed {
+        return Err(bad("DSDIFF: compressed, but no DST chunk"));
+    }
+    let (data_offset, data_len) = data.ok_or_else(|| bad("DSDIFF: no DSD data chunk"))?;
     Ok(DsdInfo {
         container: DsdContainer::Dff,
         rate,
@@ -432,6 +653,7 @@ fn parse_dff<R: Read + Seek>(src: &mut R) -> Result<DsdInfo, DsdDecodeError> {
         block_size: 1,
         data_offset,
         data_len,
+        dst: None,
     })
 }
 
@@ -589,7 +811,7 @@ impl DsdDecoder {
             rate: self.pcm_rate,
             bits: 32,
             channels: self.reader.info().channels,
-            codec: self.reader.info().container.codec_name().into(),
+            codec: self.reader.info().codec_label().into(),
         }
     }
     /// Position of the next PCM frame to be delivered, seconds.
@@ -758,59 +980,117 @@ pub fn write_dff(path: &Path, rate: u32, planar: &[Vec<u8>], tags: &Tags) -> io:
     let ch = planar.len();
     assert!(ch > 0 && planar.iter().all(|p| p.len() == planar[0].len()));
     let bytes = planar[0].len();
-    let chunk = |id: &[u8; 4], body: &[u8]| -> Vec<u8> {
-        let mut v = id.to_vec();
-        v.extend_from_slice(&(body.len() as u64).to_be_bytes());
-        v.extend_from_slice(body);
-        if body.len() % 2 == 1 {
-            v.push(0);
-        }
-        v
-    };
-    let ids: Vec<&[u8; 4]> = match ch {
-        1 => vec![b"C   "],
-        2 => vec![b"SLFT", b"SRGT"],
-        _ => vec![b"C001"; ch],
-    };
-    let mut chnl = (ch as u16).to_be_bytes().to_vec();
-    for (i, id) in ids.iter().enumerate() {
-        if ch > 2 {
-            chnl.extend_from_slice(format!("C{:03}", i + 1).as_bytes());
-        } else {
-            chnl.extend_from_slice(*id);
-        }
-    }
-    let mut cmpr = b"DSD ".to_vec();
-    cmpr.push(14);
-    cmpr.extend_from_slice(b"not compressed");
-    cmpr.push(0);
-    let mut prop_body = b"SND ".to_vec();
-    prop_body.extend(chunk(b"FS  ", &rate.to_be_bytes()));
-    prop_body.extend(chunk(b"CHNL", &chnl));
-    prop_body.extend(chunk(b"CMPR", &cmpr));
     let mut data = Vec::with_capacity(bytes * ch);
     for i in 0..bytes {
         for p in planar {
             data.push(p[i]);
         }
     }
+    write_dff_form(path, rate, ch, false, tags, |_| dff_chunk(b"DSD ", &data))
+}
+
+/// Write a DST-compressed DSDIFF file from coded DST frames (see [`super::dst`]), with a
+/// `DSTI` index when `index` is set.
+pub fn write_dff_dst(
+    path: &Path,
+    rate: u32,
+    channels: usize,
+    frames: &[Vec<u8>],
+    index: bool,
+    tags: &Tags,
+) -> io::Result<()> {
+    write_dff_form(path, rate, channels, true, tags, |at| {
+        // `at`: file offset where this chunk starts.
+        let mut body = dff_chunk(b"FRTE", &{
+            let mut f = (frames.len() as u32).to_be_bytes().to_vec();
+            f.extend_from_slice(&(super::dst::FRAMES_PER_SECOND as u16).to_be_bytes());
+            f
+        });
+        let mut entries = Vec::new();
+        for f in frames {
+            entries.push((at + 12 + body.len() as u64 + 12, f.len() as u32));
+            body.extend(dff_chunk(b"DSTF", f));
+        }
+        let mut out = dff_chunk(b"DST ", &body);
+        if index {
+            let mut dsti = Vec::with_capacity(entries.len() * 12);
+            for (o, l) in entries {
+                dsti.extend_from_slice(&o.to_be_bytes());
+                dsti.extend_from_slice(&l.to_be_bytes());
+            }
+            out.extend(dff_chunk(b"DSTI", &dsti));
+        }
+        out
+    })
+}
+
+fn dff_chunk(id: &[u8; 4], body: &[u8]) -> Vec<u8> {
+    let mut v = id.to_vec();
+    v.extend_from_slice(&(body.len() as u64).to_be_bytes());
+    v.extend_from_slice(body);
+    if body.len() % 2 == 1 {
+        v.push(0);
+    }
+    v
+}
+
+/// The DSDIFF form around the sound data `sound(offset)` returns.
+fn write_dff_form(
+    path: &Path,
+    rate: u32,
+    ch: usize,
+    dst: bool,
+    tags: &Tags,
+    sound: impl FnOnce(u64) -> Vec<u8>,
+) -> io::Result<()> {
+    let mut chnl = (ch as u16).to_be_bytes().to_vec();
+    for i in 0..ch {
+        let id: [u8; 4] = match (ch, i) {
+            (1, _) => *b"C   ",
+            (2, 0) => *b"SLFT",
+            (2, _) => *b"SRGT",
+            _ => format!("C{:03}", i + 1).as_bytes().try_into().unwrap(),
+        };
+        chnl.extend_from_slice(&id);
+    }
+    let mut cmpr = if dst {
+        b"DST ".to_vec()
+    } else {
+        b"DSD ".to_vec()
+    };
+    let name: &[u8] = if dst {
+        b"DST Encoded"
+    } else {
+        b"not compressed"
+    };
+    cmpr.push(name.len() as u8);
+    cmpr.extend_from_slice(name);
+    if cmpr.len() % 2 == 1 {
+        cmpr.push(0);
+    }
+    let mut prop_body = b"SND ".to_vec();
+    prop_body.extend(dff_chunk(b"FS  ", &rate.to_be_bytes()));
+    prop_body.extend(dff_chunk(b"CHNL", &chnl));
+    prop_body.extend(dff_chunk(b"CMPR", &cmpr));
     let mut diin = Vec::new();
     for (id, v) in [(b"DIAR", &tags.artist), (b"DITI", &tags.title)] {
         if let Some(t) = v {
             let mut body = (t.len() as u32).to_be_bytes().to_vec();
             body.extend_from_slice(t.as_bytes());
-            diin.extend(chunk(id, &body));
+            diin.extend(dff_chunk(id, &body));
         }
     }
     let mut form = b"DSD ".to_vec();
-    form.extend(chunk(b"FVER", &0x0105_0000u32.to_be_bytes()));
-    form.extend(chunk(b"PROP", &prop_body));
-    form.extend(chunk(b"DSD ", &data));
+    form.extend(dff_chunk(b"FVER", &0x0105_0000u32.to_be_bytes()));
+    form.extend(dff_chunk(b"PROP", &prop_body));
+    // The FRM8 header is 12 bytes before the form body.
+    let at = 12 + form.len() as u64;
+    form.extend(sound(at));
     if !diin.is_empty() {
-        form.extend(chunk(b"DIIN", &diin));
+        form.extend(dff_chunk(b"DIIN", &diin));
     }
     let mut f = io::BufWriter::new(std::fs::File::create(path)?);
-    f.write_all(&chunk(b"FRM8", &form))?;
+    f.write_all(&dff_chunk(b"FRM8", &form))?;
     f.flush()
 }
 
@@ -903,6 +1183,145 @@ mod tests {
         assert_eq!(r.seek_frames(100 * 8 + 3).unwrap(), 800);
         let p = r.read_frames(16).unwrap().unwrap();
         assert_eq!(p[0], planar[0][100..102]);
+        let _ = std::fs::remove_dir_all(d);
+    }
+
+    /// `frames` DST frames of a 2-channel tone: the frames, coded with a mix of options
+    /// (one stored plain unless `ffmpeg_safe`), and the original planar DSD.
+    fn dst_stream(frames: usize, ffmpeg_safe: bool) -> (Vec<Vec<u8>>, Vec<Vec<u8>>) {
+        use crate::decode::dst::{bits_per_frame, encode};
+        let rate = 2_822_400u32;
+        let fb = bits_per_frame(rate) / 8;
+        let all = encode::test_dsd(2, fb * frames, 997.0, rate as f64);
+        let mut coded = Vec::new();
+        for (i, f) in all.chunks(fb * 2).enumerate() {
+            let o = match (i % 5, ffmpeg_safe) {
+                (1, _) => encode::Options {
+                    coded_tables: false,
+                    half_prob: true,
+                    ..Default::default()
+                },
+                (2, _) => encode::Options {
+                    per_channel_tables: true,
+                    order: 100,
+                    ..Default::default()
+                },
+                (3, false) => encode::Options {
+                    filter_segments: vec![1600],
+                    ptable_segments: Some(vec![800, 800]),
+                    ..Default::default()
+                },
+                _ => encode::Options::default(),
+            };
+            // FFmpeg 6.x lays plain frames out wrongly (fixed in later releases).
+            coded.push(if i == 4 && !ffmpeg_safe {
+                let mut plain = vec![0u8];
+                plain.extend_from_slice(f);
+                plain
+            } else {
+                encode::encode_frame(f, 2, &o)
+            });
+        }
+        let mut planar = vec![Vec::new(), Vec::new()];
+        for (i, b) in all.iter().enumerate() {
+            planar[i % 2].push(*b);
+        }
+        (coded, planar)
+    }
+
+    fn read_all(r: &mut DsdReader<std::fs::File>) -> Vec<Vec<u8>> {
+        let mut out = vec![Vec::new(); r.info().channels as usize];
+        while let Some(p) = r.read_frames(30_000).unwrap() {
+            for (o, c) in out.iter_mut().zip(p) {
+                o.extend(c);
+            }
+        }
+        out
+    }
+
+    #[test]
+    fn dst_dff_decodes_bit_exact_and_seeks_with_and_without_index() {
+        let d = dir("dst");
+        let (coded, planar) = dst_stream(12, false);
+        let tags = Tags {
+            title: Some("DST".into()),
+            artist: Some("Philips".into()),
+            ..Default::default()
+        };
+        for index in [false, true] {
+            let path = d.join(format!("t{index}.dff"));
+            write_dff_dst(&path, 2_822_400, 2, &coded, index, &tags).unwrap();
+            let mut r = DsdReader::new(std::fs::File::open(&path).unwrap()).unwrap();
+            assert!(r.info().is_dst());
+            assert_eq!(r.info().codec_label(), "DFF DST");
+            assert_eq!(r.info().frames, 12 * 37_632);
+            assert_eq!(r.info().tags.title.as_deref(), Some("DST"));
+            assert_eq!(read_all(&mut r), planar, "index {index}");
+            // Seek into frame 9 from a fresh reader.
+            let mut r = DsdReader::new(std::fs::File::open(&path).unwrap()).unwrap();
+            let at = 9 * 37_632 + 800;
+            assert_eq!(r.seek_frames(at).unwrap(), at);
+            let got = read_all(&mut r);
+            assert_eq!(got[0], planar[0][at as usize / 8..]);
+            assert_eq!(got[1], planar[1][at as usize / 8..]);
+            // With the index only the first frame is scanned for; without, all up to 9.
+            let found = r.dst.as_ref().unwrap().found.len();
+            if index {
+                assert_eq!(found, 1);
+            } else {
+                assert!(found >= 10);
+            }
+        }
+        // The PCM path gives what the same DSD gives uncompressed.
+        let plain = d.join("plain.dff");
+        write_dff(&plain, 2_822_400, &planar, &tags).unwrap();
+        let pcm = |path: &Path| {
+            let mut dec =
+                DsdDecoder::from_reader(Box::new(std::fs::File::open(path).unwrap())).unwrap();
+            let mut all = Vec::new();
+            while let Some(c) = dec.next_chunk().unwrap() {
+                all.extend(c);
+            }
+            all
+        };
+        assert_eq!(pcm(&d.join("ttrue.dff")), pcm(&plain));
+        let _ = std::fs::remove_dir_all(d);
+    }
+
+    /// FFmpeg's DST decoder (written independently) must decode our frames to exactly
+    /// what it decodes from the same DSD stored plain. Skipped when ffmpeg is missing.
+    #[test]
+    fn dst_frames_agree_with_ffmpeg() {
+        let ok = std::process::Command::new("ffmpeg")
+            .arg("-version")
+            .output()
+            .is_ok_and(|o| o.status.success());
+        if !ok {
+            eprintln!("ffmpeg not installed: DST cross-check skipped");
+            return;
+        }
+        let d = dir("dst-ffmpeg");
+        // FFmpeg reads one segment per channel only, and before 7.0 mishandles frames
+        // stored plain: those two are covered by the round-trip test instead.
+        let (coded, planar) = dst_stream(30, true);
+        let dst = d.join("dst.dff");
+        let plain = d.join("plain.dff");
+        write_dff_dst(&dst, 2_822_400, 2, &coded, false, &Tags::default()).unwrap();
+        write_dff(&plain, 2_822_400, &planar, &Tags::default()).unwrap();
+        let decode = |p: &Path| {
+            let o = std::process::Command::new("ffmpeg")
+                .args(["-v", "error", "-i"])
+                .arg(p)
+                .args(["-f", "f32le", "-"])
+                .output()
+                .unwrap();
+            assert!(o.status.success(), "{}", String::from_utf8_lossy(&o.stderr));
+            o.stdout
+        };
+        let a = decode(&dst);
+        let b = decode(&plain);
+        assert!(!a.is_empty());
+        assert!(a == b, "ffmpeg decodes our DST frames differently");
         let _ = std::fs::remove_dir_all(d);
     }
 

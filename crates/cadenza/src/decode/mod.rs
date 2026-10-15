@@ -2,6 +2,7 @@
 //! to interleaved `f64` PCM.
 
 pub mod dsd;
+pub mod dst;
 pub mod live;
 pub mod source;
 

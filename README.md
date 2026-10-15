@@ -63,7 +63,8 @@ Dual-licensed under MIT or Apache-2.0.
   or /16, short polyphase stage, modulator) or `full` (the long FIR runs to the DSD rate
   itself: a true 1024× PCM stream in 64-bit float that never leaves the pipeline).
 - **DSD input**: DSF and DFF (DSDIFF) readers (both bit orders, ID3 / DIIN tags, seeking,
-  local files and HTTP) feeding either DSD → PCM (CIC decimation + compensating FIR + a
+  local files and HTTP), including **DST-compressed DFF** (our own lossless DST decoder,
+  bit-exact; see below), feeding either DSD → PCM (CIC decimation + compensating FIR + a
   155 dB windowed sinc to 352.8 / 384 kHz; passband ripple < 0.01 dB to 20 kHz), DSD → DSD
   re-modulation at another rate through that PCM path (which is what HQPlayer does too),
   or bit-perfect pass-through.
@@ -150,7 +151,7 @@ implemented and tested here; the notes say where we differ.
 | Dither / noise shaping | TPDF, NS1–NS9, LNS15 | TPDF, EF2, Lipshitz, Wannamaker, Gesemann, `ns5`, `ns9`, `lns15`, `ns-adaptive`, per output rate | matched (our shaper designs; no NS1–NS4 names) |
 | DSD output | DSD64–DSD1024, ASDM5/7 (+ EC, v2/v3 variants) | DSD64–DSD1024 **and DSD2048**, `asdm5`, `asdm7`, `dsd5v2`, `dsd7v2`, error-correction `asdm5ec`, `asdm7ec`, `asdm7ec8` (look-ahead trellis, +6 / +10 dB in-band SNR over the plain loops at DSD64); DoP and native | matched and exceeded on rate; EC matched; no "v3" family yet; EC is CPU-heavy (see `cadenza bench`) |
 | 1024× oversampling | yes (GPU recommended) | `dsd_oversampling = full` (long FIR to the DSD rate), CPU or CUDA | matched; very heavy on a CPU – check `cadenza bench --dsd-upsampling --dsd-full` |
-| DSD input | DSF/DFF, DSD→PCM, DSD→DSD via PCM, direct | DSF/DFF, DSD→PCM (CIC + FIR, < 0.01 dB), re-modulation via PCM, bit-perfect pass-through | matched |
+| DSD input | DSF/DFF (incl. DST), SACD ISO, DSD→PCM, DSD→DSD via PCM, direct | DSF/DFF including DST-compressed DFF, DSD→PCM (CIC + FIR, < 0.01 dB), re-modulation via PCM, bit-perfect pass-through | matched for files; SACD ISO next |
 | Convolution | yes | yes, any length, per channel | matched |
 | Parametric EQ | yes (pipeline setup) | 16 biquads global + per matrix output | matched |
 | Pipeline matrix / crossovers | yes | N→N up to 32 ch, LR/Butterworth/linear-phase FIR crossovers, delays, polarity, presets | matched |
@@ -210,7 +211,13 @@ to do it:
    plain output with no receivers of its own. Roon talks to
    HQPlayer only through the closed NAA protocol; Cadenza becomes a Roon zone through Encore's Roon
    extension instead.
-5. **DST-compressed DFF and SACD ISO** input (we refuse DST today), CUE sheets, gapless DSD.
+5. **DST-compressed DFF and SACD ISO** input, CUE sheets, gapless DSD. DST-compressed DFF is done:
+   a DST decoder written from the standard, bit-exact, including the multi-segment frames FFmpeg's
+   decoder refuses. It is checked against FFmpeg's decoder (an independent implementation): frames
+   from our test encoder decode in FFmpeg exactly like the same DSD stored plain, and in ours bit for
+   bit. Not yet tried on DST files from a real SACD authoring tool (none here). Decoding takes
+   about 0.1 core for stereo and at most half a core for 5.1 with the longest filters. Next: SACD
+   ISO, CUE sheets, gapless DSD.
 6. **Synchronised multi-room** between Cadenza endpoints (sample-accurate clock sync over the LAN).
    HQPlayer has no multi-room at all.
 7. **Room correction built in** – measure with a USB microphone from the web UI (sweep, capture, compute the

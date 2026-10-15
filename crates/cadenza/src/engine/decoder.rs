@@ -83,7 +83,7 @@ impl TrackDecoder {
                     .unwrap_or_else(|| "DSD".into());
                 format!(
                     "{} {name} ({:.4} MHz)",
-                    info.container.codec_name(),
+                    info.codec_label(),
                     info.rate as f64 / 1e6
                 )
             }
