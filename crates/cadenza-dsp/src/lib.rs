@@ -5,6 +5,7 @@
 //! source PCM → volume → EQ → convolution → matrix → resampler → dither/quantiser.
 #![warn(missing_docs)]
 
+pub mod analysis;
 pub mod bench;
 pub mod cache;
 pub mod convolution;

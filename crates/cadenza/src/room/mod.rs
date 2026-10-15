@@ -12,6 +12,7 @@
 
 pub mod capture;
 pub mod noise;
+pub mod verify;
 
 use crate::decode::live::{self, LiveStream};
 use crate::decode::Source;
@@ -238,6 +239,16 @@ impl Room {
         s.dsp.dac_noise_floor_db = Some((m.floor_db * 10.0).round() / 10.0);
         set_and_wait(engine, s);
         Ok(m)
+    }
+
+    /// Loopback verification with `req.input` (see [`verify`]).
+    pub fn verify(
+        &mut self,
+        engine: &Engine,
+        req: &verify::VerifyRequest,
+    ) -> Result<verify::VerifyReport, String> {
+        let open = || (self.capture)(&req.input);
+        verify::verify(engine, &open, req)
     }
 
     /// Forget a channel's measurement.

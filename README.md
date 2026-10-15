@@ -169,6 +169,7 @@ implemented and tested here; the notes say where we differ.
 | UPnP / Roon / control | UPnP renderer, Roon via NAA | UPnP/DLNA MediaRenderer (AVTransport, RenderingControl, ConnectionManager, gapless next URI, events) with OpenHome services, HTTP API, web UI, Encore device | matched: UPnP AV and OpenHome (Product, Playlist, Volume, Time, Info) – tested with scripted control points, not yet with BubbleUPnP / Kazoo / mconnect themselves; no Roon |
 | AirPlay | no | AirPlay 1 receiver (ALAC, encrypted, volume, title / artist / album, cover art, progress, play / pause / next / previous back to the phone) into the full engine | ahead: HQPlayer has none. Tested with a scripted sender, not yet with an iPhone or Mac; AirPlay 2 is not implemented |
 | System-wide input | audio-device input (with a separately installed loopback driver) | Linux: a built-in virtual output device "Cadenza" (PipeWire) and one-app capture before the mixer, following the source rate; Windows: one app or all apps but Cadenza (process loopback); macOS 14.2+: the same through muted process taps, so the sound goes only through Cadenza | ahead on Linux and macOS (nothing extra to install); Windows has capture without a driver but no virtual device. Linux tested against a real headless PipeWire 1.0; the Windows and macOS code is built in CI but not yet run against real audio |
+| Loopback verification | none | Bit-perfect check (a random 24-bit pattern found and compared sample for sample in the recording) and THD+N / THD / harmonics / noise of a 997 Hz tone through the chain as configured, from the web UI | ahead: HQPlayer has none. Tested through a software digital loopback (the engine's own output read back); not yet with a real DAC, ADC or S/PDIF loop |
 | Licence / price | proprietary | MIT / Apache-2.0, free | – |
 
 ### Notes: how Cadenza gets ahead
@@ -259,8 +260,9 @@ to do it:
       PipeWire per-stream links on Linux. Available on every OS today without a driver.
     Bit-perfect in: the virtual device follows the source rate (44.1/48 families) and the app's volume at
     100 percent, so the OS has nothing to resample; the signal path shows when that is not the case.
-11. **Loopback verification** – play a test signal, capture it from an ADC or the DAC's monitor output, and
-    show measured THD+N and a bit-perfect check. Proves the chain instead of trusting it.
+11. **Loopback verification** – done (see "Loopback verification" below): play a test signal, capture it
+    from an ADC or a digital loopback, and show measured THD+N and a bit-perfect check. Proves the chain
+    instead of trusting it. Tested with a software digital loopback; not yet with real hardware.
 
 Already ahead today: DSD2048, free and open source, built into the Encore desktop app with a full web UI
 and automatic device linking, every stage of the chain reported in the signal path.
@@ -599,6 +601,34 @@ Tested: synthetic SACD images packed the way discs are (DST and plain, several t
 seeking anywhere in long tracks), CUE sheets over WAV, FLAC and DSF whose tracks
 concatenate to the whole file exactly, and two DSD files that are one recording cut in
 two playing to the very same samples as the whole. Not yet tried with real disc rips.
+
+## Loopback verification
+
+The "Loopback verification" card proves what the chain does instead of trusting the signal
+path. Connect an output back to an input (the input chosen under Room correction), set the
+volume to 100 % and press **Run**:
+
+- **Bit-perfect check** – the engine is switched to bit-perfect mode and plays 2 s of a
+  pseudo-random 24-bit pattern (negated on the right channel). The recording is searched for
+  the pattern and compared sample for sample. Only a digital loopback can pass: S/PDIF or AES
+  out → in, a DAC's digital monitor, an interface's loopback channel. The verdict says how many
+  samples differ and where the first one is, or that the pattern was not found at all (an
+  analog path, a level or rate change after Cadenza, the wrong input). The engine's own report
+  for that playback is shown next to it.
+- **THD+N** – a 997 Hz tone (−3 dBFS by default) through the chain as configured: upsampling,
+  dither, room correction and all. Measured with a 7-term Blackman–Harris window (sidelobes
+  below −180 dB) over 20 Hz – 20 kHz: THD+N in dB and %, THD (harmonics 2–10), each harmonic,
+  noise, the tone's level and frequency. Through an analog loopback that is the DAC and the
+  ADC together; through a digital one, Cadenza's own chain.
+
+API: `POST /api/room/verify {input, bit_perfect, thd_n, level_db, seconds}`.
+
+Tested: the analysis on synthetic signals (a pure sine below −150 dB; a known cubic
+distortion and noise within 0.2 dB and 1 dB); through the engine with the null output's
+recording read back as a perfect digital loopback – bit-perfect confirmed, THD+N below
+−125 dB through EQ and 24-bit TPDF, settings restored – and through the same loopback with a
+cubic nonlinearity: the pattern is reported not found and the THD matches the distortion within
+0.5 dB. Not yet run with a real DAC, ADC or S/PDIF loop.
 
 ## System input (Linux, Windows, macOS)
 
@@ -968,6 +998,8 @@ SwiftShader, WARP) are slower than the CPU engine and are skipped unless
 - [x] Room measurement and correction from the web UI; headphone crossfeed and HRTF
 - [x] Filter designer with response plots
 - [x] `ns1`, `ns4`, Gaussian dither and `auto` dither from the DAC's measured noise floor
+- [x] System input: PipeWire virtual device and app capture, Windows process loopback, macOS process taps
+- [x] Loopback verification: bit-perfect check and THD+N
 - [ ] MPRIS, Roon
 - [ ] Non-uniformly partitioned convolution for lower latency with long impulses
 - [ ] "v3"-class modulators and more poly-sinc variants

@@ -79,6 +79,7 @@ pub fn router_with_room(engine: Engine, room: crate::room::Room) -> Router {
         .route("/api/room/remove", post(room_remove))
         .route("/api/room/forget", post(room_forget))
         .route("/api/room/noise", post(room_noise))
+        .route("/api/room/verify", post(room_verify))
         .route(
             "/api/system",
             get(|| async { Json(crate::system::status()) }),
@@ -214,6 +215,19 @@ async fn room_noise(
             "dac_noise_floor_db": s.dsp.dac_noise_floor_db,
             "auto_choice": cadenza_dsp::dither::auto_choice(s.output.bits, rate, m.floor_db).id(),
         }))
+    })
+    .await
+    .map(Json)
+}
+
+/// Loopback verification: bit-perfect check and THD+N through an input.
+async fn room_verify(
+    State(st): State<AppState>,
+    Json(req): Json<crate::room::verify::VerifyRequest>,
+) -> Result<Json<Value>, ApiError> {
+    with_room(&st, move |r, e| {
+        r.verify(e, &req)
+            .and_then(|rep| serde_json::to_value(rep).map_err(|e| e.to_string()))
     })
     .await
     .map(Json)

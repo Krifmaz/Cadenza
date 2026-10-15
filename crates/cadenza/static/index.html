@@ -189,6 +189,18 @@
     </div>
     <div class="hint">Pick a transition width, stopband depth, cutoff, window and phase; Cadenza works out the length (it grows with the ratio, so the filter has the same shape in Hz at every output rate), designs it in 64-bit and caches it. Top: the response up to twice the source Nyquist (peak level per point, so no sidelobe hides between points). Left: the passband ripple. Right: the impulse around its peak. Filters over 2M taps at the chosen rate are not plotted.</div>
   </section>
+  <section class="card">
+    <h2>Loopback verification</h2>
+    <div class="row">
+      <label class="switch"><input type="checkbox" id="vf_bits" checked> <b>Bit-perfect check</b></label>
+      <label class="switch"><input type="checkbox" id="vf_thd" checked> <b>THD+N</b></label>
+      <label class="field" style="width:110px"><span>Tone (dBFS)</span><input type="number" id="vf_level" value="-3" min="-60" max="0"></label>
+    </div>
+    <div class="row" style="margin-top:8px"><button class="primary" id="vf-run">Run</button></div>
+    <div class="small" id="vf-result" style="margin-top:8px"></div>
+    <div class="hint">Connect the DAC's output (or a digital output) back to the input chosen under Room correction, turn the volume to 100 %, and run. The bit-perfect check plays a random 24-bit pattern with the engine in bit-perfect mode and looks for it, sample for sample, in the recording – only a digital loopback can pass. THD+N plays a 997 Hz tone through the chain as configured; through an analog loopback it measures the DAC and the ADC together.</div>
+  </section>
+
   <section class="card wide">
     <h2>Room correction <span class="badge" id="room-badge"></span></h2>
     <div class="row">
@@ -512,6 +524,22 @@ async function fdPlot(id) {
 $('fd-plot').onclick = () => fdPlot(fdId());
 $('fd-plot-current').onclick = () => fdPlot($('filter').value);
 $('fd-use').onclick = async () => { const id = fdId(); ensureFilterOption(id); $('filter').value = id; filterInfo(); await save({ dsp: { filter: id } }); };
+
+// Loopback verification.
+$('vf-run').onclick = async () => {
+  $('vf-run').disabled = true; $('vf-result').textContent = 'Playing and recording… keep quiet (about 10 s).';
+  try {
+    const r = await api('POST', '/api/room/verify', { input: $('room_input').value, bit_perfect: $('vf_bits').checked, thd_n: $('vf_thd').checked, level_db: num('vf_level') });
+    const out = [];
+    if (r.bit_perfect) out.push(`<b>${esc(r.bit_perfect.verdict)}</b>` + (r.bit_perfect.signal_path ? ` · ${esc(r.bit_perfect.signal_path)}` : ''));
+    if (r.thd_n) {
+      const t = r.thd_n;
+      out.push(`THD+N <b>${t.thd_n_db.toFixed(1)} dB</b> (${t.thd_n_percent.toPrecision(2)} %) · THD ${t.thd_db.toFixed(1)} dB · noise ${t.noise_db.toFixed(1)} dB · tone ${t.level_db.toFixed(1)} dBFS at ${t.frequency.toFixed(1)} Hz · H2…: ${t.harmonics_db.slice(0, 4).map(h => h.toFixed(0)).join(' / ')} dB` + (t.signal_path ? ` · ${esc(t.signal_path)}` : ''));
+    }
+    $('vf-result').innerHTML = out.join('<br>') || 'Nothing selected.';
+  } catch (e) { $('vf-result').textContent = e.message; }
+  finally { $('vf-run').disabled = false; }
+};
 
 // Room correction.
 const ROOM_OPTS = ['high_hz', 'max_boost_db', 'max_cut_db', 'tilt_db_per_octave'];
