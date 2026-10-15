@@ -93,6 +93,11 @@ pub fn router_with_room(engine: Engine, room: crate::room::Room) -> Router {
 /// Run the server on `listen` until the process ends.
 pub async fn serve(listen: &str, engine: Engine) -> anyhow::Result<()> {
     let listener = tokio::net::TcpListener::bind(listen).await?;
+    serve_on(listener, engine).await
+}
+
+/// [`serve`] on a socket already bound (the desktop app picks a free port first).
+pub async fn serve_on(listener: tokio::net::TcpListener, engine: Engine) -> anyhow::Result<()> {
     log::info!(
         "control API and web UI on http://{}/",
         listener.local_addr()?

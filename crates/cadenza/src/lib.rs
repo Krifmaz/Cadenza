@@ -16,5 +16,6 @@ pub mod engine;
 pub mod output;
 pub mod render;
 pub mod room;
+pub mod service;
 pub mod system;
 pub mod upnp;

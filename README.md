@@ -602,6 +602,37 @@ seeking anywhere in long tracks), CUE sheets over WAV, FLAC and DSF whose tracks
 concatenate to the whole file exactly, and two DSD files that are one recording cut in
 two playing to the very same samples as the whole. Not yet tried with real disc rips.
 
+## Desktop app
+
+Cadenza also comes as a desktop app (`crates/cadenza-desktop`, built with Tauri like
+Encore's): the engine runs inside it and its control page opens in a native window.
+
+- **Tray icon**: what is playing, Play / Pause, Next, Previous, Show Cadenza, Quit. Closing
+  the window keeps the music playing; Quit ends it.
+- **Media keys and the OS media controls**: Windows (SMTC), macOS (Now Playing), Linux (MPRIS:
+  GNOME, KDE, `playerctl`).
+- **One instance**: opening it again brings the window forward. The window's size and
+  position are remembered.
+- It runs the same services as `cadenza serve` from the same config file (Encore link, UPnP,
+  AirPlay, system input, as configured), and serves the control page on `[server] listen`
+  when that is free, so a phone can still reach it; otherwise on a free local port.
+
+Installers come with each release: `.deb` and `.AppImage` (Linux), `.exe` and `.msi`
+(Windows), `.dmg` (macOS). They are not code-signed, so Windows SmartScreen and macOS
+Gatekeeper ask before the first start (on macOS: right-click → Open). To build it yourself:
+
+```sh
+cargo install tauri-cli --version 2.12.3 --locked
+cd crates/cadenza-desktop
+cargo tauri build --features alsa                  # Linux (needs libwebkit2gtk-4.1-dev, libayatana-appindicator3-dev)
+cargo tauri build --features wasapi,asio,loopback  # Windows
+cargo tauri build --features coreaudio,tap         # macOS
+```
+
+Tested on Linux: the window shows the page and plays, MPRIS reports the track and its
+Play/Pause reaches the engine, and a second launch hands over to the first without starting
+anything. The Windows and macOS builds come from CI; not yet run on those systems.
+
 ## Loopback verification
 
 The "Loopback verification" card proves what the chain does instead of trusting the signal

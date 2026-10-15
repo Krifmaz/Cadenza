@@ -1,6 +1,9 @@
 [workspace]
 resolver = "2"
-members = ["crates/cadenza-dsp", "crates/cadenza"]
+members = ["crates/cadenza-dsp", "crates/cadenza", "crates/cadenza-desktop"]
+# Plain `cargo build` / `cargo run` at the root: the engine and the CLI. The desktop app
+# (Tauri, needs WebKitGTK on Linux) builds with `-p cadenza-desktop` or `--workspace`.
+default-members = ["crates/cadenza-dsp", "crates/cadenza"]
 
 [workspace.package]
 version = "2.4.1"

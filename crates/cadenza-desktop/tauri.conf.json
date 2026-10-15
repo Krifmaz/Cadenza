@@ -1,0 +1,25 @@
+{
+  "$schema": "https://schema.tauri.app/config/2",
+  "productName": "Cadenza",
+  "mainBinaryName": "cadenza-desktop",
+  "identifier": "app.cadenza.desktop",
+  "build": {
+    "frontendDist": "ui"
+  },
+  "app": {
+    "withGlobalTauri": false,
+    "windows": [],
+    "security": { "csp": null }
+  },
+  "bundle": {
+    "active": true,
+    "targets": "all",
+    "category": "Music",
+    "shortDescription": "High-end upsampling audio engine",
+    "longDescription": "Cadenza: an open-source upsampling engine for your DAC – long sinc filters, noise shaping, DSD modulators, room correction – in its own window, with a tray and media keys.",
+    "icon": ["icons/32x32.png", "icons/128x128.png", "icons/128x128@2x.png", "icons/icon.icns", "icons/icon.ico"],
+    "linux": { "deb": { "depends": [] }, "appimage": { "bundleMediaFramework": false } },
+    "macOS": { "minimumSystemVersion": "10.15" },
+    "windows": { "nsis": { "installMode": "currentUser" } }
+  }
+}

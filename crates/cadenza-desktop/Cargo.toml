@@ -1,0 +1,42 @@
+[package]
+name = "cadenza-desktop"
+description = "Cadenza as a desktop app: the engine and its control page in a native window, with a tray and media keys"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+rust-version.workspace = true
+publish = false
+
+[[bin]]
+name = "cadenza-desktop"
+path = "src/main.rs"
+
+[features]
+default = ["cpal"]
+# The engine's backends and offloads, passed through (see the cadenza crate).
+cpal = ["cadenza/cpal"]
+alsa = ["cadenza/alsa"]
+wasapi = ["cadenza/wasapi"]
+asio = ["cadenza/asio"]
+coreaudio = ["cadenza/coreaudio"]
+cuda = ["cadenza/cuda"]
+wgpu = ["cadenza/wgpu"]
+pipewire = ["cadenza/pipewire"]
+loopback = ["cadenza/loopback"]
+tap = ["cadenza/tap"]
+
+[build-dependencies]
+tauri-build = { version = "2", features = [] }
+
+[dependencies]
+cadenza = { path = "../cadenza", default-features = false }
+tauri = { version = "2", features = ["tray-icon", "image-png"] }
+tauri-plugin-single-instance = "2"
+tauri-plugin-window-state = "2"
+souvlaki = { version = "0.8", default-features = false, features = ["use_zbus"] }
+tokio = { version = "1", features = ["net"] }
+log.workspace = true
+env_logger = "0.11"
+serde_json.workspace = true

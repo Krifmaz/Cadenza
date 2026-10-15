@@ -2,14 +2,13 @@
 
 mod cli;
 
-use cadenza::config::{Config, RateSetting, Settings};
+use cadenza::config::{Config, RateSetting};
 use cadenza::engine::{Engine, EngineOptions, Event, Track};
 use cadenza_dsp::dsd::{DsdModulator, DsdOversampling, DsdPacking, DsdRate, OutputMode};
 use cadenza_dsp::gpu::GpuMode;
 use cadenza_dsp::{CoefficientCache, FilterKind};
 use clap::Parser;
 use cli::{Cli, Commands, Overrides};
-use std::sync::Arc;
 use std::time::Duration;
 
 fn main() {
@@ -528,57 +527,12 @@ fn play(config: &Config, items: Vec<String>, seek: f64) -> anyhow::Result<()> {
 
 fn serve(config: Config, path: std::path::PathBuf) -> anyhow::Result<()> {
     let runtime = tokio::runtime::Runtime::new()?;
-    let persist_path = path.clone();
-    let persist_cfg = std::sync::Mutex::new(config.clone());
-    let persist = Box::new(move |s: &Settings| {
-        let mut c = persist_cfg.lock().unwrap();
-        c.apply(s);
-        if let Err(e) = c.save(&persist_path) {
-            log::warn!("could not save {}: {e}", persist_path.display());
-        }
-    });
-    let engine = Engine::start(
-        config.settings(),
-        EngineOptions {
-            cache: CoefficientCache::default_location(),
-            realtime: true,
-            persist: Some(persist),
-        },
-    );
-    // The link runs for the life of the process; the handle is only needed to stop it.
-    let _link = config
-        .encore
-        .enabled()
-        .then(|| cadenza::encore::start(Arc::new(config.encore.clone()), engine.clone()));
-    // The UPnP renderer, when enabled, for the life of the process.
-    let _upnp = if config.upnp.enabled {
-        match cadenza::upnp::start(engine.clone(), &config.upnp, true) {
-            Ok(r) => Some(r),
-            Err(e) => {
-                log::error!("UPnP renderer: {e}");
-                None
-            }
-        }
-    } else {
-        None
-    };
-    // The AirPlay receiver, likewise.
-    let _airplay = if config.airplay.enabled {
-        match cadenza::airplay::start(engine.clone(), &config.airplay, true) {
-            Ok(r) => Some(r),
-            Err(e) => {
-                log::error!("AirPlay receiver: {e}");
-                None
-            }
-        }
-    } else {
-        None
-    };
-    // The system-wide input, likewise.
-    if config.system.enabled {
-        cadenza::system::start_global(engine.clone(), &config.system);
-    }
-    runtime.block_on(cadenza::api::serve(&config.server.listen, engine))
+    // The engine and the configured receivers, for the life of the process.
+    let services = cadenza::service::start(&config, path);
+    runtime.block_on(cadenza::api::serve(
+        &config.server.listen,
+        services.engine.clone(),
+    ))
 }
 
 #[cfg(test)]
