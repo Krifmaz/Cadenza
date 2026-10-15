@@ -63,12 +63,24 @@ pub enum DitherKind {
     /// near full scale the dither and the shaped feedback are scaled back smoothly so the
     /// loop stays well inside the clip-safe region (lower idle tones, no limit cycles).
     NsAdaptive,
+    /// Gaussian dither (σ = 0.5 LSB), no shaping.
+    Gauss,
+    /// TPDF plus a 1st-order `(1 − z^-1)` shaper: the gentlest slope out of the band.
+    Ns1,
+    /// TPDF plus a 4th-order weighted least-squares shaper designed for the output rate.
+    Ns4,
+    /// Chosen per output from the DAC's noise floor: the gentlest of TPDF, NS1, EF2, NS4,
+    /// NS5, NS9 and LNS15 whose A-weighted in-band noise is at least 10 dB under it (see
+    /// [`auto_choice`]).
+    Auto,
 }
 
 /// Published noise-shaping coefficient sets, in the `1 − Σ c_k z^-k` convention.
 pub mod coefficients {
     /// `(1 − z^-1)²`.
     pub const ERROR_FEEDBACK_2: &[f64] = &[2.0, -1.0];
+    /// `1 − z^-1`.
+    pub const FIRST_ORDER: &[f64] = &[1.0];
     /// Lipshitz, Vanderkooy, Wannamaker, "Minimally audible noise shaping", JAES 1991 (44.1 kHz).
     pub const LIPSHITZ_44: &[f64] = &[2.033, -2.165, 1.959, -1.590, 0.6149];
     /// Wannamaker, "Psychoacoustically optimal noise shaping", JAES 1992, 9 taps, F-weighted (44.1 kHz).
@@ -176,6 +188,7 @@ pub fn ntf_db(coefs: &[f64], f_hz: f64, rate: u32) -> f64 {
 /// Dynamic range of the weighting for each designed order (bounds the NTF gain).
 fn range_db_for(kind: DitherKind) -> f64 {
     match kind {
+        DitherKind::Ns4 => 30.0,
         DitherKind::Ns5 => 36.0,
         DitherKind::Ns9 | DitherKind::NsAdaptive => 48.0,
         DitherKind::Lns15 => 60.0,
@@ -212,6 +225,10 @@ impl DitherKind {
             DitherKind::Ns9,
             DitherKind::Lns15,
             DitherKind::NsAdaptive,
+            DitherKind::Gauss,
+            DitherKind::Ns1,
+            DitherKind::Ns4,
+            DitherKind::Auto,
         ]
     }
 
@@ -231,6 +248,10 @@ impl DitherKind {
             DitherKind::Ns9 => "ns9",
             DitherKind::Lns15 => "lns15",
             DitherKind::NsAdaptive => "ns-adaptive",
+            DitherKind::Gauss => "gauss",
+            DitherKind::Ns1 => "ns1",
+            DitherKind::Ns4 => "ns4",
+            DitherKind::Auto => "auto",
         }
     }
 
@@ -250,6 +271,10 @@ impl DitherKind {
             DitherKind::Ns9 => "NS9 · 9th-order F-weighted LS (44.1k/48k families)",
             DitherKind::Lns15 => "LNS15 · 15th-order high-order weighting (44.1k/48k families)",
             DitherKind::NsAdaptive => "NS adaptive · 9th-order, adaptive dithered feedback",
+            DitherKind::Gauss => "Gaussian (σ 0.5 LSB)",
+            DitherKind::Ns1 => "NS1 · 1st-order",
+            DitherKind::Ns4 => "NS4 · 4th-order weighted LS (44.1k/48k families)",
+            DitherKind::Auto => "Auto · from the DAC's noise floor",
         }
     }
 
@@ -265,7 +290,8 @@ impl DitherKind {
                 "rect" | "rpdf" => Some(DitherKind::Rectangular),
                 "triangular" => Some(DitherKind::Tpdf),
                 "shaped" | "fweighted" | "f-weighted" => Some(DitherKind::Wannamaker9),
-                "ns1" | "ns2" => Some(DitherKind::ErrorFeedback2),
+                "ns2" => Some(DitherKind::ErrorFeedback2),
+                "gauss1" | "gaussian" => Some(DitherKind::Gauss),
                 "ns-5" => Some(DitherKind::Ns5),
                 "ns-9" => Some(DitherKind::Ns9),
                 "lns-15" | "ns15" => Some(DitherKind::Lns15),
@@ -278,13 +304,18 @@ impl DitherKind {
     pub fn is_designed(self) -> bool {
         matches!(
             self,
-            DitherKind::Ns5 | DitherKind::Ns9 | DitherKind::Lns15 | DitherKind::NsAdaptive
+            DitherKind::Ns4
+                | DitherKind::Ns5
+                | DitherKind::Ns9
+                | DitherKind::Lns15
+                | DitherKind::NsAdaptive
         )
     }
 
     /// Order of the designed kinds (number of feedback coefficients).
     pub fn order(self) -> usize {
         match self {
+            DitherKind::Ns4 => 4,
             DitherKind::Ns5 => 5,
             DitherKind::Ns9 | DitherKind::NsAdaptive => 9,
             DitherKind::Lns15 => 15,
@@ -296,8 +327,17 @@ impl DitherKind {
     /// their 44.1 kHz set; see [`DitherKind::coefficients_for_rate`].
     pub fn coefficients(self) -> &'static [f64] {
         match self {
-            DitherKind::None | DitherKind::Rectangular | DitherKind::Tpdf => &[],
+            DitherKind::None
+            | DitherKind::Rectangular
+            | DitherKind::Tpdf
+            | DitherKind::Gauss
+            | DitherKind::Auto => &[],
             DitherKind::ErrorFeedback2 => coefficients::ERROR_FEEDBACK_2,
+            DitherKind::Ns1 => coefficients::FIRST_ORDER,
+            DitherKind::Ns4 => {
+                static C: OnceLock<Vec<f64>> = OnceLock::new();
+                C.get_or_init(|| DitherKind::Ns4.coefficients_for_rate(44_100).to_vec())
+            }
             DitherKind::Lipshitz => coefficients::LIPSHITZ_44,
             DitherKind::Wannamaker9 => coefficients::WANNAMAKER_9_44,
             DitherKind::Wannamaker3 => coefficients::WANNAMAKER_3_44,
@@ -359,6 +399,103 @@ impl DitherKind {
     pub fn adds_noise(self) -> bool {
         self != DitherKind::None
     }
+
+    /// Variance of the dither this kind adds, in LSB².
+    pub fn dither_variance(self) -> f64 {
+        match self {
+            DitherKind::None => 0.0,
+            DitherKind::Rectangular => 1.0 / 12.0,
+            DitherKind::Gauss => GAUSS_SIGMA * GAUSS_SIGMA,
+            _ => 1.0 / 6.0,
+        }
+    }
+}
+
+/// Standard deviation of the Gaussian dither, in LSB.
+pub const GAUSS_SIGMA: f64 = 0.5;
+
+/// The DAC noise floor `auto` assumes when none was measured or entered (dBFS, A-weighted):
+/// a good current DAC.
+pub const DEFAULT_DAC_FLOOR_DB: f64 = -120.0;
+
+/// How far under the DAC's floor `auto` wants the dither noise (dB).
+pub const AUTO_MARGIN_DB: f64 = 10.0;
+
+/// The kinds `auto` picks from, gentlest first.
+pub const AUTO_CANDIDATES: [DitherKind; 7] = [
+    DitherKind::Tpdf,
+    DitherKind::Ns1,
+    DitherKind::ErrorFeedback2,
+    DitherKind::Ns4,
+    DitherKind::Ns5,
+    DitherKind::Ns9,
+    DitherKind::Lns15,
+];
+
+/// A-weighting gain at `f_hz` (IEC 61672), linear (1 at 1 kHz).
+pub fn a_weighting(f_hz: f64) -> f64 {
+    let f2 = f_hz * f_hz;
+    let ra = 12194f64.powi(2) * f2 * f2
+        / ((f2 + 20.6f64.powi(2))
+            * ((f2 + 107.7f64.powi(2)) * (f2 + 737.9f64.powi(2))).sqrt()
+            * (f2 + 12194f64.powi(2)));
+    ra * 10f64.powf(2.0 / 20.0)
+}
+
+/// Range of the hearing-threshold weighting used to judge audibility (dB).
+const AUDIBILITY_RANGE_DB: f64 = 100.0;
+
+/// `∫ W df` over 20 Hz – 20 kHz for a weighting `W` (midpoint rule).
+fn band_integral(w: impl Fn(f64) -> f64) -> f64 {
+    let steps = 4000;
+    let df = (20_000.0 - 20.0) / steps as f64;
+    (0..steps)
+        .map(|i| w(20.0 + (i as f64 + 0.5) * df) * df)
+        .sum()
+}
+
+/// How audible the noise a kind leaves at `bits` and `rate` is, in dBFS (relative to a
+/// full-scale sine): the quantisation error plus dither, through the noise transfer
+/// function, weighted by the hearing threshold (what the shapers are designed against) and
+/// scaled so white noise reads the same as A-weighted – comparable with a DAC's A-weighted
+/// noise floor. A-weighting alone would rank a psychoacoustic shaper below plain TPDF: it
+/// still counts the noise moved to 15–20 kHz, where the ear is far less sensitive at these
+/// levels.
+pub fn audible_noise_dbfs(kind: DitherKind, bits: u32, rate: u32) -> f64 {
+    let coefs = kind.coefficients_for_rate(rate);
+    let var = 1.0 / 12.0 + kind.dither_variance();
+    let top = 20_000f64.min(rate as f64 / 2.0);
+    let w = |f: f64| {
+        if f > top {
+            0.0
+        } else {
+            10f64.powf(ntf_db(&coefs, f, rate) / 10.0) * weighting(f, AUDIBILITY_RANGE_DB)
+        }
+    };
+    let calibration = band_integral(|f| a_weighting(f).powi(2))
+        / band_integral(|f| weighting(f, AUDIBILITY_RANGE_DB));
+    // White error of variance `var` spreads over 0 … rate/2.
+    let p = var * band_integral(w) * calibration / (rate as f64 / 2.0);
+    let full_scale = (1u64 << (bits - 1)) as f64;
+    10.0 * (p / (full_scale * full_scale / 2.0)).log10()
+}
+
+/// What `auto` runs for an output of `bits` at `rate` into a DAC whose own noise floor is
+/// `dac_floor_db` dBFS (A-weighted): the gentlest candidate whose audible noise is
+/// [`AUTO_MARGIN_DB`] under the floor, or the quietest one when none is. Gentler shapers put
+/// less noise power out of the band, so they are preferred when they are already inaudible.
+pub fn auto_choice(bits: u32, rate: u32, dac_floor_db: f64) -> DitherKind {
+    let target = dac_floor_db - AUTO_MARGIN_DB;
+    let noise: Vec<(DitherKind, f64)> = AUTO_CANDIDATES
+        .iter()
+        .map(|&k| (k, audible_noise_dbfs(k, bits, rate)))
+        .collect();
+    noise
+        .iter()
+        .find(|(_, n)| *n <= target)
+        .or_else(|| noise.iter().min_by(|a, b| a.1.partial_cmp(&b.1).unwrap()))
+        .map(|(k, _)| *k)
+        .unwrap_or(DitherKind::Tpdf)
 }
 
 /// Converts `f64` samples in `[-1, 1)` to integers of `bits` bits, per channel.
@@ -380,6 +517,10 @@ pub struct Quantizer {
     /// Samples whose error exceeded the clip-safe limit (the output clipped).
     clipped: u64,
     rng: Rng,
+    /// `Some(dac floor)` when `auto` chose the kind.
+    auto: Option<f64>,
+    /// The second Box–Muller deviate.
+    spare: Option<f64>,
 }
 
 /// Level (fraction of full scale) above which `ns-adaptive` starts scaling back.
@@ -392,9 +533,27 @@ impl Quantizer {
         Self::for_rate(bits, kind, channels, 44_100)
     }
 
-    /// A quantiser whose designed shaper (`ns5`, `ns9`, `lns15`, `ns-adaptive`) is computed
-    /// for the output `rate`.
+    /// A quantiser whose designed shaper (`ns4`, `ns5`, `ns9`, `lns15`, `ns-adaptive`) is
+    /// computed for the output `rate`; `auto` assumes [`DEFAULT_DAC_FLOOR_DB`].
     pub fn for_rate(bits: u32, kind: DitherKind, channels: usize, rate: u32) -> Self {
+        Self::for_dac(bits, kind, channels, rate, DEFAULT_DAC_FLOOR_DB)
+    }
+
+    /// [`Quantizer::for_rate`] for a DAC whose noise floor is `dac_floor_db` dBFS
+    /// (A-weighted), which `auto` chooses from.
+    pub fn for_dac(
+        bits: u32,
+        kind: DitherKind,
+        channels: usize,
+        rate: u32,
+        dac_floor_db: f64,
+    ) -> Self {
+        let auto = kind == DitherKind::Auto;
+        let kind = if auto {
+            auto_choice(bits, rate, dac_floor_db)
+        } else {
+            kind
+        };
         assert!(
             matches!(bits, 8 | 16 | 20 | 24 | 32),
             "unsupported bit depth {bits}"
@@ -415,7 +574,14 @@ impl Quantizer {
             step: vec![1.0; channels.max(1)],
             clipped: 0,
             rng: Rng::default(),
+            auto: auto.then_some(dac_floor_db),
+            spare: None,
         }
+    }
+
+    /// When the kind was chosen by `auto`: the DAC floor it was chosen for.
+    pub fn auto_floor(&self) -> Option<f64> {
+        self.auto
     }
 
     /// Output bit depth.
@@ -457,6 +623,15 @@ impl Quantizer {
         match self.kind {
             DitherKind::None => 0.0,
             DitherKind::Rectangular => self.rng.centred(),
+            DitherKind::Gauss => {
+                if let Some(v) = self.spare.take() {
+                    return v;
+                }
+                let (u1, u2) = (1.0 - self.rng.uniform(), self.rng.uniform());
+                let r = GAUSS_SIGMA * (-2.0 * u1.ln()).sqrt();
+                self.spare = Some(r * (2.0 * PI * u2).sin());
+                r * (2.0 * PI * u2).cos()
+            }
             _ => self.rng.centred() + self.rng.centred(),
         }
     }
@@ -835,5 +1010,110 @@ mod tests {
             Some(DitherKind::NsAdaptive)
         );
         assert_eq!(DitherKind::parse("nope"), None);
+    }
+
+    #[test]
+    fn new_kinds_parse_and_ns1_is_no_longer_an_alias() {
+        for (id, k) in [
+            ("ns1", DitherKind::Ns1),
+            ("ns4", DitherKind::Ns4),
+            ("gauss", DitherKind::Gauss),
+            ("gauss1", DitherKind::Gauss),
+            ("auto", DitherKind::Auto),
+            ("ns2", DitherKind::ErrorFeedback2),
+        ] {
+            assert_eq!(DitherKind::parse(id), Some(k), "{id}");
+        }
+        assert_eq!(DitherKind::Ns1.coefficients(), &[1.0]);
+        for rate in [44_100, 48_000, 96_000, 192_000] {
+            let c = DitherKind::Ns4.coefficients_for_rate(rate);
+            assert_eq!(c.len(), 4);
+            // Unity-ish at DC is not required, but the NTF must dip in the band and rise above it.
+            assert!(ntf_db(&c, 3000.0, rate) < -10.0, "{rate}");
+            assert!(ntf_db(&c, rate as f64 * 0.45, rate) > 3.0, "{rate}");
+        }
+    }
+
+    #[test]
+    fn gaussian_dither_has_the_stated_spread() {
+        let mut q = Quantizer::new(16, DitherKind::Gauss, 1);
+        let x = vec![0.25 / 32768.0; 200_000];
+        let y = q.process_to_f64(&x);
+        let e: Vec<f64> = y.iter().zip(&x).map(|(a, b)| (a - b) * 32768.0).collect();
+        let mean = e.iter().sum::<f64>() / e.len() as f64;
+        let var = e.iter().map(|v| (v - mean).powi(2)).sum::<f64>() / e.len() as f64;
+        let want = 1.0 / 12.0 + GAUSS_SIGMA * GAUSS_SIGMA;
+        assert!(
+            (var / want - 1.0).abs() < 0.05,
+            "variance {var}, want {want}"
+        );
+        assert!(mean.abs() < 0.01, "mean {mean}");
+    }
+
+    /// The audibility model agrees with what the quantiser actually does: the weighted
+    /// in-band noise of a run, relative to TPDF, matches the prediction.
+    #[test]
+    fn predicted_audible_noise_matches_the_quantiser() {
+        let rate = 44_100;
+        let n = 1 << 18;
+        let weighted = |kind: DitherKind| {
+            let db = error_spectrum(kind, rate, n);
+            let hz = rate as f64 / n as f64;
+            let p: f64 = db
+                .iter()
+                .enumerate()
+                .map(|(i, d)| (i as f64 * hz, d))
+                .filter(|(f, _)| (20.0..20_000.0).contains(f))
+                .map(|(f, d)| 10f64.powf(d / 10.0) * weighting(f, AUDIBILITY_RANGE_DB))
+                .sum();
+            10.0 * p.log10()
+        };
+        let base = weighted(DitherKind::Tpdf);
+        let base_model = audible_noise_dbfs(DitherKind::Tpdf, 16, rate);
+        for kind in [
+            DitherKind::Ns1,
+            DitherKind::ErrorFeedback2,
+            DitherKind::Ns4,
+            DitherKind::Ns9,
+            DitherKind::Lns15,
+        ] {
+            let measured = weighted(kind) - base;
+            let model = audible_noise_dbfs(kind, 16, rate) - base_model;
+            assert!(
+                (measured - model).abs() < 1.5,
+                "{kind:?}: measured {measured:.1} dB, model {model:.1} dB"
+            );
+        }
+    }
+
+    #[test]
+    fn auto_picks_by_the_dac_floor() {
+        // 16 bits at 44.1 kHz under a good DAC: the strongest shaping.
+        assert_eq!(auto_choice(16, 44_100, -120.0), DitherKind::Lns15);
+        // A noisy DAC needs less.
+        assert_eq!(auto_choice(16, 44_100, -100.0), DitherKind::Ns9);
+        // 24 bits: TPDF is already far under any DAC.
+        assert_eq!(auto_choice(24, 44_100, -130.0), DitherKind::Tpdf);
+        assert_eq!(auto_choice(24, 384_000, -130.0), DitherKind::Tpdf);
+        // At high rates gentle shapers already clear the floor.
+        assert_eq!(auto_choice(16, 384_000, -110.0), DitherKind::Ns1);
+        // A quieter DAC never gets a gentler shaper.
+        for rate in [44_100, 48_000, 96_000, 192_000] {
+            let mut last = 0;
+            for floor in [-90.0, -100.0, -110.0, -120.0, -130.0] {
+                let k = auto_choice(16, rate, floor);
+                let i = AUTO_CANDIDATES.iter().position(|c| *c == k).unwrap();
+                assert!(i >= last, "{rate} {floor}: {k:?}");
+                last = i;
+            }
+        }
+        // The quantiser resolves it and says so.
+        let q = Quantizer::for_dac(16, DitherKind::Auto, 2, 48_000, -105.0);
+        assert_eq!(q.kind(), auto_choice(16, 48_000, -105.0));
+        assert_eq!(q.auto_floor(), Some(-105.0));
+        assert_eq!(
+            Quantizer::for_rate(16, DitherKind::Tpdf, 2, 48_000).auto_floor(),
+            None
+        );
     }
 }

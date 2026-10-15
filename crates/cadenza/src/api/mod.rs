@@ -78,6 +78,7 @@ pub fn router_with_room(engine: Engine, room: crate::room::Room) -> Router {
         .route("/api/room/apply", post(room_apply))
         .route("/api/room/remove", post(room_remove))
         .route("/api/room/forget", post(room_forget))
+        .route("/api/room/noise", post(room_noise))
         .with_state(AppState {
             engine,
             room: Arc::new(Mutex::new(room)),
@@ -189,6 +190,31 @@ async fn room_forget(
     .map(Json)
 }
 
+#[derive(Deserialize, Default)]
+#[serde(default)]
+struct InputBody {
+    input: String,
+}
+
+/// Measure the DAC's noise floor with an input device and store it for `auto` dither.
+async fn room_noise(
+    State(st): State<AppState>,
+    Json(b): Json<InputBody>,
+) -> Result<Json<Value>, ApiError> {
+    with_room(&st, move |r, e| {
+        let m = r.measure_noise(e, &b.input)?;
+        let s = e.settings();
+        let rate = e.status().output_format.map(|f| f.rate).unwrap_or(44_100);
+        Ok(json!({
+            "measurement": m,
+            "dac_noise_floor_db": s.dsp.dac_noise_floor_db,
+            "auto_choice": cadenza_dsp::dither::auto_choice(s.output.bits, rate, m.floor_db).id(),
+        }))
+    })
+    .await
+    .map(Json)
+}
+
 /// Cover art a live stream (AirPlay) received from its sender.
 async fn live_cover(Path(id): Path<String>) -> Response {
     match crate::decode::live::lookup(&id).and_then(|s| s.cover()) {
@@ -237,6 +263,12 @@ pub fn validate(settings: &crate::config::Settings) -> Result<(), String> {
     }
     if DitherKind::parse(&d.dither).is_none() {
         return Err(format!("unknown dither {:?}", d.dither));
+    }
+    if let Some(f) = d.dac_noise_floor_db {
+        let (lo, hi) = crate::render::DAC_FLOOR_RANGE;
+        if !(lo..=hi).contains(&f) {
+            return Err(format!("dac_noise_floor_db must be {lo} … {hi} dBFS"));
+        }
     }
     if !(-30.0..=6.0).contains(&d.dsd_gain_db) {
         return Err("dsd_gain_db must be between -30 and +6 dB".into());

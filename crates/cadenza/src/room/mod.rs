@@ -11,6 +11,7 @@
 //! pipeline, so one measurement serves every source rate.
 
 pub mod capture;
+pub mod noise;
 
 use crate::decode::live::{self, LiveStream};
 use crate::decode::Source;
@@ -80,7 +81,7 @@ fn channel_index(name: &str) -> Result<usize, String> {
 }
 
 /// Change the engine's settings and wait (≤ 2 s) until its status shows them.
-fn set_and_wait(engine: &Engine, s: crate::config::Settings) {
+pub(crate) fn set_and_wait(engine: &Engine, s: crate::config::Settings) {
     let want = s.clone();
     engine.update_settings(s);
     let deadline = std::time::Instant::now() + Duration::from_secs(2);
@@ -199,44 +200,14 @@ impl Room {
         for (i, v) in sweep.signal.iter().enumerate() {
             stereo[(pre + i) * 2 + ch] = v * gain;
         }
-        mic.note_played(&stereo, rate);
-        let stream = Arc::new(LiveStream::new(rate, 2, 24, "Sweep", 0).unbounded());
-        let id = format!("room-sweep-{}", CHANNELS[ch]);
-        live::register(&id, Arc::clone(&stream));
-        stream.push(stereo);
-        stream.close();
-        let runs = engine.status().runs_finished;
-        engine.play_queue(
-            vec![Track {
-                id: Some(id.clone()),
-                source: Source::Live { live: id.clone() },
-                title: format!("Measurement sweep ({})", CHANNELS[ch]),
-                ..Default::default()
-            }],
-            0,
-            0.0,
-        );
-        let limit = Duration::from_secs_f64(frames as f64 / rate as f64 + 15.0);
-        let t0 = std::time::Instant::now();
-        let st = engine.wait_until_finished(runs, limit);
-        let played_for = t0.elapsed().as_secs_f64();
-        // The output queue and the room's decay are still sounding.
-        std::thread::sleep(Duration::from_millis(700));
-        live::unregister(&id);
-        let rec = mic.stop()?;
-        if st.runs_finished <= runs {
-            return Err("the sweep did not finish playing".into());
-        }
-        let duration = frames as f64 / rate as f64;
-        if played_for < duration * 0.5 {
-            return Err(format!(
-                "the sweep stopped after {played_for:.1} s of {duration:.1} s{}",
-                st.error
-                    .as_ref()
-                    .map(|e| format!(": {e}"))
-                    .unwrap_or_default()
-            ));
-        }
+        let rec = play_and_record(
+            engine,
+            mic,
+            stereo,
+            rate,
+            &format!("room-sweep-{}", CHANNELS[ch]),
+            &format!("Measurement sweep ({})", CHANNELS[ch]),
+        )?;
         let peak = rec.iter().fold(0.0f64, |m, v| m.max(v.abs()));
         let peak_dbfs = 20.0 * peak.max(1e-12).log10();
         if peak_dbfs < -60.0 {
@@ -252,6 +223,21 @@ impl Room {
             rate,
             peak_dbfs,
         })
+    }
+
+    /// Measure the DAC's noise floor with `input` (see [`noise`]) and make it the
+    /// `dac_noise_floor_db` setting, which the `auto` dither chooses from.
+    pub fn measure_noise(
+        &mut self,
+        engine: &Engine,
+        input: &str,
+    ) -> Result<noise::NoiseFloor, String> {
+        let mut mic = (self.capture)(input)?;
+        let m = noise::measure(engine, &mut *mic)?;
+        let mut s = engine.settings();
+        s.dsp.dac_noise_floor_db = Some((m.floor_db * 10.0).round() / 10.0);
+        set_and_wait(engine, s);
+        Ok(m)
     }
 
     /// Forget a channel's measurement.
@@ -372,6 +358,59 @@ impl Room {
             set_and_wait(engine, s);
         }
     }
+}
+
+/// Play interleaved stereo `stereo` at `rate` through `engine` as a live track while `mic`
+/// (already started) records; returns the recording. The engine's queue is replaced.
+pub(crate) fn play_and_record(
+    engine: &Engine,
+    mic: &mut dyn Capture,
+    stereo: Vec<f64>,
+    rate: u32,
+    id: &str,
+    title: &str,
+) -> Result<Vec<f64>, String> {
+    let frames = stereo.len() / 2;
+    mic.note_played(&stereo, rate);
+    let stream = Arc::new(LiveStream::new(rate, 2, 24, title, 0).unbounded());
+    live::register(id, Arc::clone(&stream));
+    stream.push(stereo);
+    stream.close();
+    let runs = engine.status().runs_finished;
+    engine.play_queue(
+        vec![Track {
+            id: Some(id.to_string()),
+            source: Source::Live {
+                live: id.to_string(),
+            },
+            title: title.to_string(),
+            ..Default::default()
+        }],
+        0,
+        0.0,
+    );
+    let limit = Duration::from_secs_f64(frames as f64 / rate as f64 + 15.0);
+    let t0 = std::time::Instant::now();
+    let st = engine.wait_until_finished(runs, limit);
+    let played_for = t0.elapsed().as_secs_f64();
+    // The output queue and the room's decay are still sounding.
+    std::thread::sleep(Duration::from_millis(700));
+    live::unregister(id);
+    let rec = mic.stop()?;
+    if st.runs_finished <= runs {
+        return Err("the measurement signal did not finish playing".into());
+    }
+    let duration = frames as f64 / rate as f64;
+    if played_for < duration * 0.5 {
+        return Err(format!(
+            "the measurement signal stopped after {played_for:.1} s of {duration:.1} s{}",
+            st.error
+                .as_ref()
+                .map(|e| format!(": {e}"))
+                .unwrap_or_default()
+        ));
+    }
+    Ok(rec)
 }
 
 #[cfg(test)]
@@ -518,5 +557,50 @@ mod tests {
             .is_err());
         engine.shutdown();
         let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn noise_floor_through_the_engine_sets_the_auto_dither() {
+        let mut s = Settings::default();
+        s.output.backend = "null".into();
+        s.output.rate = RateSetting::Auto;
+        s.output.bits = 16;
+        s.dsp.dither = "auto".into();
+        let engine = Engine::start(
+            s,
+            EngineOptions {
+                cache: CoefficientCache::disabled(),
+                realtime: true,
+                persist: None,
+            },
+        );
+        // Both speakers at half level: the tone reaches the microphone at −20 dBFS, with
+        // the simulated input's white noise (±1e-5) on top.
+        let rate = 48000;
+        let room = SimulatedRoom::new(rate, vec![0.5], vec![0.5]);
+        let mut r = Room::new(std::env::temp_dir().join("cadenza-noise-x"), room.factory());
+        let m = r.measure_noise(&engine, "").unwrap();
+        let rms = 2e-5 / 12f64.sqrt();
+        let steps = 20_000;
+        let df = (20_000.0 - 20.0) / steps as f64;
+        let aw: f64 = (0..steps)
+            .map(|i| cadenza_dsp::dither::a_weighting(20.0 + (i as f64 + 0.5) * df).powi(2) * df)
+            .sum();
+        let want = 10.0 * (rms * rms * aw / (rate as f64 / 2.0) / 0.005).log10() - 20.0;
+        assert!(
+            (m.floor_db - want).abs() < 1.0,
+            "{:.1} vs {want:.1}",
+            m.floor_db
+        );
+        assert!(
+            (m.tone_at_input_db + 20.0).abs() < 0.2,
+            "{}",
+            m.tone_at_input_db
+        );
+        // The setting is stored and the other settings are back.
+        let st = engine.settings();
+        assert_eq!(st.dsp.dither, "auto");
+        let floor = st.dsp.dac_noise_floor_db.unwrap();
+        assert!((floor - m.floor_db).abs() < 0.06);
     }
 }

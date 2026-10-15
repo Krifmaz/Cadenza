@@ -246,6 +246,16 @@ pub fn patch_settings(s: &mut Settings, set: &serde_json::Map<String, Value>) ->
                     None => bad("gpu must be auto, on or off:"),
                 }
             }
+            "dac_noise_floor_db" => match v {
+                Value::Null => s.dsp.dac_noise_floor_db = None,
+                _ => match v.as_f64().filter(|f| {
+                    (crate::render::DAC_FLOOR_RANGE.0..=crate::render::DAC_FLOOR_RANGE.1)
+                        .contains(f)
+                }) {
+                    Some(f) => s.dsp.dac_noise_floor_db = Some(f),
+                    None => bad("dac_noise_floor_db must be −160 … −60 dBFS"),
+                },
+            },
             "headphones" => match v.as_str().and_then(cadenza_dsp::HeadphoneMode::from_id) {
                 Some(m) => s.dsp.headphones = m,
                 None => bad("unknown headphones mode"),

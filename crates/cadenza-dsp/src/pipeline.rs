@@ -95,6 +95,9 @@ pub struct PipelineConfig {
     pub headphone: crate::headphone::HeadphoneMode,
     /// A filter from the designer; when set it is used instead of `filter`.
     pub filter_design: Option<crate::design::FilterDesign>,
+    /// The DAC's own noise floor in dBFS (A-weighted), which `auto` dither chooses from;
+    /// `None` assumes [`crate::dither::DEFAULT_DAC_FLOOR_DB`].
+    pub dac_noise_floor_db: Option<f64>,
 }
 
 impl Default for PipelineConfig {
@@ -119,6 +122,7 @@ impl Default for PipelineConfig {
             matrix: MatrixConfig::default(),
             headphone: crate::headphone::HeadphoneMode::Off,
             filter_design: None,
+            dac_noise_floor_db: None,
         }
     }
 }
@@ -427,7 +431,15 @@ impl Pipeline {
             .transpose()?;
         let output_rate = dsd.as_ref().map(DsdStage::dsd_rate).unwrap_or(pcm_rate);
         let dither = if bp { DitherKind::None } else { config.dither };
-        let quantizer = Quantizer::for_rate(config.output_bits, dither, out_ch, pcm_rate);
+        let quantizer = Quantizer::for_dac(
+            config.output_bits,
+            dither,
+            out_ch,
+            pcm_rate,
+            config
+                .dac_noise_floor_db
+                .unwrap_or(crate::dither::DEFAULT_DAC_FLOOR_DB),
+        );
         // Headroom + true-peak meter + soft clipper: the last guard whenever the chain
         // processes anything (never in a bit-perfect chain, so it stays bit-perfect).
         // In DSD mode `dsd_gain_db` is the headroom, so the automatic −3 dB is not stacked.
@@ -883,12 +895,21 @@ impl Pipeline {
                 id: "dither".into(),
                 name: "Dither".into(),
                 detail: format!(
-                    "{} → {}-bit{}",
+                    "{}{} → {}-bit{}",
+                    match q.auto_floor() {
+                        Some(f) => format!("Auto ({f:.0} dBFS DAC floor): "),
+                        None => String::new(),
+                    },
                     q.kind().label(),
                     q.bits(),
                     if q.kind().adds_noise() || depth_change { "" } else { " · exact" }
                 ),
-                params: json!({ "kind": q.kind().id(), "label": q.kind().label(), "bits": q.bits(), "shaper": q.coefficients(), "rate": q.rate(), "clipped": q.clipped() }),
+                params: json!({
+                    "kind": q.kind().id(), "label": q.kind().label(), "bits": q.bits(),
+                    "shaper": q.coefficients(), "rate": q.rate(), "clipped": q.clipped(),
+                    "auto": q.auto_floor().is_some(), "dac_floor_db": q.auto_floor(),
+                    "audible_noise_dbfs": crate::dither::audible_noise_dbfs(q.kind(), q.bits(), q.rate()),
+                }),
                 active: q.kind().adds_noise() || depth_change,
             });
         }
@@ -1636,5 +1657,47 @@ mod tests {
         assert_eq!(r.params["window"], "gaussian");
         let cutoff = r.params["cutoff_hz"].as_f64().unwrap();
         assert!((cutoff - 0.95 * 22050.0).abs() < 1.0, "{cutoff}");
+    }
+
+    #[test]
+    fn auto_dither_follows_the_dac_floor_and_shows_it() {
+        let cache = CoefficientCache::disabled();
+        let make = |bits: u32, floor: Option<f64>| {
+            Pipeline::new(
+                InputFormat {
+                    rate: 44100,
+                    bits: 24,
+                    channels: 2,
+                    codec: "FLAC".into(),
+                },
+                PipelineConfig {
+                    output_rate: Some(44100),
+                    output_bits: bits,
+                    dither: DitherKind::Auto,
+                    dac_noise_floor_db: floor,
+                    ..Default::default()
+                },
+                &cache,
+            )
+            .unwrap()
+        };
+        let stage = |p: &Pipeline| {
+            p.signal_path()
+                .stages
+                .into_iter()
+                .find(|s| s.id == "dither")
+                .unwrap()
+        };
+        let d = stage(&make(16, Some(-100.0)));
+        assert_eq!(d.params["kind"], "ns9");
+        assert_eq!(d.params["auto"], true);
+        assert_eq!(d.params["dac_floor_db"], -100.0);
+        assert!(
+            d.detail.starts_with("Auto (-100 dBFS DAC floor): NS9"),
+            "{}",
+            d.detail
+        );
+        assert_eq!(stage(&make(16, None)).params["kind"], "lns15");
+        assert_eq!(stage(&make(24, None)).params["kind"], "tpdf");
     }
 }

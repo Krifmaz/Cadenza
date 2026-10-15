@@ -78,6 +78,8 @@ pub struct EngineSettings {
     pub gpu: GpuConfig,
     /// Crossfeed / HRTF for headphone listening.
     pub headphones: cadenza_dsp::HeadphoneMode,
+    /// The DAC's noise floor (dBFS, A-weighted) the `auto` dither chooses from.
+    pub dac_noise_floor_db: f64,
 }
 
 impl Default for EngineSettings {
@@ -90,6 +92,7 @@ impl Default for EngineSettings {
             soft_clip: true,
             gpu: GpuConfig::default(),
             headphones: cadenza_dsp::HeadphoneMode::Off,
+            dac_noise_floor_db: cadenza_dsp::dither::DEFAULT_DAC_FLOOR_DB,
         }
     }
 }
@@ -97,13 +100,17 @@ impl Default for EngineSettings {
 /// Lowest and highest `headroom_db`.
 pub const HEADROOM_RANGE: (f64, f64) = (-12.0, 0.0);
 
+/// Accepted DAC noise floors (dBFS).
+pub const DAC_FLOOR_RANGE: (f64, f64) = (-160.0, -60.0);
+
 /// The schema keys, in display order.
-pub const KEYS: [&str; 8] = [
+pub const KEYS: [&str; 9] = [
     "filter",
     "dither",
     "headroom_db",
     "soft_clip",
     "headphones",
+    "dac_noise_floor_db",
     "gpu",
     "gpu_device",
     "gpu_precision",
@@ -177,6 +184,19 @@ impl EngineSettings {
                     )
                 })?
             }
+            "dac_noise_floor_db" => {
+                let db: f64 = v
+                    .parse()
+                    .ok()
+                    .filter(|d| (DAC_FLOOR_RANGE.0..=DAC_FLOOR_RANGE.1).contains(d))
+                    .ok_or_else(|| {
+                        format!(
+                            "bad value {v:?} for dac_noise_floor_db ({} … {} dBFS)",
+                            DAC_FLOOR_RANGE.0, DAC_FLOOR_RANGE.1
+                        )
+                    })?;
+                self.dac_noise_floor_db = db;
+            }
             "gpu" => self.gpu.mode = parse_gpu(v)?,
             "gpu_device" => {
                 self.gpu.device = v
@@ -226,6 +246,7 @@ impl EngineSettings {
             gpu: self.gpu,
             headphone: self.headphones,
             filter_design: self.filter_design.clone(),
+            dac_noise_floor_db: Some(self.dac_noise_floor_db),
             ..PipelineConfig::default()
         }
     }
@@ -336,6 +357,11 @@ pub fn settings_schema(devices: &[(usize, String)]) -> Vec<Value> {
             "options": cadenza_dsp::HeadphoneMode::ALL.iter().map(|m| json!([m.1, m.2])).collect::<Vec<_>>(),
             "default": d.headphones.id(),
             "help": "For headphone listening (stereo only): crossfeed blends a little of each channel into the other ear; HRTF places two virtual speakers in front of you.",
+        }),
+        json!({
+            "key": "dac_noise_floor_db", "label": "DAC noise floor (dBFS)", "type": "number",
+            "min": DAC_FLOOR_RANGE.0, "max": DAC_FLOOR_RANGE.1, "step": 1, "default": d.dac_noise_floor_db,
+            "help": "The DAC's own noise, A-weighted (its dynamic range with a minus sign). Only used by the Auto dither, which picks the gentlest noise shaper that stays 10 dB under it.",
         }),
     ];
     if cadenza_dsp::gpu::COMPILED_IN {
@@ -578,9 +604,9 @@ mod tests {
         if cadenza_dsp::gpu::WGPU_COMPILED_IN {
             assert_eq!(keys, KEYS);
         } else if cadenza_dsp::gpu::COMPILED_IN {
-            assert_eq!(keys, &KEYS[..7]);
+            assert_eq!(keys, &KEYS[..8]);
         } else {
-            assert_eq!(keys, &KEYS[..5]);
+            assert_eq!(keys, &KEYS[..6]);
         }
         for s in &schema {
             assert!(s["label"].as_str().is_some_and(|l| !l.is_empty()));

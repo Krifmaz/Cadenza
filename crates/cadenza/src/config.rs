@@ -151,6 +151,9 @@ pub struct DspConfig {
     /// Headphones: `off`, `crossfeed-bs2b`, `crossfeed-chu-moy`, `crossfeed-meier`,
     /// `hrtf-30`, `hrtf-45`, `hrtf-60`.
     pub headphones: cadenza_dsp::HeadphoneMode,
+    /// The DAC's own noise floor in dBFS, A-weighted (measured from the web UI or taken
+    /// from its spec); the `auto` dither chooses from it. Absent: −120.
+    pub dac_noise_floor_db: Option<f64>,
     /// DSD sources (DSF/DFF) go to a DSD output untouched when the rates match and
     /// nothing else needs to touch the samples; off = always re-modulate through PCM.
     pub dsd_passthrough: bool,
@@ -176,6 +179,7 @@ impl Default for DspConfig {
             headroom_db: None,
             soft_clip: true,
             headphones: cadenza_dsp::HeadphoneMode::Off,
+            dac_noise_floor_db: None,
             output_mode: OutputMode::Pcm,
             dsd_rate: dsd.rate,
             dsd_modulator: dsd.modulator,

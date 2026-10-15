@@ -116,6 +116,11 @@
     <h2>Noise shaping</h2>
     <label class="field"><span>Dither / noise shaper (PCM output)</span><select id="dither"></select></label>
     <div class="hint" id="dither-info"></div>
+    <div class="row" style="margin-top:8px">
+      <label class="field" style="flex:1"><span>DAC noise floor (dBFS, A-weighted; empty = −120)</span><input type="number" id="dac_noise_floor_db" min="-160" max="-60" step="1" placeholder="-120"></label>
+      <button id="noise-measure" style="margin-top:18px">Measure</button>
+    </div>
+    <div class="hint" id="noise-info">Used by Auto only: it picks the gentlest shaper whose audible noise stays 10 dB under this. Measure plays a −20 dBFS tone, then silence, and records them with the input chosen under Room correction (best: a cable from the DAC's output to an audio interface input). The input's own noise counts too, so the result is an upper bound.</div>
   </section>
 
   <section class="card">
@@ -306,6 +311,8 @@ function filterInfo() {
   $('filter-info').textContent = f ? `${f.family} · ${f.taps_at_rate?.toLocaleString()} taps at ×${Math.round(f.out_rate / f.in_rate)} · transition ${Math.round(f.transition_hz)} Hz (${(f.transition_percent ?? 0).toFixed(3)} %) · stopband ${Math.round(f.stopband_db)} dB · latency ${((f.latency_seconds || 0) * 1000).toFixed(1)} ms · ${f.window} window` : '';
 }
 function ditherInfo() {
+  const st = status?.signal_path?.stages?.find(x => x.id === 'dither');
+  if ($('dither').value === 'auto') { $('dither-info').textContent = st?.params?.auto ? `now: ${st.detail}` : 'chosen per output from the DAC noise floor below; the pick shows here while playing'; return; }
   const d = dithers.find(x => x.id === $('dither').value);
   $('dither-info').textContent = d ? [d.order ? `order ${d.order}` : '', d.designed_per_rate ? 'designed for the actual output rate (44.1 and 48 families)' : (d.design_rate ? `designed for ${khz(d.design_rate)}` : '')].filter(Boolean).join(' · ') : '';
 }
@@ -342,6 +349,7 @@ function loadSettings(set) {
   $('output_mode').value = d.output_mode || 'pcm';
   ensureFilterOption(d.filter); $('filter').value = d.filter; filterInfo();
   $('dither').value = d.dither; ditherInfo();
+  if (document.activeElement !== $('dac_noise_floor_db')) $('dac_noise_floor_db').value = d.dac_noise_floor_db ?? '';
   $('convolution').value = d.convolution || '';
   $('headroom_db').value = d.headroom_db ?? '';
   $('soft_clip').checked = d.soft_clip !== false;
@@ -404,6 +412,16 @@ $('bitperfect').onchange = () => { lockDsp(); save({ dsp: { bit_perfect: $('bitp
 $('output_mode').onchange = () => { lockDsp(); fillDsdRates(); save({ dsp: { output_mode: $('output_mode').value } }); };
 $('filter').onchange = () => { filterInfo(); save({ dsp: { filter: $('filter').value } }); };
 $('dither').onchange = () => { ditherInfo(); save({ dsp: { dither: $('dither').value } }); };
+$('dac_noise_floor_db').onchange = () => save({ dsp: { dac_noise_floor_db: $('dac_noise_floor_db').value === '' ? null : num('dac_noise_floor_db') } });
+$('noise-measure').onclick = async () => {
+  $('noise-measure').disabled = true; $('noise-info').textContent = 'Measuring… keep quiet (about 8 s).';
+  try {
+    const j = await api('POST', '/api/room/noise', { input: $('room_input').value });
+    $('dac_noise_floor_db').value = j.dac_noise_floor_db;
+    $('noise-info').textContent = `Measured ${j.measurement.floor_db.toFixed(1)} dBFS (tone reached the input at ${j.measurement.tone_at_input_db.toFixed(1)} dBFS) · Auto would pick ${j.auto_choice}.`;
+  } catch (e) { $('noise-info').textContent = e.message; }
+  finally { $('noise-measure').disabled = false; }
+};
 $('convolution').onchange = () => save({ dsp: { convolution: $('convolution').value.trim() } });
 $('headroom_db').onchange = () => save({ dsp: { headroom_db: $('headroom_db').value === '' ? null : num('headroom_db') } });
 $('soft_clip').onchange = () => save({ dsp: { soft_clip: $('soft_clip').checked } });

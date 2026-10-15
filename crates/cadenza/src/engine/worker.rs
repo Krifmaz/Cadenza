@@ -824,6 +824,7 @@ impl Worker {
             matrix: s.matrix.clone(),
             headphone: s.dsp.headphones,
             filter_design,
+            dac_noise_floor_db: s.dsp.dac_noise_floor_db,
         };
         let pipeline =
             Pipeline::new(input, config, &self.cache).map_err(|e: PipelineError| e.to_string())?;

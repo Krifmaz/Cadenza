@@ -44,11 +44,13 @@ Dual-licensed under MIT or Apache-2.0.
   stopband and latency for any conversion; coefficients are cached on disk in `f64`
   (16M taps = 128 MB).
 - **Dither & noise shaping** when quantising to 16/24/32-bit: none, rectangular, TPDF,
-  2nd-order error feedback, Lipshitz, Wannamaker 9/3, Gesemann 44.1/48, plus the designed
-  shapers **`ns5`, `ns9`** (F-weighted least squares), **`lns15`** (15th order,
+  Gaussian (`gauss`), 1st-order (`ns1`) and 2nd-order (`ef2`) error feedback, Lipshitz,
+  Wannamaker 9/3, Gesemann 44.1/48, plus the designed shapers **`ns4`, `ns5`, `ns9`**
+  (F-weighted least squares), **`lns15`** (15th order,
   Lipshitz/Wannamaker weighting) and **`ns-adaptive`** (dithered error feedback with an
   adaptive step) – each computed for the actual output rate in both families, with a
-  clip-safe limiter so they never run away.
+  clip-safe limiter so they never run away. **`auto`** picks one per output from the DAC's
+  noise floor (see "Auto dither" below).
 - **DSD output** (`output_mode = dsd`): 5th- and 7th-order sigma-delta modulators
   **`asdm5`, `asdm7`**, the dithered-quantiser **`dsd5v2`, `dsd7v2`** (lower idle
   tones) and the error-correction loops **`asdm5ec`, `asdm7ec`, `asdm7ec8`** (a look-ahead
@@ -149,7 +151,7 @@ implemented and tested here; the notes say where we differ.
 | Upsampling filters | sinc-M / L / Lm, closed-form, poly-sinc-gauss, xtr, ext3, min-phase & apodizing | `sinc`, `sinc-mx`, `sinc-xtr` (8M/16M), `closed-form`, `poly-sinc-gauss` (short/long/xla), `poly-sinc-ext3`; l / m / la / ma variants of each (64 catalogue entries) | matched – ours are our own designs, not copies of HQPlayer's exact responses |
 | Filter designer | none (fixed catalogue) | Any window (Kaiser, Dolph–Chebyshev, Gaussian, 3-term cosine), linear or minimum phase, cutoff, transition width and stopband (60–250 dB); length worked out per ratio; response, passband and impulse plots for every filter in the web UI | ahead: HQPlayer has no designer. Tested: every window and phase meets the asked stopband within 1 dB from the asked edge |
 | PCM output | up to 1.536 MHz | up to 1.536 MHz (32×), every multiple of both families, rational cross-family | matched |
-| Dither / noise shaping | TPDF, NS1–NS9, LNS15 | TPDF, EF2, Lipshitz, Wannamaker, Gesemann, `ns5`, `ns9`, `lns15`, `ns-adaptive`, per output rate | matched (our shaper designs; no NS1–NS4 names) |
+| Dither / noise shaping | RPDF, TPDF, Gauss1, NS1, NS4, NS5, NS9, LNS15, shaped | rectangular, TPDF, `gauss`, `ns1`, EF2, `ns4`, `ns5`, `ns9`, `lns15`, Lipshitz, Wannamaker, Gesemann, `ns-adaptive`, per output rate; **`auto`** chosen from the DAC's measured noise floor | matched on names (our own designs, not HQPlayer's exact curves) and ahead with `auto`: HQPlayer has no automatic choice. Measured only against a simulated input; not yet with a real DAC and ADC |
 | DSD output | DSD64–DSD1024, ASDM5/7 (+ EC, v2/v3 variants) | DSD64–DSD1024 **and DSD2048**, `asdm5`, `asdm7`, `dsd5v2`, `dsd7v2`, error-correction `asdm5ec`, `asdm7ec`, `asdm7ec8` (look-ahead trellis, +6 / +10 dB in-band SNR over the plain loops at DSD64); DoP and native | matched and exceeded on rate; EC matched; no "v3" family yet; EC is CPU-heavy (see `cadenza bench`) |
 | 1024× oversampling | yes (GPU recommended) | `dsd_oversampling = full` (long FIR to the DSD rate), CPU or CUDA | matched; very heavy on a CPU – check `cadenza bench --dsd-upsampling --dsd-full` |
 | DSD input | DSF/DFF (incl. DST), SACD ISO, DSD→PCM, DSD→DSD via PCM, direct | DSF/DFF including DST-compressed DFF, SACD ISO (stereo and multichannel areas, DST or plain), CUE sheets over PCM or DSD files, gapless DSD → PCM across tracks, re-modulation via PCM, bit-perfect pass-through | matched; tested with synthetic images and files, not yet with a real ripped SACD |
@@ -234,8 +236,9 @@ to do it:
 8. **Filter designer** – done (see "Filter designer" below): pick window, phase, cutoff, transition
    width and stopband depth; Cadenza designs and caches the filter, and plots the response, passband
    ripple and impulse of any filter in the web UI. HQPlayer only offers fixed catalogue entries.
-9. **Noise shaping "auto"** – the remaining named shapers for parity, then a per-DAC automatic choice of
-   shaper and dither from the output's measured noise floor.
+9. **Noise shaping "auto"** – done (see "Auto dither" below): `ns1`, `ns4` and Gaussian dither for
+   parity, and `auto`, which picks the shaper per output from the DAC's noise floor, measured from the
+   web UI with an input device or taken from the DAC's spec.
 10. **System-wide upsampler (standalone, no library, no player)** – Cadenza stays strictly an upsampler:
     it takes the sound of any app or of the whole system and plays it into the DAC through the engine.
     Two ways in, both with the existing engine settings page in a small tray window and nothing else:
@@ -299,7 +302,8 @@ max_rate = 1536000      # cap for "auto"
 bit_perfect = false
 filter = "sinc-l-64k"   # <family>-<phase>-<len>, see `cadenza filters`; or a design, e.g. custom-kaiser-l-c100-t5-s150
 attenuation_db = 150.0  # design stopband for the sinc family
-dither = "tpdf"         # … ns5 | ns9 | lns15 | ns-adaptive, see `cadenza dithers`
+dither = "tpdf"         # … ns5 | ns9 | lns15 | ns-adaptive | auto, see `cadenza dithers`
+# dac_noise_floor_db = -118.0   # what `auto` chooses from; absent = -120 (measure it in the web UI)
 volume_db = 0.0
 convolution = ""        # WAV or text impulse response
 eq = []                 # [{ kind = "peaking", freq = 100.0, gain_db = -3.0, q = 1.0 }]
@@ -387,7 +391,7 @@ ffmpeg -i song.flac -f f64le -acodec pcm_f64le - |
   output = value << 8), exactly what Encore's in-process engine produces for the same
   settings, sample for sample. The resampler tail is flushed at EOF.
 - `--set key=value` (repeatable) sets any key of the settings schema: `filter`, `dither`,
-  `headroom_db` (default 0), `soft_clip`, `headphones`, `gpu` (auto/on/off, GPU builds), `gpu_device`
+  `headroom_db` (default 0), `soft_clip`, `headphones`, `dac_noise_floor_db` (for `dither=auto`), `gpu` (auto/on/off, GPU builds), `gpu_device`
   (when a GPU is present) and `gpu_precision` (wgpu builds). Unknown keys are ignored with a warning; a bad value
   exits 2. `--filter`, `--dither`, `--headroom-db` and `--gpu` are aliases.
 - `cadenza render --describe` prints one JSON line: name, version, `protocol` (1), input
@@ -443,6 +447,38 @@ the same device:
   becomes the active one), standby.
 - **Volume** (0–100 with mute; no balance or fade), **Time** (track count, duration,
   seconds) and **Info** (track, codec, bit depth, sample rate), all evented.
+
+## Auto dither
+
+Noise shaping trades noise in the band for noise above it. How much is worth it depends on
+the output: at 24 bits plain TPDF is already far below any DAC, and at 16 bits the DAC's own
+noise decides how hard the shaper needs to work. `dither = "auto"` decides per output:
+
+1. For every candidate – TPDF, `ns1`, `ef2`, `ns4`, `ns5`, `ns9`, `lns15`, gentlest first – it
+   works out the audible noise at the output's bits and rate: the quantisation error plus
+   dither through the shaper's noise transfer function, weighted by the hearing threshold
+   (what the shapers are designed against) and scaled so white noise reads the same as
+   A-weighted. Plain A-weighting would rank a psychoacoustic shaper below TPDF, because it
+   still counts the noise moved to 15–20 kHz.
+2. It takes the first one whose noise is at least 10 dB under the DAC's floor (or the quietest
+   when none is). Gentler shapers put less noise above the band, so they win when they are
+   already inaudible.
+
+Examples (DAC floor −120 dBFS): 16-bit 44.1 kHz → `lns15`; 16-bit 384 kHz → `ef2`; 24-bit at
+any rate → TPDF. The signal path shows the pick, e.g. `Auto (-120 dBFS DAC floor): LNS15 …`.
+
+**The DAC's floor** is `dac_noise_floor_db` (dBFS, A-weighted; −120 when not set). Take it
+from the DAC's spec (dynamic range with a minus sign) or **Measure** it in the Noise shaping
+card: the engine plays a 997 Hz tone at −20 dBFS and then digital silence (dither off), the
+input chosen under Room correction records both, and the A-weighted noise in the silence
+relative to the tone gives the floor without knowing the input's gain. Best with a cable from
+the DAC's output to an audio interface; a microphone measures the room. The input's own noise
+counts too, so the result is an upper bound. API: `POST /api/room/noise {input}`.
+
+Tested: the noise model matches what the quantiser produces (each shaper's weighted noise
+relative to TPDF within 1.5 dB of the prediction); the analysis recovers a known floor within
+0.5 dB through gain and latency; a measurement through the engine with a simulated input lands
+within 1 dB and sets the setting. Not yet tried with a real DAC and ADC.
 
 ## Filter designer
 
@@ -840,6 +876,7 @@ SwiftShader, WARP) are slower than the CPU engine and are skipped unless
 - [x] Multi-room sync groups of endpoints
 - [x] Room measurement and correction from the web UI; headphone crossfeed and HRTF
 - [x] Filter designer with response plots
+- [x] `ns1`, `ns4`, Gaussian dither and `auto` dither from the DAC's measured noise floor
 - [ ] MPRIS, Roon
 - [ ] Non-uniformly partitioned convolution for lower latency with long impulses
 - [ ] "v3"-class modulators and more poly-sinc variants
