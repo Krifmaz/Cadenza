@@ -79,6 +79,10 @@ pub fn router_with_room(engine: Engine, room: crate::room::Room) -> Router {
         .route("/api/room/remove", post(room_remove))
         .route("/api/room/forget", post(room_forget))
         .route("/api/room/noise", post(room_noise))
+        .route(
+            "/api/system",
+            get(|| async { Json(crate::system::status()) }),
+        )
         .with_state(AppState {
             engine,
             room: Arc::new(Mutex::new(room)),

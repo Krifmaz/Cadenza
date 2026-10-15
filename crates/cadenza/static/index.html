@@ -160,6 +160,12 @@
     <table><thead><tr><th>Type</th><th>Frequency (Hz)</th><th>Gain (dB)</th><th>Q</th><th></th></tr></thead><tbody id="eq"></tbody></table>
     <div class="row" style="margin-top:8px"><button id="eq-add">Add band</button><button class="primary" id="eq-save">Apply EQ</button></div>
   </section>
+  <section class="card">
+    <h2>System input <span class="badge" id="sys-badge"></span></h2>
+    <div class="small" id="sys-info"></div>
+    <div class="hint">Cadenza as the system's upsampler: <code>cadenza serve --system sink</code> adds an output device "Cadenza" that any app (or the whole desktop) can play to; <code>--system app:&lt;name&gt;</code> takes one application's sound before the mixer. Or <code>[system]</code> in the config. Linux (PipeWire) for now.</div>
+  </section>
+
   <section class="card wide">
     <h2>Filter designer</h2>
     <div class="row">
@@ -449,6 +455,20 @@ $('eq').oninput = (e) => { const tr = e.target.closest('tr[data-i]'); const k = 
 $('eq').onclick = (e) => { const b = e.target.closest('[data-rm]'); if (b) { eqBands.splice(+b.dataset.rm, 1); paintEq(); } };
 $('eq-add').onclick = () => { eqBands.push({ kind: 'peaking', freq: 1000, gain_db: 0, q: 0.707 }); paintEq(); };
 $('eq-save').onclick = () => save({ dsp: { eq: eqBands, eq_enabled: $('eq_enabled').checked } });
+
+// System input.
+async function paintSystem() {
+  try {
+    const j = await api('GET', '/api/system');
+    $('sys-badge').textContent = j.running ? 'on' : (j.config?.enabled ? 'error' : 'off');
+    const st = j.stats;
+    $('sys-info').textContent = !j.available ? 'This build has no system input for this platform.'
+      : j.error ? j.error
+      : !j.running ? 'Off.'
+      : `${j.config.mode === 'app' ? 'Capturing ' + j.config.app : 'Device "' + j.config.name + '"'} · ${st.rate ? `${st.channels} ch at ${khz(st.rate)} · peak ${st.peak > 0 ? (20 * Math.log10(st.peak)).toFixed(1) + ' dBFS' : 'silent'}` : 'waiting for sound'}`;
+  } catch (e) { $('sys-info').textContent = e.message; }
+}
+paintSystem(); setInterval(paintSystem, 2000);
 
 // Filter designer.
 const fdNum = (x) => Number(x).toFixed(4).replace(/0+$/, '').replace(/\.$/, '');

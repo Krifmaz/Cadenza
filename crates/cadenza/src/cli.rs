@@ -128,6 +128,11 @@ pub enum Commands {
         #[arg(long)]
         no_encore: bool,
 
+        /// Take the system's sound: `sink` (a virtual output device "Cadenza") or
+        /// `app:<name>` (one application). Overrides `[system]` in the config.
+        #[arg(long, value_name = "sink|app:NAME")]
+        system: Option<String>,
+
         #[command(flatten)]
         overrides: Overrides,
     },

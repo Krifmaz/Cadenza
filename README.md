@@ -168,6 +168,7 @@ implemented and tested here; the notes say where we differ.
 | 64-bit processing | yes | yes everywhere | matched |
 | UPnP / Roon / control | UPnP renderer, Roon via NAA | UPnP/DLNA MediaRenderer (AVTransport, RenderingControl, ConnectionManager, gapless next URI, events) with OpenHome services, HTTP API, web UI, Encore device | matched: UPnP AV and OpenHome (Product, Playlist, Volume, Time, Info) – tested with scripted control points, not yet with BubbleUPnP / Kazoo / mconnect themselves; no Roon |
 | AirPlay | no | AirPlay 1 receiver (ALAC, encrypted, volume, title / artist / album, cover art, progress, play / pause / next / previous back to the phone) into the full engine | ahead: HQPlayer has none. Tested with a scripted sender, not yet with an iPhone or Mac; AirPlay 2 is not implemented |
+| System-wide input | audio-device input (with a separately installed loopback driver) | Linux: a built-in virtual output device "Cadenza" (PipeWire) and one-app capture before the mixer, following the source rate; Windows and macOS not yet | ahead on Linux (nothing extra to install), behind on Windows and macOS for now. Tested against a real headless PipeWire 1.0; not yet on a desktop with a real DAC |
 | Licence / price | proprietary | MIT / Apache-2.0, free | – |
 
 ### Notes: how Cadenza gets ahead
@@ -239,7 +240,10 @@ to do it:
 9. **Noise shaping "auto"** – done (see "Auto dither" below): `ns1`, `ns4` and Gaussian dither for
    parity, and `auto`, which picks the shaper per output from the DAC's noise floor, measured from the
    web UI with an input device or taken from the DAC's spec.
-10. **System-wide upsampler (standalone, no library, no player)** – Cadenza stays strictly an upsampler:
+10. **System-wide upsampler (standalone, no library, no player)** – Linux done (see "System input"
+    below): a PipeWire virtual output device and per-app capture, rate-following, tested against a real
+    PipeWire. Windows and macOS next; no tray window yet (the web UI is the settings page).
+    Cadenza stays strictly an upsampler:
     it takes the sound of any app or of the whole system and plays it into the DAC through the engine.
     Two ways in, both with the existing engine settings page in a small tray window and nothing else:
     * *Virtual output device* "Cadenza": pick it as the system or per-app output, Cadenza receives the
@@ -267,6 +271,7 @@ cargo build --release --features asio     # + ASIO drivers, native DSD and DoP (
 cargo build --release --features coreaudio # + CoreAudio hog mode, DoP (macOS)
 cargo build --release --features cuda     # + CUDA offload (NVIDIA; no toolkit needed to build)
 cargo build --release --features wgpu     # + GPU offload on AMD / Intel / Apple / NVIDIA (Vulkan, Metal, DX12)
+cargo build --release --features pipewire # + system input: virtual device "Cadenza", app capture (Linux)
 
 cadenza devices                           # output devices: rates, bits, channels, DSD, exclusive
 cadenza filters --in-rate 44100 --out-rate 705600   # taps, transition, stopband, latency
@@ -588,6 +593,53 @@ Tested: synthetic SACD images packed the way discs are (DST and plain, several t
 seeking anywhere in long tracks), CUE sheets over WAV, FLAC and DSF whose tracks
 concatenate to the whole file exactly, and two DSD files that are one recording cut in
 two playing to the very same samples as the whole. Not yet tried with real disc rips.
+
+## System input (Linux)
+
+Cadenza as the system's upsampler, with no player of its own: the sound of the desktop or
+of one app goes through the engine into the DAC. Build with `--features pipewire` (needs
+`libpipewire-0.3-dev` and `clang`); the release binaries don't include it, so they keep
+running on machines without PipeWire.
+
+```sh
+cadenza serve --system sink           # adds the output device "Cadenza"
+cadenza serve --system app:firefox    # takes one app's sound
+```
+
+or in config.toml:
+
+```toml
+[system]
+enabled = true
+mode = "sink"        # sink | app
+app = ""             # for app: its name, process binary or PipeWire node name
+name = "Cadenza"     # the device's name
+latency_ms = 150     # buffered before playing
+```
+
+- **sink**: a PipeWire node with `media.class = Audio/Sink`. It shows up in the desktop's
+  sound settings and every app's output list; pick it for the whole system or one app.
+- **app**: a capture stream linked to the app's own playback stream, before the mixer,
+  so the app still plays where it did. When the app closes its stream and opens another
+  (next video, new tab) the capture follows.
+- **Rate**: what arrives starts a live track at its rate, and a new rate starts a new one,
+  so the engine upsamples from the source rate. PipeWire runs its graph at one rate; for
+  bit-perfect input let it switch to the source's by allowing the rates in
+  `~/.config/pipewire/pipewire.conf.d/rates.conf`:
+  `context.properties = { default.clock.allowed-rates = [ 44100 48000 88200 96000 176400 192000 ] }`
+  and keep the app's volume at 100 %. The signal path shows the rate that arrived
+  (`PipeWire 32/44.1 → 24/1411.2`).
+- The engine is only taken over when it is idle or already playing the system input; a
+  record you started keeps playing. The live stream hands out silence when the system is
+  quiet, so the DAC stays open. `GET /api/system` and the web UI show what is arriving.
+- Between the capture clock and the DAC clock the buffer absorbs drift by dropping or
+  bridging a block when it runs over or dry (as for AirPlay); there is no adaptive
+  resampling yet.
+
+Tested against a real headless PipeWire 1.0 with WirePlumber (also in CI): a player sending
+to the "Cadenza" device reaches the engine at its level; one app is captured by name and its
+second stream followed; with allowed rates set, 44.1 → 48 → 96 kHz sources arrive at their
+own rates and the engine follows. Not yet tried on a desktop with a real DAC.
 
 ## AirPlay receiver
 

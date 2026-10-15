@@ -42,9 +42,19 @@ fn main() {
         Commands::Serve {
             listen,
             no_encore,
+            system,
             overrides,
         } => {
             apply_overrides(&mut config, &overrides);
+            if let Some(sys) = system {
+                match cadenza::system::SystemConfig::parse_flag(&sys, &config.system) {
+                    Ok(c) => config.system = c,
+                    Err(e) => {
+                        eprintln!("{e}");
+                        std::process::exit(2);
+                    }
+                }
+            }
             if let Some(l) = listen {
                 config.server.listen = l;
             }
@@ -564,6 +574,10 @@ fn serve(config: Config, path: std::path::PathBuf) -> anyhow::Result<()> {
     } else {
         None
     };
+    // The system-wide input, likewise.
+    if config.system.enabled {
+        cadenza::system::start_global(engine.clone(), &config.system);
+    }
     runtime.block_on(cadenza::api::serve(&config.server.listen, engine))
 }
 

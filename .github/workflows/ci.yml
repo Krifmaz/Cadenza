@@ -20,17 +20,29 @@ jobs:
       - uses: dtolnay/rust-toolchain@stable
         with:
           components: clippy, rustfmt
-      - name: System libraries (ALSA, Mesa software Vulkan for the wgpu kernels)
-        run: sudo apt-get update && sudo apt-get install -y libasound2-dev pkg-config mesa-vulkan-drivers
+      - name: System libraries (ALSA, PipeWire, Mesa software Vulkan for the wgpu kernels)
+        run: >
+          sudo apt-get update && sudo apt-get install -y libasound2-dev pkg-config mesa-vulkan-drivers
+          libpipewire-0.3-dev libspa-0.2-dev clang libclang-dev
+          pipewire pipewire-bin wireplumber dbus
       - uses: Swatinem/rust-cache@v2
       - name: Format
         run: cargo fmt --all -- --check
       - name: Clippy
-        run: cargo clippy --workspace --all-targets --features alsa -- -D warnings
+        run: cargo clippy --workspace --all-targets --features alsa,pipewire -- -D warnings
       - name: Clippy (cuda + wgpu)
-        run: cargo clippy --workspace --all-targets --features alsa,cuda,wgpu -- -D warnings
+        run: cargo clippy --workspace --all-targets --features alsa,pipewire,cuda,wgpu -- -D warnings
       - name: Test
         run: cargo test --release --workspace --features alsa
+      - name: Test the system input against a real (headless) PipeWire
+        run: |
+          export XDG_RUNTIME_DIR=$(mktemp -d) && chmod 700 "$XDG_RUNTIME_DIR"
+          dbus-daemon --session --address=unix:path=$XDG_RUNTIME_DIR/bus --fork
+          export DBUS_SESSION_BUS_ADDRESS=unix:path=$XDG_RUNTIME_DIR/bus
+          pipewire & sleep 1
+          wireplumber & sleep 2
+          test -S "$XDG_RUNTIME_DIR/pipewire-0"
+          cargo test --release -p cadenza --features alsa,pipewire --lib -- system::
       - name: Test with wgpu on software Vulkan (lavapipe)
         env:
           CADENZA_WGPU_SOFTWARE: "1"

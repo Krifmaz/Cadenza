@@ -292,6 +292,8 @@ pub struct Config {
     pub upnp: crate::upnp::UpnpConfig,
     /// AirPlay 1 receiver (`cadenza serve`).
     pub airplay: crate::airplay::AirplayConfig,
+    /// System-wide input: a virtual output device or one app (`cadenza serve`).
+    pub system: crate::system::SystemConfig,
 }
 
 impl Config {

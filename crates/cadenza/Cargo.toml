@@ -25,6 +25,9 @@ wasapi = ["dep:wasapi"]
 asio = ["dep:windows-sys"]
 # CoreAudio hog mode / integer mode (macOS only; the crate is only compiled there).
 coreaudio = ["dep:coreaudio-sys"]
+# System-wide input on Linux: a PipeWire virtual sink or one app's audio
+# (needs libpipewire-0.3-dev and clang to build).
+pipewire = ["dep:pipewire"]
 # CUDA offload in cadenza-dsp (NVIDIA driver >= 525 at run time, no toolkit to build).
 cuda = ["cadenza-dsp/cuda"]
 # Portable GPU offload in cadenza-dsp: Vulkan / Metal / DX12 (AMD, Intel, Apple, NVIDIA).
@@ -63,6 +66,7 @@ base64 = "0.22"
 
 [target.'cfg(target_os = "linux")'.dependencies]
 alsa = { version = "0.9", optional = true }
+pipewire = { version = "0.10.1", optional = true, features = ["v0_3_44"] }
 
 [target.'cfg(target_os = "macos")'.dependencies]
 coreaudio-sys = { version = "0.2", optional = true }
