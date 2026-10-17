@@ -98,7 +98,6 @@ pub enum Transport {
     Stop,
     Next,
     Prev,
-    Seek(f64),
     Volume(f64),
     PlayIndex(usize),
     Remove(usize),
@@ -113,7 +112,6 @@ impl Transport {
             Transport::Stop => Command::Stop,
             Transport::Next => Command::Next,
             Transport::Prev => Command::Prev,
-            Transport::Seek(t) => Command::Seek(t),
             Transport::Volume(v) => Command::SetVolume(cadenza_dsp_volume(v)),
             Transport::PlayIndex(i) => Command::PlayIndex(i),
             Transport::Remove(i) => Command::Remove(i),
@@ -157,8 +155,8 @@ pub enum Message {
     Edit(Edit),
     Patch(Value),
     /// A text box changed (`key`, text); `TextCommit` applies it.
-    Text(&'static str, String),
-    TextCommit(&'static str),
+    Text(String, String),
+    TextCommit(String),
     RefreshDevices(bool),
     Devices(Vec<DeviceInfo>),
     Cover(String, Option<Vec<u8>>),
@@ -166,7 +164,7 @@ pub enum Message {
     WindowOpened(window::Id),
     WindowClosed(window::Id),
     CloseRequested(window::Id),
-    Resized(window::Id, Size),
+    Resized(Size),
     Raise,
     Quit,
     FilesDropped(Vec<std::path::PathBuf>),
@@ -197,7 +195,7 @@ pub struct App {
     pub covers: HashMap<String, Option<image::Handle>>,
     pub seek_drag: Option<f64>,
     /// Text boxes being typed in, by key (applied on Enter / leaving).
-    pub texts: HashMap<&'static str, String>,
+    pub texts: HashMap<String, String>,
     pub error: Option<String>,
     pub library: pages::library::State,
     pub sound: pages::sound::State,
@@ -207,6 +205,7 @@ pub struct App {
     pub encore: pages::encore::State,
     pub shot: Option<crate::shot::State>,
     pub quitting: bool,
+    pub ticks: u64,
 }
 
 impl App {
@@ -247,6 +246,7 @@ impl App {
             encore: Default::default(),
             shot: crate::shot::State::from_env(),
             quitting: false,
+            ticks: 0,
         };
         let (open, task) = crate::platform::open_window();
         app.window = Some(open);
@@ -279,7 +279,7 @@ impl App {
             iced::time::every(Duration::from_millis(200)).map(|_| Message::Tick),
             window::close_requests().map(Message::CloseRequested),
             window::close_events().map(Message::WindowClosed),
-            window::resize_events().map(|(id, s)| Message::Resized(id, s)),
+            window::resize_events().map(|(_, s)| Message::Resized(s)),
             iced::event::listen_with(|e, _, _| match e {
                 iced::Event::Window(window::Event::FileDropped(p)) => {
                     Some(Message::FilesDropped(vec![p]))
@@ -289,7 +289,10 @@ impl App {
             crate::platform::events(),
         ];
         if self.shot.is_some() {
-            subs.push(iced::time::every(Duration::from_millis(900)).map(|_| Message::Shot(crate::shot::Msg::Step)));
+            subs.push(
+                iced::time::every(Duration::from_millis(900))
+                    .map(|_| Message::Shot(crate::shot::Msg::Step)),
+            );
         }
         Subscription::batch(subs)
     }
@@ -337,7 +340,7 @@ impl App {
         url.and_then(|u| self.covers.get(u).cloned().flatten())
     }
 
-    pub fn text<'a>(&'a self, key: &'static str, current: impl FnOnce() -> String) -> String {
+    pub fn text(&self, key: &str, current: impl FnOnce() -> String) -> String {
         self.texts.get(key).cloned().unwrap_or_else(current)
     }
 
@@ -364,18 +367,28 @@ impl App {
                     tasks.push(self.want_cover(&c));
                 }
                 tasks.push(pages::sound::tick(self));
+                self.ticks += 1;
+                if self.ticks % 25 == 0 {
+                    tasks.push(pages::encore::poll());
+                }
+                if self.page == Page::System && self.ticks % 10 == 0 {
+                    tasks.push(pages::system::init(self));
+                }
                 tasks.push(crate::platform::sync(self));
                 Task::batch(tasks)
             }
             Message::Nav(p) => {
                 self.page = p;
-                if p == Page::Output {
-                    return self.load_devices(false);
-                }
-                if p == Page::System {
-                    return pages::system::init(self);
-                }
-                Task::none()
+                let top = iced::widget::operation::snap_to(
+                    MAIN_SCROLL,
+                    iced::widget::scrollable::RelativeOffset::START,
+                );
+                let t = match p {
+                    Page::Output => self.load_devices(false),
+                    Page::System => pages::system::init(self),
+                    _ => Task::none(),
+                };
+                Task::batch([top, t])
             }
             Message::Transport(t) => {
                 self.engine.send(t.command());
@@ -415,10 +428,10 @@ impl App {
                 Task::none()
             }
             Message::TextCommit(k) => {
-                let Some(v) = self.texts.remove(k) else {
+                let Some(v) = self.texts.remove(&k) else {
                     return Task::none();
                 };
-                pages::commit_text(self, k, v)
+                pages::commit_text(self, &k, v)
             }
             Message::RefreshDevices(reconnect) => self.load_devices(reconnect),
             Message::Devices(d) => {
@@ -427,8 +440,7 @@ impl App {
                 Task::none()
             }
             Message::Cover(u, b) => {
-                self.covers
-                    .insert(u, b.map(image::Handle::from_bytes));
+                self.covers.insert(u, b.map(image::Handle::from_bytes));
                 Task::none()
             }
             Message::SetAppearance(a) => {
@@ -439,7 +451,7 @@ impl App {
             }
             Message::WindowOpened(id) => {
                 self.window = Some(id);
-                Task::none()
+                crate::platform::start(self)
             }
             Message::CloseRequested(id) => {
                 // Closing the window keeps the music playing; Quit is in the tray.
@@ -450,17 +462,19 @@ impl App {
                 self.window = None;
                 window::close(id)
             }
-            Message::WindowClosed(_) => Task::none(),
-            Message::Resized(_, s) => {
+            Message::WindowClosed(id) => {
+                if self.window == Some(id) {
+                    self.window = None;
+                }
+                Task::none()
+            }
+            Message::Resized(s) => {
                 self.width = s.width;
                 self.height = s.height;
                 Task::none()
             }
             Message::Raise => match self.window {
-                Some(id) => Task::batch([
-                    window::minimize(id, false),
-                    window::gain_focus(id),
-                ]),
+                Some(id) => Task::batch([window::minimize(id, false), window::gain_focus(id)]),
                 None => {
                     let (id, task) = crate::platform::open_window();
                     self.window = Some(id);
@@ -512,6 +526,7 @@ impl App {
             Page::Appearance => pages::appearance::view(self, wide),
         };
         let main = scrollable(container(page).padding([26, 32]).width(Length::Fill))
+            .id(MAIN_SCROLL)
             .style(theme::scroll)
             .height(Length::Fill);
         let body: El = if self.width >= 760.0 {
@@ -519,14 +534,11 @@ impl App {
         } else {
             column![self.topnav(), main].into()
         };
-        container(column![
-            container(body).height(Length::Fill),
-            self.player()
-        ])
-        .style(theme::app_bg)
-        .width(Length::Fill)
-        .height(Length::Fill)
-        .into()
+        container(column![container(body).height(Length::Fill), self.player()])
+            .style(theme::app_bg)
+            .width(Length::Fill)
+            .height(Length::Fill)
+            .into()
     }
 
     fn nav_badge(&self, p: Page) -> Option<(String, theme::Badge)> {
@@ -544,7 +556,10 @@ impl App {
         let l = theme::look();
         let on = self.page == p;
         let mut r = row![
-            text(p.icon()).size(15).width(20).color(if on { l.accent } else { l.muted }),
+            text(p.icon())
+                .size(15)
+                .width(20)
+                .color(if on { l.accent } else { l.muted }),
             text(p.name()).size(14.5),
         ]
         .spacing(10)
@@ -556,7 +571,11 @@ impl App {
         }
         button(r)
             .padding([9, 12])
-            .width(if compact { Length::Shrink } else { Length::Fill })
+            .width(if compact {
+                Length::Shrink
+            } else {
+                Length::Fill
+            })
             .style(theme::btn(if on { Btn::NavOn } else { Btn::Nav }))
             .on_press(Message::Nav(p))
             .into()
@@ -591,14 +610,21 @@ impl App {
         ]
         .spacing(10)
         .align_y(Alignment::Center);
-        let gpu = self.options["gpu"]["label"].as_str().unwrap_or("CPU").to_string();
+        let gpu = self.options["gpu"]["label"]
+            .as_str()
+            .unwrap_or("CPU")
+            .to_string();
         let out = if self.status.output.is_empty() {
             String::new()
         } else {
             format!(
                 "{}{}",
                 self.status.output,
-                if self.status.output_exclusive { " · exclusive" } else { "" }
+                if self.status.output_exclusive {
+                    " · exclusive"
+                } else {
+                    ""
+                }
             )
         };
         let foot = column![
@@ -651,10 +677,23 @@ impl App {
                 .into(),
         };
         let title = t
-            .map(|t| if t.title.is_empty() { "Untitled".to_string() } else { t.title.clone() })
+            .map(|t| {
+                if t.title.is_empty() {
+                    "Untitled".to_string()
+                } else {
+                    t.title.clone()
+                }
+            })
             .unwrap_or_else(|| "Nothing playing".into());
         let sub = t
-            .map(|t| [t.artist.as_str(), t.album.as_str()].iter().filter(|x| !x.is_empty()).cloned().collect::<Vec<_>>().join(" · "))
+            .map(|t| {
+                [t.artist.as_str(), t.album.as_str()]
+                    .iter()
+                    .filter(|x| !x.is_empty())
+                    .cloned()
+                    .collect::<Vec<_>>()
+                    .join(" · ")
+            })
             .unwrap_or_default();
         let mut info = column![text(title).size(15).font(ui::bold())].spacing(2);
         if !sub.is_empty() {
@@ -663,7 +702,10 @@ impl App {
         if let Some(e) = &st.error {
             info = info.push(text(e.clone()).size(12).color(l.err));
         }
-        let now = row![thumb, info].spacing(12).align_y(Alignment::Center).width(Length::FillPortion(3));
+        let now = row![thumb, info]
+            .spacing(12)
+            .align_y(Alignment::Center)
+            .width(Length::FillPortion(3));
 
         let icon_btn = |s: &'static str, tr: Transport| -> El<'_> {
             button(text(s).size(17))
@@ -685,10 +727,14 @@ impl App {
         let pos = self.seek_drag.unwrap_or(st.position);
         let seek = row![
             text(ui::mmss(pos)).size(12).color(l.muted),
-            slider(0.0..=dur.max(0.001), pos.min(dur.max(0.001)), Message::SeekDrag)
-                .on_release(Message::SeekDone)
-                .step(0.1)
-                .style(theme::range),
+            slider(
+                0.0..=dur.max(0.001),
+                pos.min(dur.max(0.001)),
+                Message::SeekDrag
+            )
+            .on_release(Message::SeekDone)
+            .step(0.1)
+            .style(theme::range),
             text(ui::mmss(dur)).size(12).color(l.muted),
         ]
         .spacing(10)
@@ -717,17 +763,16 @@ impl App {
         .spacing(10)
         .align_y(Alignment::Center);
         let vol = container(vol).align_right(Length::FillPortion(2));
-        container(
-            row![now, ctrls, vol]
-                .spacing(18)
-                .align_y(Alignment::Center),
-        )
-        .padding([12, 18])
-        .width(Length::Fill)
-        .style(theme::player)
-        .into()
+        container(row![now, ctrls, vol].spacing(18).align_y(Alignment::Center))
+            .padding([12, 18])
+            .width(Length::Fill)
+            .style(theme::player)
+            .into()
     }
 }
+
+/// The page's scroll area (scrolled back to the top on a page change).
+pub const MAIN_SCROLL: &str = "main";
 
 /// Deep-merge `patch` into `v` (objects merge, everything else replaces).
 pub fn merge(v: &mut Value, patch: &Value) {

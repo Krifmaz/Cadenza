@@ -15,7 +15,7 @@ use crate::app::{App, Message};
 use iced::Task;
 
 /// A text box's value applied (Enter, or leaving a field that commits on its own).
-pub fn commit_text(app: &mut App, key: &'static str, v: String) -> Task<Message> {
+pub fn commit_text(app: &mut App, key: &str, v: String) -> Task<Message> {
     match key {
         "gpu_device" => output::commit_gpu_device(app, v),
         "ap_custom" => appearance::commit_custom(app, v),

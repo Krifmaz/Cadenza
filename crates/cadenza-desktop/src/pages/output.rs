@@ -38,7 +38,8 @@ pub fn view(app: &App, wide: bool) -> El<'_> {
     // An empty device means the backend's default one.
     let want = match app.devices.iter().find(|d| {
         d.backend == s.output.backend
-            && (d.id == s.output.device || (s.output.device.is_empty() && (d.default || d.backend == "null")))
+            && (d.id == s.output.device
+                || (s.output.device.is_empty() && (d.default || d.backend == "null")))
     }) {
         Some(d) => format!("{}|{}", d.backend, d.id),
         None => format!("{}|{}", s.output.backend, s.output.device),
@@ -63,7 +64,11 @@ pub fn view(app: &App, wide: bool) -> El<'_> {
         patch(json!({ "output": { "backend": b, "device": d } }))
     });
     let refresh = ui::btn(
-        if app.devices_busy { "Looking…" } else { "Refresh" },
+        if app.devices_busy {
+            "Looking…"
+        } else {
+            "Refresh"
+        },
         Btn::Secondary,
         (!app.devices_busy).then_some(Message::RefreshDevices(true)),
     );
@@ -71,12 +76,20 @@ pub fn view(app: &App, wide: bool) -> El<'_> {
     // What the open device can do.
     let mut caps = Vec::new();
     if !st.output.is_empty() {
-        caps.push(if st.output_exclusive { "exclusive".to_string() } else { "shared mode".into() });
+        caps.push(if st.output_exclusive {
+            "exclusive".to_string()
+        } else {
+            "shared mode".into()
+        });
         if let Some(m) = st.output_rates.iter().max() {
             caps.push(format!("PCM up to {}", ui::khz(*m)));
         }
         let d = &st.output_dsd;
-        caps.push(if !d.dop && d.native.is_empty() { "no DSD".into() } else { d.summary() });
+        caps.push(if !d.dop && d.native.is_empty() {
+            "no DSD".into()
+        } else {
+            d.summary()
+        });
     }
 
     let modes = ui::choices(&app.options["output_modes"], "id", "label");
@@ -89,7 +102,12 @@ pub fn view(app: &App, wide: bool) -> El<'_> {
     ];
     let mut all: Vec<u32> = app.options["pcm_rates"]
         .as_array()
-        .map(|a| a.iter().filter_map(|v| v.as_u64()).map(|v| v as u32).collect())
+        .map(|a| {
+            a.iter()
+                .filter_map(|v| v.as_u64())
+                .map(|v| v as u32)
+                .collect()
+        })
         .unwrap_or_default();
     all.extend(st.output_rates.iter().copied());
     all.sort_unstable();
@@ -98,7 +116,11 @@ pub fn view(app: &App, wide: bool) -> El<'_> {
         let ok = st.output_rates.is_empty() || st.output_rates.contains(&r);
         rates.push(Choice::new(
             r.to_string(),
-            if ok { ui::khz(r) } else { format!("{} — not supported by this device", ui::khz(r)) },
+            if ok {
+                ui::khz(r)
+            } else {
+                format!("{} — not supported by this device", ui::khz(r))
+            },
         ));
     }
     let rate_now = match s.output.rate {
@@ -111,15 +133,23 @@ pub fn view(app: &App, wide: bool) -> El<'_> {
         patch(json!({ "output": { "rate": val } }))
     });
     let bits = ui::pick(
-        ["16", "24", "32"].iter().map(|b| Choice::new(*b, *b)).collect(),
+        ["16", "24", "32"]
+            .iter()
+            .map(|b| Choice::new(*b, *b))
+            .collect(),
         &s.output.bits.to_string(),
         |v| patch(json!({ "output": { "bits": v.parse::<u32>().unwrap_or(24) } })),
     );
 
-    let mut dev = Column::new().spacing(12).push(ui::h2("Device")).push(ui::field(
-        "Device",
-        row![device_pick, refresh].spacing(8).align_y(Alignment::Center),
-    ));
+    let mut dev = Column::new()
+        .spacing(12)
+        .push(ui::h2("Device"))
+        .push(ui::field(
+            "Device",
+            row![device_pick, refresh]
+                .spacing(8)
+                .align_y(Alignment::Center),
+        ));
     if !caps.is_empty() {
         dev = dev.push(ui::hint(caps.join(" · ")));
     }
@@ -151,8 +181,14 @@ pub fn view(app: &App, wide: bool) -> El<'_> {
     let info = format!(
         "{}{}{} · precision {}{}",
         g["label"].as_str().unwrap_or(""),
-        g["reason"].as_str().map(|r| format!(" · {r}")).unwrap_or_default(),
-        g["compute_capability"].as_str().map(|r| format!(" · compute {r}")).unwrap_or_default(),
+        g["reason"]
+            .as_str()
+            .map(|r| format!(" · {r}"))
+            .unwrap_or_default(),
+        g["compute_capability"]
+            .as_str()
+            .map(|r| format!(" · compute {r}"))
+            .unwrap_or_default(),
         g["precision"].as_str().unwrap_or(""),
         if app.options["gpu_compiled_in"].as_bool() == Some(false) {
             " · this build has no GPU support"
@@ -164,24 +200,35 @@ pub fn view(app: &App, wide: bool) -> El<'_> {
     let gpu = column![
         ui::h2("GPU"),
         row![
-            ui::field("Offload", ui::pick(gpu_modes, &gpu_mode, |v| patch(json!({ "dsp": { "gpu": v } })))),
+            ui::field(
+                "Offload",
+                ui::pick(gpu_modes, &gpu_mode, |v| patch(
+                    json!({ "dsp": { "gpu": v } })
+                ))
+            ),
             ui::field(
                 "Device",
-                ui::input("0", &gpu_dev, |v| Message::Text("gpu_device", v))
-                    .on_submit(Message::TextCommit("gpu_device"))
+                ui::input("0", &gpu_dev, |v| Message::Text("gpu_device".into(), v))
+                    .on_submit(Message::TextCommit("gpu_device".into()))
             ),
         ]
         .spacing(12),
         ui::field(
             "Precision (Vulkan / Metal / DX12)",
-            ui::pick(precs, &prec, |v| patch(json!({ "dsp": { "gpu_precision": v } })))
+            ui::pick(precs, &prec, |v| patch(
+                json!({ "dsp": { "gpu_precision": v } })
+            ))
         ),
         ui::hint(info),
     ]
     .spacing(12);
 
     // Endpoints.
-    let eps: Vec<_> = app.devices.iter().filter(|d| d.backend == "endpoint").collect();
+    let eps: Vec<_> = app
+        .devices
+        .iter()
+        .filter(|d| d.backend == "endpoint")
+        .collect();
     let mut ep = Column::new().spacing(8).push(ui::h2("Endpoints"));
     if eps.is_empty() {
         ep = ep.push(ui::hint("No endpoint found on the network yet."));
@@ -191,11 +238,16 @@ pub fn view(app: &App, wide: bool) -> El<'_> {
         ep = ep.push(
             row![
                 text(d.name.clone()).font(ui::bold()).size(14),
-                text(d.id.clone()).size(12.5).color(theme::look().muted).width(Length::Fill),
+                text(d.id.clone())
+                    .size(12.5)
+                    .color(theme::look().muted)
+                    .width(Length::Fill),
                 ui::btn(
                     "Use as output",
                     Btn::Secondary,
-                    Some(patch(json!({ "output": { "backend": "endpoint", "device": id } })))
+                    Some(patch(
+                        json!({ "output": { "backend": "endpoint", "device": id } })
+                    ))
                 ),
             ]
             .spacing(10)

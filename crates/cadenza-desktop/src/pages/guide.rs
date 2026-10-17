@@ -24,7 +24,10 @@ fn h3<'a>(t: &'a str) -> El<'a> {
 fn term<'a>(name: &'a str, what: &'a str) -> El<'a> {
     column![
         text(name).size(14).font(ui::bold()),
-        text(what).size(13.5).color(theme::look().muted).line_height(1.45)
+        text(what)
+            .size(13.5)
+            .color(theme::look().muted)
+            .line_height(1.45)
     ]
     .spacing(2)
     .into()
@@ -100,7 +103,10 @@ pub fn view(_app: &App, wide: bool) -> El<'static> {
         ],
     );
     column![
-        ui::h1("Guide", "What Cadenza does and what to pick, in plain words. No experience needed."),
+        ui::h1(
+            "Guide",
+            "What Cadenza does and what to pick, in plain words. No experience needed."
+        ),
         ui::grid(vec![what, quick, recipes, filters, words], wide)
     ]
     .into()

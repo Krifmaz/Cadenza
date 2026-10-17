@@ -21,25 +21,24 @@ pub fn view(app: &App, wide: bool) -> El<'_> {
         }
         let sw = theme::Look::from(&next);
         let chip = row![
-            container(text(""))
-                .width(22)
-                .height(22)
-                .style(move |_| iced::widget::container::Style {
+            container(text("")).width(22).height(22).style(move |_| {
+                iced::widget::container::Style {
                     background: Some(iced::Background::Gradient(
                         iced::gradient::Linear::new(iced::Radians(2.35))
                             .add_stop(0.0, sw.bg)
                             .add_stop(0.5, sw.bg)
                             .add_stop(0.5, sw.accent)
                             .add_stop(1.0, sw.accent2)
-                            .into()
+                            .into(),
                     )),
                     border: iced::Border {
                         color: sw.border,
                         width: 1.0,
-                        radius: 99.0.into()
+                        radius: 99.0.into(),
                     },
                     ..Default::default()
-                }),
+                }
+            }),
             text(name).size(13.5).font(ui::bold()),
         ]
         .spacing(8)
@@ -53,11 +52,21 @@ pub fn view(app: &App, wide: bool) -> El<'_> {
         );
     }
     let themes = ui::seg(
-        &[("encore", "Encore"), ("dark", "Dark"), ("oled", "OLED"), ("light", "Light")],
+        &[
+            ("encore", "Encore"),
+            ("dark", "Dark"),
+            ("oled", "OLED"),
+            ("light", "Light"),
+        ],
         &a.theme,
         {
             let a = a.clone();
-            move |t| Message::SetAppearance(Appearance { theme: t, ..a.clone() })
+            move |t| {
+                Message::SetAppearance(Appearance {
+                    theme: t,
+                    ..a.clone()
+                })
+            }
         },
     );
     let mut sw = Row::new().spacing(8);
@@ -76,18 +85,29 @@ pub fn view(app: &App, wide: bool) -> El<'_> {
     let custom = app.text("ap_custom", || a.custom.clone());
     let custom_row = row![
         ui::small("Custom colour (#rrggbb)"),
-        ui::input("#f0ead6", &custom, |v| Message::Text("ap_custom", v))
-            .on_submit(Message::TextCommit("ap_custom"))
+        ui::input("#f0ead6", &custom, |v| Message::Text("ap_custom".into(), v))
+            .on_submit(Message::TextCommit("ap_custom".into()))
             .width(140),
     ]
     .spacing(10)
     .align_y(Alignment::Center);
 
     column![
-        ui::h1("Appearance", "The same looks as Encore. Remembered on this computer."),
-        ui::card(column![ui::h2("Looks"), iced::widget::scrollable(looks).direction(
-            iced::widget::scrollable::Direction::Horizontal(Default::default())
-        ).style(theme::scroll)].spacing(12)),
+        ui::h1(
+            "Appearance",
+            "The same looks as Encore. Remembered on this computer."
+        ),
+        ui::card(
+            column![
+                ui::h2("Looks"),
+                iced::widget::scrollable(looks)
+                    .direction(iced::widget::scrollable::Direction::Horizontal(
+                        Default::default()
+                    ))
+                    .style(theme::scroll)
+            ]
+            .spacing(12)
+        ),
         iced::widget::space().height(18),
         ui::grid(
             vec![

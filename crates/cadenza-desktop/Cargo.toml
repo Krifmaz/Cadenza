@@ -32,6 +32,7 @@ cadenza = { path = "../cadenza", default-features = false }
 cadenza-dsp = { path = "../cadenza-dsp" }
 iced = { version = "0.14", features = ["canvas", "image", "tokio", "svg"] }
 tray-icon = "0.21"
+raw-window-handle = "0.6"
 souvlaki = { version = "0.8", default-features = false, features = ["use_zbus"] }
 tokio = { version = "1", features = ["net", "rt-multi-thread", "macros"] }
 ureq = { version = "2", features = ["json"] }

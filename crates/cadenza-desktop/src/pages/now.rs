@@ -21,7 +21,13 @@ pub fn view(app: &App) -> El<'_> {
             .into(),
     };
     let title = t
-        .map(|t| if t.title.is_empty() { "Untitled".into() } else { t.title.clone() })
+        .map(|t| {
+            if t.title.is_empty() {
+                "Untitled".into()
+            } else {
+                t.title.clone()
+            }
+        })
         .unwrap_or_else(|| "Nothing playing".into());
     let sub = t
         .map(|t| {
@@ -45,7 +51,10 @@ pub fn view(app: &App) -> El<'_> {
         });
     }
     let mut info = column![
-        text("NOW PLAYING").size(12).color(l.accent).font(ui::bold()),
+        text("NOW PLAYING")
+            .size(12)
+            .color(l.accent)
+            .font(ui::bold()),
         text(title).size(32).font(ui::bold()),
     ]
     .spacing(6);
@@ -65,9 +74,21 @@ pub fn view(app: &App) -> El<'_> {
             let ep = |e: &Endpoint, name: String| -> El<'_> {
                 let detail = [
                     e.format.clone(),
-                    if e.rate > 0 { ui::khz(e.rate) } else { String::new() },
-                    if e.bits > 0 { format!("{}-bit", e.bits) } else { String::new() },
-                    if e.channels > 0 { format!("{} ch", e.channels) } else { String::new() },
+                    if e.rate > 0 {
+                        ui::khz(e.rate)
+                    } else {
+                        String::new()
+                    },
+                    if e.bits > 0 {
+                        format!("{}-bit", e.bits)
+                    } else {
+                        String::new()
+                    },
+                    if e.channels > 0 {
+                        format!("{} ch", e.channels)
+                    } else {
+                        String::new()
+                    },
                 ]
                 .into_iter()
                 .filter(|s| !s.is_empty())
@@ -116,8 +137,16 @@ pub fn view(app: &App) -> El<'_> {
             let label = format!(
                 "{}. {}{}",
                 i + 1,
-                if q.title.is_empty() { "Untitled" } else { &q.title },
-                if q.artist.is_empty() { String::new() } else { format!(" – {}", q.artist) }
+                if q.title.is_empty() {
+                    "Untitled"
+                } else {
+                    &q.title
+                },
+                if q.artist.is_empty() {
+                    String::new()
+                } else {
+                    format!(" – {}", q.artist)
+                }
             );
             let line = button(
                 text(label)
@@ -160,7 +189,11 @@ fn stage<'a>(name: String, detail: String, active: bool, hot: bool) -> El<'a> {
     .padding([10, 12])
     .width(Length::Fill)
     .style(move |t| {
-        let mut s = if hot { theme::inset_selected(t) } else { theme::inset(t) };
+        let mut s = if hot {
+            theme::inset_selected(t)
+        } else {
+            theme::inset(t)
+        };
         if !active {
             s.text_color = Some(theme::alpha(l.text, 0.45));
         }

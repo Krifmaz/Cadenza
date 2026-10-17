@@ -21,6 +21,10 @@ fn main() -> iced::Result {
     env_logger::Builder::from_env(env_logger::Env::default().default_filter_or("info"))
         .format_timestamp_millis()
         .init();
+    if !platform::init() {
+        log::info!("Cadenza is already running: brought its window forward");
+        return Ok(());
+    }
     let path = std::env::var_os("CADENZA_CONFIG")
         .map(std::path::PathBuf::from)
         .unwrap_or_else(Config::default_path);

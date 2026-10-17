@@ -107,7 +107,11 @@ fn partner(c: Color) -> Color {
     let (mut h, mut s) = (0.0, 0.0);
     if max != min {
         let d = max - min;
-        s = if l > 0.5 { d / (2.0 - max - min) } else { d / (max + min) };
+        s = if l > 0.5 {
+            d / (2.0 - max - min)
+        } else {
+            d / (max + min)
+        };
         h = if max == r {
             (g - b) / d + if g < b { 6.0 } else { 0.0 }
         } else if max == g {
@@ -117,7 +121,11 @@ fn partner(c: Color) -> Color {
         } / 6.0;
     }
     h = (h + 0.1) % 1.0;
-    let q = if l < 0.5 { l * (1.0 + s) } else { l + s - l * s };
+    let q = if l < 0.5 {
+        l * (1.0 + s)
+    } else {
+        l + s - l * s
+    };
     let p = 2.0 * l - q;
     let f = |t: f32| {
         let t = (t + 1.0) % 1.0;
@@ -137,10 +145,22 @@ fn partner(c: Color) -> Color {
 impl Look {
     pub fn from(a: &Appearance) -> Self {
         let (bg, bg2, panel, panel2, border, text, muted, faint, dark) = match a.theme.as_str() {
-            "dark" => ("#0b0b12", "#12121c", "#161624", "#1d1d2e", "#2a2a40", "#ececf4", "#9a9ab3", "#6b6b85", true),
-            "oled" => ("#000000", "#000000", "#0b0b0d", "#17171b", "#232329", "#ececf4", "#9a9aa8", "#66666f", true),
-            "light" => ("#f6f6fb", "#ffffff", "#ffffff", "#f0f0f7", "#e2e2ee", "#16161f", "#5d5d75", "#8d8da5", false),
-            _ => ("#161617", "#1c1c1e", "#222224", "#2a2a2d", "#353538", "#f0ead6", "#aaa493", "#77725f", true),
+            "dark" => (
+                "#0b0b12", "#12121c", "#161624", "#1d1d2e", "#2a2a40", "#ececf4", "#9a9ab3",
+                "#6b6b85", true,
+            ),
+            "oled" => (
+                "#000000", "#000000", "#0b0b0d", "#17171b", "#232329", "#ececf4", "#9a9aa8",
+                "#66666f", true,
+            ),
+            "light" => (
+                "#f6f6fb", "#ffffff", "#ffffff", "#f0f0f7", "#e2e2ee", "#16161f", "#5d5d75",
+                "#8d8da5", false,
+            ),
+            _ => (
+                "#161617", "#1c1c1e", "#222224", "#2a2a2d", "#353538", "#f0ead6", "#aaa493",
+                "#77725f", true,
+            ),
         };
         let (accent, accent2) = match ACCENTS.iter().find(|x| x.0 == a.accent) {
             Some(x) => (hex(x.2), hex(x.3)),
@@ -360,7 +380,6 @@ pub enum Btn {
     NavOn,
     Seg,
     SegOn,
-    Danger,
 }
 
 pub fn btn(kind: Btn) -> impl Fn(&Theme, button::Status) -> button::Style {
@@ -384,16 +403,6 @@ pub fn btn(kind: Btn) -> impl Fn(&Theme, button::Status) -> button::Style {
                 background: Some(Background::Color(if hover { l.border } else { l.panel2 })),
                 text_color: l.text,
                 border: border(l.border, 1.0, 10.0),
-                ..Default::default()
-            },
-            Btn::Danger => button::Style {
-                background: Some(Background::Color(if hover {
-                    alpha(l.err, 0.25)
-                } else {
-                    alpha(l.err, 0.12)
-                })),
-                text_color: l.err,
-                border: border(alpha(l.err, 0.4), 1.0, 10.0),
                 ..Default::default()
             },
             Btn::Ghost => button::Style {
@@ -464,7 +473,11 @@ pub fn swatch(c: Color, on: bool) -> impl Fn(&Theme, button::Status) -> button::
         button::Style {
             background: Some(Background::Color(c)),
             text_color: l.text,
-            border: border(if on { l.text } else { l.border }, if on { 3.0 } else { 1.0 }, 99.0),
+            border: border(
+                if on { l.text } else { l.border },
+                if on { 3.0 } else { 1.0 },
+                99.0,
+            ),
             ..Default::default()
         }
     }
@@ -487,7 +500,10 @@ pub fn input(_: &Theme, status: text_input::Status) -> text_input::Style {
 
 pub fn pick(_: &Theme, status: pick_list::Status) -> pick_list::Style {
     let l = look();
-    let hot = matches!(status, pick_list::Status::Hovered | pick_list::Status::Opened { .. });
+    let hot = matches!(
+        status,
+        pick_list::Status::Hovered | pick_list::Status::Opened { .. }
+    );
     pick_list::Style {
         text_color: l.text,
         placeholder_color: l.faint,

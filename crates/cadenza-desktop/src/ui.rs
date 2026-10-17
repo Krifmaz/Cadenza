@@ -45,7 +45,10 @@ pub fn choices(v: &serde_json::Value, id: &str, label: &str) -> Vec<Choice> {
                         .as_str()
                         .map(str::to_string)
                         .unwrap_or_else(|| x[id].to_string());
-                    let l = x[label].as_str().map(str::to_string).unwrap_or_else(|| i.clone());
+                    let l = x[label]
+                        .as_str()
+                        .map(str::to_string)
+                        .unwrap_or_else(|| i.clone());
                     Choice::new(i, l)
                 })
                 .collect()
@@ -98,7 +101,11 @@ pub fn card<'a>(content: impl Into<El<'a>>) -> El<'a> {
 }
 
 pub fn label<'a>(t: impl text::IntoFragment<'a>) -> El<'a> {
-    text(t).size(12.5).color(theme::look().muted).font(bold()).into()
+    text(t)
+        .size(12.5)
+        .color(theme::look().muted)
+        .font(bold())
+        .into()
 }
 
 pub fn hint<'a>(t: impl text::IntoFragment<'a>) -> El<'a> {
@@ -134,7 +141,11 @@ pub fn field<'a>(name: &'a str, control: impl Into<El<'a>>) -> El<'a> {
     column![label(name), control.into()].spacing(6).into()
 }
 
-pub fn input<'a>(placeholder: &str, value: &str, on: impl Fn(String) -> Message + 'a) -> iced::widget::TextInput<'a, Message> {
+pub fn input<'a>(
+    placeholder: &str,
+    value: &str,
+    on: impl Fn(String) -> Message + 'a,
+) -> iced::widget::TextInput<'a, Message> {
     text_input(placeholder, value)
         .on_input(on)
         .padding([9, 12])
