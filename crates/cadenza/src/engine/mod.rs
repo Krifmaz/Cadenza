@@ -207,6 +207,9 @@ pub enum Command {
     /// Replace the title, artist, album, cover and duration of the playing entry, if its
     /// source is this track's (live streams announce their metadata as they go).
     SetTrackInfo(Box<Track>),
+    /// Let go of the output device and open it afresh (after it was plugged in again,
+    /// or to pick up a driver change). Playback, if any, carries on from where it was.
+    Reconnect,
     /// Exit the worker thread.
     Shutdown,
 }

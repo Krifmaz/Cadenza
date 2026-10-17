@@ -137,6 +137,8 @@ struct Worker {
     output_rates: Vec<u32>,
     output_dsd: DsdCaps,
     output_exclusive: bool,
+    /// Where to pick up after the device went away mid-track (play resumes there).
+    resume_at: Option<f64>,
     /// `(path, impulse)` so the file is only parsed once.
     convolution: Option<(String, Arc<ConvolutionSpec>)>,
 
@@ -181,6 +183,7 @@ pub(super) fn run(
         output_rates: Vec::new(),
         output_dsd: DsdCaps::NONE,
         output_exclusive: false,
+        resume_at: None,
         convolution: None,
         error: None,
         runs_finished: 0,
@@ -255,15 +258,32 @@ impl Worker {
         match cmd {
             Command::Play => match self.state {
                 PlayState::Playing => {}
-                PlayState::Paused => self.resume(),
-                PlayState::Stopped => {
+                PlayState::Paused if self.output.is_some() => self.resume(),
+                PlayState::Paused | PlayState::Stopped => {
                     if self.queue.is_empty() {
                         return;
                     }
+                    let at = match self.state {
+                        PlayState::Paused => self.position(),
+                        _ => self.resume_at.take().unwrap_or(0.0),
+                    };
                     let i = self.index.unwrap_or(0).min(self.queue.len() - 1);
-                    self.start_index(i, 0.0);
+                    self.stop_playback(false);
+                    self.start_index(i, at);
                 }
             },
+            Command::Reconnect => {
+                let resume = (self.state != PlayState::Stopped)
+                    .then(|| (self.index, self.position(), self.state));
+                self.stop_playback(false);
+                self.drop_output();
+                if let Some((Some(i), at, was)) = resume {
+                    self.start_index(i, at);
+                    if was == PlayState::Paused {
+                        self.handle(Command::Pause);
+                    }
+                }
+            }
             Command::Pause => {
                 if self.state == PlayState::Playing {
                     if let Some(o) = &mut self.output {
@@ -427,8 +447,14 @@ impl Worker {
     // ----- transport ------------------------------------------------------------------
 
     fn start_index(&mut self, i: usize, position: f64) {
+        // Starting from silence: open the device afresh, so one that was unplugged and
+        // plugged in again (or whose driver changed) is found. Track changes keep it.
+        if self.state == PlayState::Stopped && self.settings.output.backend != "null" {
+            self.drop_output();
+        }
         self.index = Some(i);
         self.error = None;
+        self.resume_at = None;
         let track = self.queue[i].clone();
         let mut decoder = match self.take_prefetched(i) {
             Some(d) => d,
@@ -454,6 +480,8 @@ impl Worker {
         self.play_reported = false;
         if let Err(e) = self.build_chain() {
             self.fail(format!("cannot play {label}: {e}"));
+            // Try the device again on the next play rather than keep a broken one.
+            self.drop_output();
             self.decoder = None;
             self.state = PlayState::Stopped;
             self.runs_finished += 1;
@@ -558,16 +586,9 @@ impl Worker {
         );
         let out: Box<dyn Output> = match backend {
             "null" => Box::new(output::null::NullOutput::for_device(self.realtime, device)),
-            _ => match output::open_backend(backend, device) {
-                Ok(o) => o,
-                Err(e) => {
-                    log::error!("output {backend} '{device}': {e}; using the null output");
-                    self.error = Some(format!(
-                        "output {backend} '{device}': {e}; using the null output"
-                    ));
-                    Box::new(output::null::NullOutput::new(self.realtime))
-                }
-            },
+            _ => output::open_backend(backend, device).map_err(|e| {
+                format!("{backend} · {device} isn't available ({e}). Is it plugged in? Press play to try again.")
+            })?,
         };
         self.output_name = out.name();
         let bits = self.settings.output.bits;
@@ -858,12 +879,27 @@ impl Worker {
         if frames.is_empty() {
             return;
         }
-        if let Some(o) = &mut self.output {
-            if let Err(e) = o.write(frames) {
-                log::error!("output write: {e}");
-                self.error = Some(format!("output: {e}"));
-            }
+        let Some(o) = &mut self.output else { return };
+        if let Err(e) = o.write(frames) {
+            // The device went away (unplugged, driver reset): stop instead of decoding
+            // into nothing, let go of it, and pick up from here on the next play.
+            let at = self.position();
+            self.stop_playback(false);
+            self.drop_output();
+            self.resume_at = Some(at);
+            self.fail(format!(
+                "output lost: {e}. Check the device and press play to carry on."
+            ));
         }
+    }
+
+    /// Close and forget the output; the next track opens it again.
+    fn drop_output(&mut self) {
+        if let Some(mut o) = self.output.take() {
+            o.close();
+        }
+        self.output_format = None;
+        self.chain = None;
     }
 
     // ----- playback -------------------------------------------------------------------

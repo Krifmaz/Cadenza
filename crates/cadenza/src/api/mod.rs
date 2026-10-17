@@ -820,6 +820,7 @@ pub fn control_command(action: &str, value: Option<&Value>) -> Result<Command, S
         "pause" => Command::Pause,
         "toggle" => Command::Toggle,
         "stop" => Command::Stop,
+        "reconnect" => Command::Reconnect,
         "next" => Command::Next,
         "prev" | "previous" => Command::Prev,
         "seek" => Command::Seek(num()?),

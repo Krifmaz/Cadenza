@@ -380,7 +380,7 @@
       <div class="grid">
         <div class="card">
           <h2>Device</h2>
-          <label class="field"><span>Device</span><select id="device"></select></label>
+          <label class="field"><span>Device</span><div class="row" style="flex-wrap:nowrap"><select id="device" style="flex:1"></select><button id="dev-refresh" title="Look for devices again and reconnect to the chosen one">Refresh</button></div></label>
           <div class="hint" id="device-caps"></div>
           <label class="field"><span>Output mode</span><select id="output_mode"></select></label>
           <div class="grid2">
@@ -505,6 +505,7 @@
     <div style="min-width:0">
       <div class="t ellipsis" id="title">Nothing playing</div>
       <div class="small muted ellipsis" id="sub"></div>
+      <div class="small err ellipsis" id="bar-error"></div>
     </div>
   </div>
   <div class="ctrls">
@@ -671,6 +672,7 @@ function paint(s) {
   $('dur').textContent = dur(s.duration);
   if (document.activeElement !== $('vol')) $('vol').value = s.volume_linear ?? 1;
   $('error').textContent = s.error || '';
+  $('bar-error').textContent = s.error || ''; $('bar-error').title = s.error || '';
   $('queue').innerHTML = s.queue?.length ? s.queue.map((q, i) => `<div data-i="${i}" class="${i === s.index ? 'cur' : ''}">${i + 1}. ${esc(q.title)}${q.artist ? ' – ' + esc(q.artist) : ''}</div>`).join('') : '<span class="muted">Empty. Play files with <code>cadenza play</code>, or send music from Encore.</span>';
   const p = s.signal_path;
   $('bp').className = 'badge ' + (p ? (p.bit_perfect ? 'ok' : 'warn') : '');
@@ -786,8 +788,7 @@ function loadSettings(set) {
   eqBands = (d.eq || []).map(b => ({ ...b }));
   paintEq();
   fillRates(String(o.rate ?? 'auto'));
-  $('device').dataset.want = `${o.backend}|${o.device}`;
-  if ($('device').options.length) $('device').value = $('device').dataset.want;
+  if ($('device').dataset.want !== `${o.backend}|${o.device}`) { $('device').dataset.want = `${o.backend}|${o.device}`; fillDevices(); }
   lockDsp();
 }
 function lockDsp() {
@@ -798,6 +799,33 @@ function lockDsp() {
   for (const id of ['dsd_rate', 'dsd_modulator', 'dsd_packing', 'dsd_gain_db', 'dsd_oversampling']) $(id).disabled = bp || !dsd;
   for (const id of ['m_mono', 'm_swap', 'm_balance', 'm_mid_side', 'matrix_outputs']) $(id).disabled = bp || !$('matrix_enabled').checked;
 }
+// The device list, with the chosen device kept visible (marked) while it is unplugged.
+function fillDevices() {
+  const want = $('device').dataset.want || '';
+  const label = (d) => `${d.backend} · ${d.name}${d.exclusive ? ' · exclusive' : ''}${d.backend !== 'null' && d.dsd && (d.dsd.dop || (d.dsd.native || []).length) ? ' · DSD' : ''}`;
+  let html = devices.map(d => `<option value="${esc(d.backend + '|' + d.id)}">${esc(label(d))}</option>`).join('');
+  if (want && want.split('|')[0] !== 'endpoint' && !devices.some(d => `${d.backend}|${d.id}` === want)) {
+    const [b, ...rest] = want.split('|');
+    html = `<option value="${esc(want)}">${esc(b)} · ${esc(rest.join('|'))} · not connected</option>` + html;
+  }
+  $('device').innerHTML = html;
+  if (want) $('device').value = want;
+}
+async function refreshDevices(reconnect) {
+  const b = $('dev-refresh'); b.disabled = true; b.textContent = 'Looking…';
+  try {
+    devices = await api('GET', '/api/devices');
+    fillDevices();
+    if (reconnect) await api('POST', '/api/control', { action: 'reconnect' });
+  } catch (e) { $('error').textContent = e.message; }
+  finally { b.disabled = false; b.textContent = 'Refresh'; }
+}
+$('dev-refresh').onclick = () => refreshDevices(true);
+// Devices come and go (USB, Bluetooth): look again when the Output page opens or the
+// window comes back to the front.
+window.addEventListener('hashchange', () => { if (location.hash === '#output') refreshDevices(false); });
+window.addEventListener('focus', () => { if (location.hash === '#output' && devices.length) refreshDevices(false); });
+
 function fillRates(cur) {
   const rates = [...new Set([...(options?.pcm_rates || [44100, 48000, 88200, 96000, 176400, 192000, 352800, 384000, 705600, 768000]), ...(status?.output_rates || [])])].sort((a, b) => a - b);
   const sup = new Set(status?.output_rates || []);
@@ -1174,7 +1202,7 @@ api('GET', '/api/room').then(paintRoom).catch(e => { $('room-status').textConten
     const fams = [...new Set(filters.map(f => f.family))];
     $('filter').innerHTML = fams.map(fam => `<optgroup label="${esc(fam)}">${opts(filters.filter(f => f.family === fam))}</optgroup>`).join('');
     $('dither').innerHTML = opts(dithers);
-    $('device').innerHTML = devices.map(d => `<option value="${esc(d.backend + '|' + d.id)}">${esc(d.backend)} · ${esc(d.name)}${d.exclusive ? ' · exclusive' : ''}${d.dsd && (d.dsd.dop || (d.dsd.native || []).length) ? ' · DSD' : ''}</option>`).join('');
+    fillDevices();
     $('output_mode').innerHTML = opts(options.output_modes);
     $('dsd_modulator').innerHTML = options.dsd_modulators.map(m => `<option value="${m.id}">${esc(m.label)} · order ${m.order}${m.dithered ? ' · dithered' : ''}</option>`).join('');
     $('dsd_packing').innerHTML = opts(options.dsd_packings);
@@ -1186,7 +1214,7 @@ api('GET', '/api/room').then(paintRoom).catch(e => { $('room-status').textConten
     $('crossover-kinds').textContent = 'crossover kinds: ' + options.crossover_kinds.map(k => `${k.id} (${k.slopes.join('/')} dB/oct)`).join(', ');
     gpuInfo(); paintEndpoints();
     paint(await api('GET', '/api/status'));
-    if ($('device').dataset.want) $('device').value = $('device').dataset.want;
+    fillDevices();
   } catch (e) { $('error').textContent = e.message; }
   const es = new EventSource('/api/events');
   es.addEventListener('status', (e) => { try { paint(JSON.parse(e.data)); } catch { /* ignore */ } });

@@ -11,6 +11,7 @@
 //! For multi-room tests the device string also takes `ppm=<n>` (the simulated DAC clock
 //! runs that much fast or slow, as real ones do) and `timeline=<file>` (each write is
 //! recorded with the time its first frame plays, on [`epoch`]), separated by `;`.
+//! `unplug=<file>` makes writes fail while that file exists, as an unplugged device's do.
 
 use super::{DeviceInfo, DsdCaps, Encoding, Output, OutputError, OutputFormat, STANDARD_RATES};
 use cadenza_dsp::dsd::packing::DOP_MARKERS;
@@ -46,6 +47,8 @@ pub struct NullOutput {
     /// `timeline=`: per write, the play time of its first frame (ns since [`epoch`]),
     /// the frame count and the words.
     timeline: Option<std::io::BufWriter<std::fs::File>>,
+    /// `unplug=`: writes fail while this file exists.
+    unplug: Option<std::path::PathBuf>,
 }
 
 impl NullOutput {
@@ -62,6 +65,7 @@ impl NullOutput {
             capture: None,
             ppm: 0.0,
             timeline: None,
+            unplug: None,
         }
     }
 
@@ -100,6 +104,7 @@ impl NullOutput {
             };
             match k.trim() {
                 "ppm" => out.ppm = v.trim().parse().unwrap_or(0.0),
+                "unplug" => out.unplug = Some(v.trim().into()),
                 "capture" => out.capture = file(),
                 "timeline" => {
                     epoch();
@@ -183,6 +188,9 @@ impl Output for NullOutput {
     }
 
     fn write(&mut self, frames: &[i32]) -> Result<(), OutputError> {
+        if self.unplug.as_ref().is_some_and(|f| f.exists()) {
+            return Err(OutputError::Backend("the device is gone".into()));
+        }
         let fmt = self
             .format
             .ok_or_else(|| OutputError::Backend("null output not open".into()))?;

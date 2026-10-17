@@ -302,6 +302,74 @@ fn transport_commands_pause_seek_and_stop() {
 }
 
 #[test]
+fn an_unplugged_device_stops_playback_and_play_picks_up_where_it_was() {
+    let dir = temp_dir("unplug");
+    let a = dir.join("a.wav");
+    write_sine_wav(&a, 44100, 16, 30.0, 440.0);
+    let gone = dir.join("gone");
+    let _ = std::fs::remove_file(&gone);
+
+    let mut s = settings(RateSetting::Source, 16, "sinc-l-4k", "none", false);
+    s.output.device = format!("unplug={}", gone.display());
+    let e = Engine::start(
+        s,
+        EngineOptions {
+            cache: CoefficientCache::disabled(),
+            realtime: true,
+            persist: None,
+        },
+    );
+    e.play_queue(vec![Track::from_arg(a.to_str().unwrap())], 0, 5.0);
+    std::thread::sleep(Duration::from_millis(500));
+    assert_eq!(
+        e.status().state,
+        PlayState::Playing,
+        "{:?}",
+        e.status().error
+    );
+
+    // Unplugged: playback stops with a message instead of running on into nothing.
+    std::fs::write(&gone, b"").unwrap();
+    std::thread::sleep(Duration::from_millis(400));
+    let st = e.status();
+    assert_eq!(st.state, PlayState::Stopped);
+    let err = st.error.clone().unwrap_or_default();
+    assert!(err.contains("output lost"), "{err}");
+
+    // Play while still unplugged: it stops again, still saying why.
+    e.send(Command::Play);
+    std::thread::sleep(Duration::from_millis(400));
+    assert_eq!(e.status().state, PlayState::Stopped);
+
+    // Plugged back in: play carries on from where the device went away.
+    std::fs::remove_file(&gone).unwrap();
+    e.send(Command::Play);
+    std::thread::sleep(Duration::from_millis(500));
+    let st = e.status();
+    assert_eq!(st.state, PlayState::Playing, "{:?}", st.error);
+    assert!(st.error.is_none(), "{:?}", st.error);
+    assert!(
+        st.position > 5.0 && st.position < 8.0,
+        "position {}",
+        st.position
+    );
+
+    // Reconnect while playing keeps playing from about the same place.
+    let before = e.status().position;
+    e.send(Command::Reconnect);
+    std::thread::sleep(Duration::from_millis(400));
+    let st = e.status();
+    assert_eq!(st.state, PlayState::Playing, "{:?}", st.error);
+    assert!(
+        (st.position - before).abs() < 1.5,
+        "{} vs {before}",
+        st.position
+    );
+    e.shutdown();
+    let _ = std::fs::remove_dir_all(dir);
+}
+
+#[test]
 fn dsd_output_mode_modulates_to_dop_and_reports_the_chain() {
     use cadenza_dsp::dsd::{DsdModulator, DsdRate, OutputMode};
     let dir = temp_dir("dsd");
