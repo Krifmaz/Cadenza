@@ -23,7 +23,7 @@ use crate::config::EncoreConfig;
 use crate::engine::{Engine, Event};
 use std::io::{BufRead, BufReader};
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 use std::thread;
 use std::time::Duration;
 
@@ -70,6 +70,73 @@ impl EncoreLink {
     pub fn last_error(&self) -> Option<String> {
         self.client.last_error()
     }
+}
+
+/// The one live Encore link and the configuration behind it, so the web UI can log in and
+/// out while the process runs. The link's threads are not stopped by dropping it, so a
+/// replacement always calls [`EncoreLink::stop`] on the old one first.
+static LINK: Mutex<Option<EncoreLink>> = Mutex::new(None);
+static CONFIG: Mutex<Option<EncoreConfig>> = Mutex::new(None);
+
+/// A callback that writes the Encore configuration back to `config.toml`, registered by
+/// `cadenza::service::start`.
+type Persist = Box<dyn Fn(&EncoreConfig) + Send>;
+static PERSIST: Mutex<Option<Persist>> = Mutex::new(None);
+
+/// Register the function that persists the Encore configuration (called once at startup).
+pub fn set_persist(f: impl Fn(&EncoreConfig) + Send + 'static) {
+    *PERSIST.lock().unwrap() = Some(Box::new(f));
+}
+
+fn persist(cfg: &EncoreConfig) {
+    if let Some(f) = PERSIST.lock().unwrap().as_ref() {
+        f(cfg);
+    }
+}
+
+/// Start (or restart) the one process-wide Encore link, replacing any current one. With no
+/// server URL it only stops the old link (signed out).
+pub fn start_global(engine: Engine, cfg: &EncoreConfig) {
+    let mut g = LINK.lock().unwrap();
+    if let Some(old) = g.take() {
+        old.stop();
+    }
+    *g = cfg.enabled().then(|| start(Arc::new(cfg.clone()), engine));
+    *CONFIG.lock().unwrap() = Some(cfg.clone());
+}
+
+/// Apply a configuration from the web UI (log in, out, or switch servers) and save it. A
+/// blank password keeps the saved one for the same server and user, so the UI never has to
+/// echo the password back.
+pub fn set_config(engine: Engine, cfg: &EncoreConfig) {
+    let mut cfg = cfg.clone();
+    if cfg.password.is_empty() {
+        if let Some(old) = CONFIG.lock().unwrap().as_ref() {
+            if cfg.url == old.url && cfg.username == old.username {
+                cfg.password = old.password.clone();
+                cfg.cookie = old.cookie.clone();
+                cfg.token = old.token.clone();
+            }
+        }
+    }
+    start_global(engine, &cfg);
+    persist(&cfg);
+}
+
+/// `GET /api/encore`: the server and sign-in state, for the web UI's login form. The
+/// password is never returned.
+pub fn status() -> serde_json::Value {
+    let link = LINK.lock().unwrap();
+    let cfg = CONFIG.lock().unwrap();
+    let c = cfg.as_ref();
+    serde_json::json!({
+        "configured": link.is_some(),
+        "server": c.map(|c| c.url.as_str()).unwrap_or_default(),
+        "username": c.map(|c| c.username.as_str()).unwrap_or_default(),
+        "device_name": link.as_ref().map(|l| l.device_name()).unwrap_or_default(),
+        "error": link.as_ref().and_then(|l| l.last_error()),
+        "connected": link.as_ref().is_some_and(|l| l.last_error().is_none()),
+    })
 }
 
 /// Start the three Encore threads (heartbeat, event stream, play reporting).
@@ -345,6 +412,43 @@ mod tests {
         if cfg!(target_os = "linux") {
             assert!(!alive, "heartbeat/plays threads still running after stop");
         }
+        engine.shutdown();
+    }
+
+    #[test]
+    fn blank_password_is_kept_and_sign_out_clears() {
+        let saved = Arc::new(Mutex::new(None));
+        let s = saved.clone();
+        set_persist(move |c: &EncoreConfig| *s.lock().unwrap() = Some(c.clone()));
+        let mut st = Settings::default();
+        st.output.backend = "null".into();
+        let engine = Engine::start(
+            st,
+            EngineOptions {
+                cache: CoefficientCache::disabled(),
+                realtime: false,
+                persist: None,
+            },
+        );
+        // Pretend we are already signed in (no live link needed to test the merge).
+        *CONFIG.lock().unwrap() = Some(EncoreConfig {
+            username: "me".into(),
+            password: "secret".into(),
+            ..Default::default()
+        });
+        // Re-applying with the same user and a blank password keeps the saved password.
+        set_config(
+            engine.clone(),
+            &EncoreConfig {
+                username: "me".into(),
+                ..Default::default()
+            },
+        );
+        assert_eq!(saved.lock().unwrap().as_ref().unwrap().password, "secret");
+        // Signing out (empty account) clears the password and the link.
+        set_config(engine.clone(), &EncoreConfig::default());
+        assert_eq!(saved.lock().unwrap().as_ref().unwrap().password, "");
+        assert_eq!(status()["configured"], false);
         engine.shutdown();
     }
 }

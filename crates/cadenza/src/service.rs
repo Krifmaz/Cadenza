@@ -13,7 +13,6 @@ use std::sync::{Arc, Mutex};
 pub struct Services {
     /// The engine.
     pub engine: Engine,
-    _link: Option<crate::encore::EncoreLink>,
     _upnp: Option<crate::upnp::UpnpRenderer>,
     _airplay: Option<crate::airplay::AirplayReceiver>,
 }
@@ -49,10 +48,15 @@ pub fn start(config: &Config, path: PathBuf) -> Services {
             persist: Some(persist),
         },
     );
-    let link = config
-        .encore
-        .enabled()
-        .then(|| crate::encore::start(Arc::new(config.encore.clone()), engine.clone()));
+    let (sc, sp) = (shared.clone(), path.clone());
+    crate::encore::set_persist(move |enc: &crate::config::EncoreConfig| {
+        let mut c = sc.lock().unwrap_or_else(|e| e.into_inner());
+        c.encore = enc.clone();
+        if let Err(e) = c.save(&sp) {
+            log::warn!("could not save {}: {e}", sp.display());
+        }
+    });
+    crate::encore::start_global(engine.clone(), &config.encore);
     let upnp = config
         .upnp
         .enabled
@@ -68,7 +72,6 @@ pub fn start(config: &Config, path: PathBuf) -> Services {
     }
     Services {
         engine,
-        _link: link,
         _upnp: upnp,
         _airplay: airplay,
     }

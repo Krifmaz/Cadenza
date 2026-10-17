@@ -198,6 +198,7 @@
       <div class="nav-label">Tools</div>
       <a data-view="room"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="9" y="2" width="6" height="12" rx="3"/><path d="M5 11a7 7 0 0 0 14 0M12 18v4"/></svg>Room &amp; measure</a>
       <a data-view="system"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="2" y="4" width="20" height="13" rx="2"/><path d="M8 21h8M12 17v4"/></svg>System input <span class="badge" id="sys-badge" style="margin-left:auto"></span></a>
+      <a data-view="encore"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M4 7h16M4 12h16M4 17h10"/></svg>Encore <span class="badge" id="enc-badge" style="margin-left:auto"></span></a>
       <a data-view="appearance"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="9"/><path d="M12 3a9 9 0 0 0 0 18z" fill="currentColor"/></svg>Appearance</a>
     </nav>
     <div class="sidebar-foot small">
@@ -419,6 +420,18 @@
     </section>
 
     <!-- Appearance -->
+    <section class="view" data-view="encore" hidden>
+      <div class="page-head"><div><h1>Encore</h1><p>Sign in to your Encore server. Cadenza appears there as a playback device, and your Encore library becomes available in this app.</p></div></div>
+      <div class="card">
+        <h2>Server<span class="badge" id="enc-state" style="margin-left:auto"></span></h2>
+        <label class="field"><span>Server address</span><input type="text" id="enc-url" placeholder="http://192.168.1.50:8080"></label>
+        <label class="field"><span>Username</span><input type="text" id="enc-user" autocomplete="username"></label>
+        <label class="field"><span>Password</span><input type="password" id="enc-pass" autocomplete="current-password" placeholder="(leave blank to keep)"></label>
+        <label class="field"><span>Device name shown in Encore</span><input type="text" id="enc-name" placeholder="Cadenza on this PC"></label>
+        <div class="row" style="margin-top:10px"><button class="primary" id="enc-save">Sign in</button><button class="ghost" id="enc-out">Sign out</button></div>
+        <div class="hint" id="enc-info" style="margin-top:12px"></div>
+      </div>
+    </section>
     <section class="view" data-view="appearance" hidden>
       <div class="page-head"><div><h1>Appearance</h1><p>The same looks as Encore. Remembered in this browser.</p></div></div>
       <div class="grid">
@@ -852,6 +865,37 @@ async function initSystem() {
   $('sys-app').addEventListener('change', sysApply);
 }
 initSystem();
+
+// Encore login.
+async function paintEncore() {
+  try {
+    const j = await api('GET', '/api/encore');
+    const badge = j.connected ? 'on' : (j.configured ? 'error' : 'off');
+    $('enc-badge').textContent = badge; $('enc-state').textContent = badge;
+    $('enc-info').textContent = !j.configured ? 'Not signed in.'
+      : j.error ? ('Problem talking to Encore: ' + j.error)
+      : `Signed in as "${j.device_name}" → ${j.server}. You can now pick Cadenza in Encore, or browse your library here.`;
+  } catch (e) { $('enc-info').textContent = e.message; }
+}
+async function initEncore() {
+  try {
+    const j = await api('GET', '/api/encore');
+    $('enc-url').value = j.server || ''; $('enc-user').value = j.username || ''; $('enc-name').value = j.device_name || '';
+  } catch (e) { /* leave blank */ }
+  $('enc-save').addEventListener('click', async () => {
+    const cfg = { url: $('enc-url').value.trim(), username: $('enc-user').value.trim(), device_name: $('enc-name').value.trim() };
+    const pw = $('enc-pass').value; if (pw) cfg.password = pw;
+    $('enc-info').textContent = 'Signing in…';
+    try { await api('POST', '/api/encore', cfg); $('enc-pass').value = ''; } catch (e) { $('enc-info').textContent = e.message; return; }
+    paintEncore();
+  });
+  $('enc-out').addEventListener('click', async () => {
+    try { await api('POST', '/api/encore', { url: '' }); } catch (e) { $('enc-info').textContent = e.message; return; }
+    ['enc-url', 'enc-user', 'enc-name', 'enc-pass'].forEach(id => $(id).value = '');
+    paintEncore();
+  });
+}
+initEncore(); paintEncore(); setInterval(paintEncore, 5000);
 
 // Filter designer.
 const fdNum = (x) => Number(x).toFixed(4).replace(/0+$/, '').replace(/\.$/, '');

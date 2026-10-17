@@ -88,6 +88,10 @@ pub fn router_with_room(engine: Engine, room: crate::room::Room) -> Router {
             "/api/system/apps",
             get(|| async { Json(json!({ "apps": crate::system::apps() })) }),
         )
+        .route(
+            "/api/encore",
+            get(|| async { Json(crate::encore::status()) }).post(encore_set),
+        )
         .with_state(AppState {
             engine,
             room: Arc::new(Mutex::new(room)),
@@ -295,6 +299,16 @@ async fn system_set(
     let engine = st.engine.clone();
     crate::system::set_config(engine, &cfg);
     Ok(Json(crate::system::status()))
+}
+
+/// `POST /api/encore`: sign in to an Encore server (so Cadenza appears as a playback
+/// device and its library is available), switch servers, or sign out with an empty URL.
+async fn encore_set(
+    State(st): State<AppState>,
+    Json(cfg): Json<crate::config::EncoreConfig>,
+) -> Result<Json<Value>, ApiError> {
+    crate::encore::set_config(st.engine.clone(), &cfg);
+    Ok(Json(crate::encore::status()))
 }
 
 /// Checks beyond what deserialising enforces (shared with the Encore command handler).
