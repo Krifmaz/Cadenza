@@ -15,6 +15,7 @@
 
 mod client;
 pub mod commands;
+pub mod library;
 pub mod state;
 
 pub use client::Client;
@@ -121,6 +122,11 @@ pub fn set_config(engine: Engine, cfg: &EncoreConfig) {
     }
     start_global(engine, &cfg);
     persist(&cfg);
+}
+
+/// The signed-in server's client, for the in-app library (`None` when signed out).
+pub fn client() -> Option<Arc<Client>> {
+    LINK.lock().unwrap().as_ref().map(|l| Arc::clone(&l.client))
 }
 
 /// `GET /api/encore`: the server and sign-in state, for the web UI's login form. The

@@ -57,6 +57,15 @@ pub fn start(config: &Config, path: PathBuf) -> Services {
         }
     });
     crate::encore::start_global(engine.clone(), &config.encore);
+    crate::library::init(config.library.folders.clone());
+    let (sc, sp) = (shared.clone(), path.clone());
+    crate::library::set_persist(move |lib: &crate::library::LibraryConfig| {
+        let mut c = sc.lock().unwrap_or_else(|e| e.into_inner());
+        c.library = lib.clone();
+        if let Err(e) = c.save(&sp) {
+            log::warn!("could not save {}: {e}", sp.display());
+        }
+    });
     let upnp = config
         .upnp
         .enabled

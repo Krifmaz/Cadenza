@@ -99,6 +99,20 @@ fn main() {
                 let _ = w.hide();
             }
         }
+        // Files or folders dropped on the window go to the queue (playing at once when
+        // nothing is), scanned off the UI thread.
+        tauri::RunEvent::WindowEvent {
+            event: tauri::WindowEvent::DragDrop(tauri::DragDropEvent::Drop { paths, .. }),
+            ..
+        } => {
+            if let Some(services) = app.try_state::<cadenza::service::Services>() {
+                let engine = services.engine.clone();
+                std::thread::spawn(move || {
+                    let n = cadenza::library::play_dropped(&engine, &paths);
+                    log::info!("dropped {} item(s): {n} track(s) queued", paths.len());
+                });
+            }
+        }
         #[cfg(target_os = "macos")]
         tauri::RunEvent::Reopen { .. } => show_window(app),
         tauri::RunEvent::Exit => {

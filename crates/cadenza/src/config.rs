@@ -294,6 +294,8 @@ pub struct Config {
     pub airplay: crate::airplay::AirplayConfig,
     /// System-wide input: a virtual output device or one app (`cadenza serve`).
     pub system: crate::system::SystemConfig,
+    /// Local library: saved music folders.
+    pub library: crate::library::LibraryConfig,
 }
 
 impl Config {

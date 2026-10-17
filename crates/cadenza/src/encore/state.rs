@@ -260,10 +260,11 @@ pub fn heartbeat_state(client: &Client, s: &Status) -> Value {
 pub fn heartbeat_state_as(client: &Client, s: &Status, embedded: bool) -> Value {
     let track = s.track.as_ref();
     let album_id = track.and_then(|t| t.album_id.clone());
-    // A live stream's cover is served by this player's own API; Encore cannot reach it.
+    // A live stream's cover, and an Encore cover fetched through this player (the in-app
+    // library), are served by this player's own API; Encore cannot reach them.
     let cover = track
         .and_then(|t| t.cover.clone())
-        .filter(|c| !c.starts_with("/api/live/"))
+        .filter(|c| !c.starts_with("/api/live/") && !c.starts_with("/api/encore/"))
         .or_else(|| {
             album_id
                 .as_ref()

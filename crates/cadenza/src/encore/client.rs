@@ -207,6 +207,69 @@ impl Client {
         Err(format!("{path}: unauthorized"))
     }
 
+    /// `GET` with query parameters and parse the JSON reply (the library browser); a 401
+    /// triggers one re-login and retry, as for [`Client::post_json`].
+    pub fn get_json(&self, path: &str, query: &[(&str, &str)]) -> Result<Value, String> {
+        let r = self.get(path, query).and_then(|r| {
+            r.into_json::<Value>()
+                .map_err(|e| format!("bad JSON from {path}: {e}"))
+        });
+        match &r {
+            Ok(_) => self.set_error(None),
+            Err(e) => self.set_error(Some(e.clone())),
+        }
+        r
+    }
+
+    /// `GET` a binary resource (an album cover): its content type and bytes, at most 16 MB.
+    pub fn get_bytes(
+        &self,
+        path: &str,
+        query: &[(&str, &str)],
+    ) -> Result<(String, Vec<u8>), String> {
+        let r = self.get(path, query)?;
+        let kind = r.content_type().to_string();
+        let mut body = Vec::new();
+        r.into_reader()
+            .take(16 << 20)
+            .read_to_end(&mut body)
+            .map_err(|e| format!("{path}: {e}"))?;
+        Ok((kind, body))
+    }
+
+    fn get(&self, path: &str, query: &[(&str, &str)]) -> Result<ureq::Response, String> {
+        for attempt in 0..2 {
+            let (header, value) = self.auth_header()?;
+            let mut req = self
+                .agent
+                .get(&format!("{}{}", self.base, path))
+                .set("X-Requested-With", "encore")
+                .set(header, &value);
+            for (k, v) in query {
+                req = req.query(k, v);
+            }
+            match req.call() {
+                Ok(r) => return Ok(r),
+                Err(ureq::Error::Status(401, _)) if self.token.is_some() => {
+                    return Err("Encore did not accept the token (signed out?)".into());
+                }
+                Err(ureq::Error::Status(401, _)) if attempt == 0 => {
+                    self.forget_cookie();
+                    continue;
+                }
+                Err(ureq::Error::Status(code, r)) => {
+                    let text = r.into_string().unwrap_or_default();
+                    return Err(format!(
+                        "{path}: HTTP {code} {}",
+                        text.chars().take(200).collect::<String>()
+                    ));
+                }
+                Err(e) => return Err(format!("{path}: {e}")),
+            }
+        }
+        Err(format!("{path}: unauthorized"))
+    }
+
     /// Open a long-lived `GET` (the SSE stream) and hand back its body reader. The read
     /// timeout is 60 s: the server pings every 15 s, so an idle stream stays open while a
     /// stopped link lets go of the socket within a minute.

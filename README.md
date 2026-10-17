@@ -616,6 +616,17 @@ Encore's): the engine runs inside it and its control page opens in a native wind
 - It runs the same services as `cadenza serve` from the same config file (Encore link, UPnP,
   AirPlay, system input, as configured), and serves the control page on `[server] listen`
   when that is free, so a phone can still reach it; otherwise on a free local port.
+- **Library page**, two sources feeding the same queue:
+  - *Local*: browse drives and folders, play or queue a folder (sub-folders included, a CUE
+    sheet stands in for its single-file rip), save folders as shortcuts. Files and folders
+    dropped on the window are queued too (they start playing when nothing is).
+  - *Encore*: after signing in, browse and search your Encore albums and songs, with covers.
+    Tracks stream from Encore into this engine; the login stays in the engine and never
+    reaches the page.
+- **Encore page**: server address, username, password and device name. Signing in also makes
+  Cadenza a playback device in Encore. A blank password keeps the saved one.
+- **System input page**: on/off, whole system or one application (picked from the running
+  programs). No config file editing needed for any of these; changes are saved to it.
 
 Installers come with each release: `.deb` and `.AppImage` (Linux), `.exe` and `.msi`
 (Windows), `.dmg` (macOS). They are not code-signed, so Windows SmartScreen and macOS
@@ -632,6 +643,12 @@ cargo tauri build --features coreaudio,tap         # macOS
 Tested on Linux: the window shows the page and plays, MPRIS reports the track and its
 Play/Pause reaches the engine, and a second launch hands over to the first without starting
 anything. The Windows and macOS builds come from CI; not yet run on those systems.
+
+The Library and Encore pages were tested in a browser against the engine (a local folder,
+and a stand-in Encore server for sign-in, albums, covers, search and playback). Not tested
+here: a real Encore server, drag-and-drop on a real desktop, and anything on Windows or
+macOS. The folder browser lists any folder the engine can read: keep `[server] listen` on
+`127.0.0.1` unless you trust everyone on your network.
 
 ## Loopback verification
 
