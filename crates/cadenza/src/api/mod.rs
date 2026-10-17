@@ -541,11 +541,6 @@ async fn limit_status(State(st): State<AppState>) -> Json<Value> {
 /// Start the limit test for the current settings and device. Refused while music plays:
 /// the test needs the whole machine, and playback would stutter during it.
 async fn limit_start(State(st): State<AppState>) -> Result<Json<Value>, ApiError> {
-    if st.engine.status().state == crate::engine::PlayState::Playing {
-        return Err(bad(
-            "Pause the music first: the test uses the whole computer for about a minute.",
-        ));
-    }
     {
         let mut p = st.limit.progress.lock().unwrap();
         if p.state == "running" {
@@ -561,9 +556,13 @@ async fn limit_start(State(st): State<AppState>) -> Result<Json<Value>, ApiError
         .cancel
         .store(false, std::sync::atomic::Ordering::Relaxed);
     let (engine, limit) = (st.engine.clone(), Arc::clone(&st.limit));
+    // The test needs the whole machine, and the audio device must not sit half-open while
+    // it runs: pause and let go of the device. Play opens it again afterwards.
+    st.engine.send(crate::engine::Command::Release);
     std::thread::Builder::new()
         .name("cadenza-limit".into())
         .spawn(move || {
+            std::thread::sleep(std::time::Duration::from_millis(300));
             let settings = engine.settings();
             let device = crate::limit::find_device(&settings, &list_devices());
             let r = crate::limit::run(&settings, device, &engine.cache(), &limit.cancel, |p| {

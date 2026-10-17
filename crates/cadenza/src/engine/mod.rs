@@ -211,6 +211,9 @@ pub enum Command {
     /// Let go of the output device and open it afresh (after it was plugged in again,
     /// or to pick up a driver change). Playback, if any, carries on from where it was.
     Reconnect,
+    /// Pause and let go of the output device completely (for the limit test, which needs
+    /// the machine to itself). Play opens the device again and carries on from there.
+    Release,
     /// Exit the worker thread.
     Shutdown,
 }

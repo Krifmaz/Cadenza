@@ -146,6 +146,26 @@ pub struct AsioOutput {
     stream: Option<Stream>,
     written: u64,
     units: Vec<i32>,
+    /// Registered in [`IN_USE`] (the output playback holds).
+    held: bool,
+}
+
+/// The drivers playback holds open, as listed: a listing reuses these instead of loading
+/// a driver a second time, which some drivers do not survive while they stream.
+static IN_USE: std::sync::Mutex<Vec<DeviceInfo>> = std::sync::Mutex::new(Vec::new());
+
+fn device_info(name: &str, p: &Probe) -> DeviceInfo {
+    DeviceInfo {
+        backend: "asio".into(),
+        id: name.to_string(),
+        name: name.to_string(),
+        rates: p.rates.clone(),
+        bits: p.bits(),
+        channels: Some(p.outputs),
+        default: false,
+        exclusive: true,
+        dsd: p.dsd.clone(),
+    }
 }
 
 /// How long `write` / `drain` wait for a driver that stopped calling back.
@@ -178,7 +198,19 @@ impl AsioOutput {
             stream: None,
             written: 0,
             units: Vec::new(),
+            held: false,
         })
+    }
+
+    /// Mark this as the output playback holds: listings show it from here on without
+    /// loading the driver again.
+    pub fn hold(mut self) -> Self {
+        let info = device_info(self.driver.name(), &self.probe);
+        let mut in_use = IN_USE.lock().unwrap_or_else(|e| e.into_inner());
+        in_use.retain(|d| d.id != info.id);
+        in_use.push(info);
+        self.held = true;
+        self
     }
 
     /// What the driver can do.
@@ -387,6 +419,13 @@ impl AsioOutput {
 impl Drop for AsioOutput {
     fn drop(&mut self) {
         self.close_stream();
+        if self.held {
+            let name = self.driver.name().to_string();
+            IN_USE
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .retain(|d| d.id != name);
+        }
     }
 }
 
@@ -541,25 +580,24 @@ pub fn list_devices_from(source: &Arc<dyn DriverSource>) -> Vec<DeviceInfo> {
         .iter()
         .enumerate()
         .filter_map(|(i, name)| {
-            let out = match AsioOutput::with_source(Arc::clone(source), name) {
-                Ok(o) => o,
-                Err(e) => {
-                    log::debug!("ASIO: {name}: {e}");
-                    return None;
-                }
+            let held = IN_USE
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .iter()
+                .find(|d| d.id == *name)
+                .cloned();
+            let mut info = match held {
+                Some(d) => d,
+                None => match AsioOutput::with_source(Arc::clone(source), name) {
+                    Ok(o) => device_info(name, o.probe()),
+                    Err(e) => {
+                        log::debug!("ASIO: {name}: {e}");
+                        return None;
+                    }
+                },
             };
-            let p = out.probe().clone();
-            Some(DeviceInfo {
-                backend: "asio".into(),
-                id: name.clone(),
-                name: name.clone(),
-                rates: p.rates.clone(),
-                bits: p.bits(),
-                channels: Some(p.outputs),
-                default: i == 0,
-                exclusive: true,
-                dsd: p.dsd,
-            })
+            info.default = i == 0;
+            Some(info)
         })
         .collect()
 }
@@ -814,5 +852,27 @@ mod tests {
         assert_eq!(list[0].id, "Good");
         assert!(list[0].default && list[0].exclusive);
         assert!(list[0].dsd.dop && !list[0].dsd.native.is_empty());
+    }
+
+    #[test]
+    fn a_listing_never_loads_the_driver_playback_holds_again() {
+        let _g = ONE_AT_A_TIME.lock().unwrap_or_else(|e| e.into_inner());
+        let (f, src) = source(Spec::default());
+        let out = AsioOutput::with_source(Arc::clone(&src), "Fake")
+            .unwrap()
+            .hold();
+        let loads = f.state.lock().unwrap().refs;
+        let list = list_devices_from(&src);
+        assert_eq!(list.len(), 1);
+        assert_eq!(list[0].id, "Fake");
+        assert_eq!(
+            f.state.lock().unwrap().refs,
+            loads,
+            "listed from the held entry"
+        );
+        // Let go: the next listing probes it again.
+        drop(out);
+        let _ = list_devices_from(&src);
+        assert!(IN_USE.lock().unwrap().is_empty());
     }
 }

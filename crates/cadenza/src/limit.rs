@@ -1,12 +1,13 @@
 //! The limit test: how heavy a filter this machine can run, for the device and settings
 //! in use, before playback would stutter.
 //!
-//! It builds the same pipeline playback would (same device format, DSD rate, EQ, room
-//! correction, GPU choice) with longer and longer filters, pushes test audio through each
-//! and times it. "Speed" is seconds of audio per second of work: below 1 the machine falls
+//! It builds the same pipeline playback would (same device, DSD rate, EQ, room correction,
+//! GPU choice) with longer and longer filters, at every PCM rate the device takes (or the
+//! DSD rate in DSD mode), pushes test audio through each and times it. "Speed" is seconds of audio per second of work: below 1 the machine falls
 //! behind and the sound breaks up. A filter counts as safe from 1.5× up, so other programs,
 //! a busy disk or a hot laptop do not tip it over; 1.1–1.5× is tight. The ladder stops at
-//! the first filter that is too slow, since every longer one is slower still.
+//! the first filter that is too slow, since every longer one is slower still (and so is the
+//! same filter at a higher rate).
 
 use crate::config::Settings;
 use crate::output::{self, DeviceInfo, Output, OutputFormat, Probe};
@@ -28,13 +29,13 @@ const SOURCE_RATE: u32 = 44_100;
 /// Frames per chunk, about what a decoder hands over.
 const CHUNK: usize = 4096;
 /// Audio pushed through before timing starts (fills the FFT stages).
-const WARMUP_SECONDS: f64 = 1.0;
+const WARMUP_SECONDS: f64 = 0.5;
 /// A single chunk taking longer than this could empty the device's buffer even when the
 /// average keeps up (long FFT filters work in bursts).
 const WORST_CALL: f64 = 0.25;
 /// Each filter is timed for this much audio, or this much wall time, whichever ends first.
-const MEASURE_SECONDS: f64 = 10.0;
-const MEASURE_WALL: Duration = Duration::from_secs(6);
+const MEASURE_SECONDS: f64 = 6.0;
+const MEASURE_WALL: Duration = Duration::from_secs(3);
 
 /// One filter tried.
 #[derive(Clone, Debug, Serialize)]
@@ -57,18 +58,33 @@ pub struct Row {
     pub current: bool,
 }
 
+/// The filters tried at one output rate.
+#[derive(Clone, Debug, Default, Serialize)]
+pub struct Column {
+    /// `176.4 kHz`, `DSD256`.
+    pub label: String,
+    /// PCM rate in Hz (0 for a DSD column).
+    pub rate: u32,
+    /// The rate playback uses now.
+    pub current: bool,
+    /// Filters tried, shortest first.
+    pub rows: Vec<Row>,
+    /// The longest safe filter at this rate, if any.
+    pub best: Option<String>,
+}
+
 /// What the test found.
 #[derive(Clone, Debug, Default, Serialize)]
 pub struct Report {
-    /// The device and the format it would be opened in.
+    /// The device.
     pub output: String,
-    /// What the conversion is (`44.1 kHz → 705.6 kHz 24-bit`, …).
+    /// What playback does now (`44.1 kHz → 705.6 kHz 24-bit`, …).
     pub conversion: String,
     /// Where the heavy work runs (CPU / GPU).
     pub compute: String,
-    /// Filters tried, shortest first.
-    pub rows: Vec<Row>,
-    /// The longest safe filter, if any.
+    /// One per rate tested, lowest first.
+    pub columns: Vec<Column>,
+    /// The longest safe filter at the rate in use, if a filter runs there.
     pub recommended: Option<String>,
     /// A sentence for the user.
     pub summary: String,
@@ -255,36 +271,55 @@ fn time_filter(
         }
     };
     let chunk_seconds = CHUNK as f64 / SOURCE_RATE as f64;
-    let mut warm = 0.0;
+    // Seconds of sound per word that comes out (PCM frame, DoP frame or DSD word).
+    let out_rate = match got.encoding {
+        output::Encoding::Pcm => got.rate as f64,
+        output::Encoding::Dsd { .. } => cadenza_dsp::dsd::Packer::new(
+            dsd.map(|d| d.packing).unwrap_or_default(),
+            got.channels as usize,
+        )
+        .frame_rate(got.rate) as f64,
+    };
+    let out_ch = got.channels.max(1) as usize;
+
+    // Warm up until sound comes out: a long filter holds back its delay (seconds, for
+    // 8M+ taps) first, and the stages after it only work once it lets go. Timing that
+    // quiet start would make long filters look fast.
     let warm_start = Instant::now();
-    while warm < WARMUP_SECONDS {
+    let mut flowing = 0.0;
+    while flowing < WARMUP_SECONDS {
         fill(&mut chunk);
-        std::hint::black_box(p.process(&chunk));
-        warm += chunk_seconds;
+        let out = p.process(&chunk);
+        flowing += out.len() as f64 / out_ch as f64 / out_rate;
         if cancel.load(Ordering::Relaxed) {
             return Err("cancelled".into());
         }
-        // Hopeless already (a second of audio took more than a few seconds): stop.
-        if warm_start.elapsed() > MEASURE_WALL {
-            let wall = warm_start.elapsed().as_secs_f64();
-            return Ok((warm / wall, wall, design));
+        if warm_start.elapsed() > 4 * MEASURE_WALL {
+            // Not even its delay got through in this time: hopeless.
+            return Ok((0.0, 0.0, design));
         }
     }
+    // Time what comes out: seconds of sound per second of work.
     let start = Instant::now();
-    let mut audio = 0.0;
+    let mut sound = 0.0;
+    let mut audio_in = 0.0;
     let mut worst = 0.0f64;
-    while audio < MEASURE_SECONDS && (audio < 2.0 * chunk_seconds || start.elapsed() < MEASURE_WALL)
+    while sound < MEASURE_SECONDS
+        && (audio_in < 4.0 * chunk_seconds || start.elapsed() < MEASURE_WALL)
     {
         fill(&mut chunk);
         let t = Instant::now();
-        std::hint::black_box(p.process(&chunk));
+        let out = p.process(&chunk);
         worst = worst.max(t.elapsed().as_secs_f64());
-        audio += chunk_seconds;
+        sound += out.len() as f64 / out_ch as f64 / out_rate;
+        audio_in += chunk_seconds;
         if cancel.load(Ordering::Relaxed) {
             return Err("cancelled".into());
         }
     }
-    Ok((audio / start.elapsed().as_secs_f64(), worst, design))
+    // Input and output run at the same pace once flowing; the input count is the steadier
+    // measure (output comes in blocks), the output check above makes sure it is flowing.
+    Ok((audio_in / start.elapsed().as_secs_f64(), worst, design))
 }
 
 /// Run the test for `settings` on `device` (`None`: not connected, so an ideal device is
@@ -326,12 +361,44 @@ pub fn run(
     };
     report.compute = cadenza_dsp::gpu::Backend::detect(&settings.dsp.gpu).label();
 
-    if dsd.is_none() && got.rate == SOURCE_RATE {
+    // The rates to test: in DSD mode the DSD rate playback uses; in PCM every rate the
+    // device takes above the source's (the filter only runs when the rate goes up).
+    let mut columns: Vec<(Column, OutputFormat, Option<DsdConfig>)> = Vec::new();
+    if let Some(d) = dsd {
+        columns.push((
+            Column {
+                label: d.rate.label(),
+                current: true,
+                ..Default::default()
+            },
+            got,
+            dsd,
+        ));
+    } else {
+        let probe = Probe(device.clone());
+        let mut r = SOURCE_RATE * 2;
+        while r <= output::MAX_PCM_RATE {
+            if probe.supports(r, got.bits) {
+                columns.push((
+                    Column {
+                        label: khz(r),
+                        rate: r,
+                        current: r == got.rate,
+                        ..Default::default()
+                    },
+                    OutputFormat::pcm(r, got.bits, got.channels),
+                    None,
+                ));
+            }
+            r *= 2;
+        }
+    }
+    if columns.is_empty() {
         report.summary = format!(
-            "Your output runs at the music's own rate ({}), so no upsampling filter runs and \
-             the filter choice makes no difference. Your PC has plenty of room. To use the \
-             filters, pick a higher PCM rate (if your device takes one).",
-            khz(got.rate)
+            "{} only takes the music's own rate ({}), so no upsampling filter can run and the \
+             filter choice makes no difference.",
+            device.name,
+            khz(SOURCE_RATE)
         );
         return Ok(report);
     }
@@ -340,96 +407,137 @@ pub fn run(
     let current = FilterKind::parse(&settings.dsp.filter).map(|k| k.id());
     let mut p = Progress {
         state: "running".into(),
-        total: ladder.len(),
+        total: ladder.len() * columns.len(),
         ..Default::default()
     };
-    let mut stopped = false;
-    for (i, k) in ladder.iter().enumerate() {
-        let id = k.id();
-        let mut row = Row {
-            filter: id.clone(),
-            taps: k.taps,
-            speed: 0.0,
-            worst_seconds: 0.0,
-            design_seconds: 0.0,
-            verdict: String::new(),
-            note: String::new(),
-            current: current.as_deref() == Some(id.as_str()),
-        };
-        if stopped {
-            row.verdict = "too_slow".into();
-            row.note = "not tried: a shorter filter was already too slow".into();
-            report.rows.push(row);
-            continue;
-        }
-        p.done = i;
-        p.current = format!("{} ({} taps)", id, k.taps);
-        p.report = report.clone();
-        progress(&p);
-        match time_filter(settings, k, got, dsd, &device_label, cache, cancel) {
-            Ok((speed, worst, design)) => {
-                row.speed = speed;
-                row.worst_seconds = worst;
-                row.design_seconds = design;
-                row.verdict = if speed >= SAFE && worst <= WORST_CALL {
-                    "safe"
-                } else if speed >= TOO_SLOW {
-                    "tight"
-                } else {
-                    "too_slow"
-                }
-                .into();
-                row.note = match row.verdict.as_str() {
-                    "safe" => format!("runs {speed:.1}× faster than playback"),
-                    "tight" if speed >= SAFE => format!(
-                        "fast enough on average ({speed:.1}×), but works in bursts of up to {:.0} ms: \
-                         may click on a device with a small buffer",
-                        worst * 1000.0
-                    ),
-                    "tight" => format!(
-                        "only {speed:.2}× faster than playback: may stutter when the PC is busy"
-                    ),
-                    _ => format!("{speed:.2}× playback speed: would stutter"),
-                };
-                if design > 2.0 {
-                    row.note += &format!(
-                        "; first play waits {design:.0} s while it is designed (then cached)"
-                    );
-                }
-                stopped = row.verdict == "too_slow";
+    // The shortest filter found too slow so far: at a higher rate it is slower still.
+    let mut limit = ladder.len();
+    for ci in 0..columns.len() {
+        let (got, dsd) = (columns[ci].1, columns[ci].2);
+        let mut stopped = false;
+        for (i, k) in ladder.iter().enumerate() {
+            let id = k.id();
+            let mut row = Row {
+                filter: id.clone(),
+                taps: k.taps,
+                speed: 0.0,
+                worst_seconds: 0.0,
+                design_seconds: 0.0,
+                verdict: String::new(),
+                note: String::new(),
+                current: current.as_deref() == Some(id.as_str()),
+            };
+            if stopped || i >= limit {
+                row.verdict = "skipped".into();
+                row.note = "not tried: a shorter filter, or this one at a lower rate, was \
+                    already too slow"
+                    .into();
+                columns[ci].0.rows.push(row);
+                continue;
             }
-            Err(e) if e == "cancelled" => return Err(e),
-            Err(e) => {
-                row.verdict = "error".into();
-                row.note = e;
+            p.done = ci * ladder.len() + i;
+            p.current = format!("{} at {}", id, columns[ci].0.label);
+            p.report = Report {
+                columns: columns.iter().map(|c| c.0.clone()).collect(),
+                ..report.clone()
+            };
+            progress(&p);
+            match time_filter(settings, k, got, dsd, &device_label, cache, cancel) {
+                Ok((speed, worst, design)) => {
+                    row.speed = speed;
+                    row.worst_seconds = worst;
+                    row.design_seconds = design;
+                    row.verdict = if speed >= SAFE && worst <= WORST_CALL {
+                        "safe"
+                    } else if speed >= TOO_SLOW {
+                        "tight"
+                    } else {
+                        "too_slow"
+                    }
+                    .into();
+                    row.note = match row.verdict.as_str() {
+                        "safe" => format!("runs {speed:.1}× faster than playback"),
+                        "tight" if speed >= SAFE => format!(
+                            "fast enough on average ({speed:.1}×), but works in bursts of up \
+                             to {:.0} ms: may click on a device with a small buffer",
+                            worst * 1000.0
+                        ),
+                        "tight" => format!(
+                            "only {speed:.2}× faster than playback: may stutter when the PC \
+                             is busy"
+                        ),
+                        _ => format!("{speed:.2}× playback speed: would stutter"),
+                    };
+                    if design > 2.0 {
+                        row.note += &format!(
+                            "; the first play at this rate waits {design:.0} s while it is \
+                             designed (then cached)"
+                        );
+                    }
+                    if row.verdict == "too_slow" {
+                        stopped = true;
+                        limit = limit.min(i);
+                    }
+                }
+                Err(e) if e == "cancelled" => return Err(e),
+                Err(e) => {
+                    row.verdict = "error".into();
+                    row.note = e;
+                }
             }
+            columns[ci].0.rows.push(row);
         }
-        report.rows.push(row);
+        let best = columns[ci]
+            .0
+            .rows
+            .iter()
+            .rev()
+            .find(|r| r.verdict == "safe")
+            .map(|r| r.filter.clone());
+        columns[ci].0.best = best;
     }
-    report.recommended = report
-        .rows
+    report.columns = columns.into_iter().map(|c| c.0).collect();
+    let cur = report.columns.iter().find(|c| c.current);
+    report.recommended = cur.and_then(|c| c.best.clone());
+    let per_rate = report
+        .columns
         .iter()
-        .rev()
-        .find(|r| r.verdict == "safe")
-        .map(|r| r.filter.clone());
-    let cur_row = report.rows.iter().find(|r| r.current);
-    report.summary = match (&report.recommended, cur_row) {
-        (None, _) => "Even the shortest filter is not safe at this rate. Lower the PCM rate \
-            or DSD rate, turn on the GPU if you have one, or close other programs."
-            .into(),
-        (Some(best), Some(c)) if c.verdict == "too_slow" || c.verdict == "tight" => format!(
-            "Your current filter ({}) is {} here. The longest safe one is {best}.",
-            c.filter,
-            if c.verdict == "tight" {
-                "cutting it close"
-            } else {
-                "too heavy"
+        .map(|c| {
+            format!(
+                "{}: {}",
+                c.label,
+                c.best.as_deref().unwrap_or("none is safe")
+            )
+        })
+        .collect::<Vec<_>>()
+        .join(" · ");
+    report.summary = match cur {
+        None => format!(
+            "Longest safe filter at each rate: {per_rate}. Playback runs at {} now, so no filter \
+             runs; to use one, set Output → PCM rate to one of these.",
+            khz(got.rate)
+        ),
+        Some(c) => {
+            let cur_row = c.rows.iter().find(|r| r.current);
+            match (&c.best, cur_row) {
+                (None, _) => format!(
+                    "Even the shortest filter is not safe at {} here. Pick a lower rate, turn on \
+                     the GPU if you have one, or close other programs. ({per_rate})",
+                    c.label
+                ),
+                (Some(best), Some(r)) if r.verdict != "safe" => format!(
+                    "Your current filter ({}) is too heavy at {}; the longest safe one there is \
+                     {best}. Longest safe filter at each rate: {per_rate}.",
+                    r.filter, c.label
+                ),
+                (Some(best), _) => format!(
+                    "At {} (what playback uses now) the longest safe filter is {best}. Longest \
+                     safe filter at each rate: {per_rate}. Longer filters cut more sharply; most \
+                     people hear little past 1M taps.",
+                    c.label
+                ),
             }
-        ),
-        (Some(best), _) => format!(
-            "The longest filter that runs safely here is {best}. Longer filters cut more \
-             sharply and ring less before the beat, but most people hear little past 1M taps."
-        ),
+        }
     };
     Ok(report)
 }
@@ -457,11 +565,11 @@ mod tests {
     }
 
     #[test]
-    fn same_rate_output_needs_no_test() {
+    fn a_device_that_only_takes_the_source_rate_needs_no_test() {
         let mut s = Settings::default();
         s.output.rate = crate::config::RateSetting::Source;
         let mut d = output::null::device_info();
-        d.rates = vec![44_100];
+        d.rates = vec![44_100, 48_000];
         let r = run(
             &s,
             Some(d),
@@ -470,8 +578,32 @@ mod tests {
             |_| {},
         )
         .unwrap();
-        assert!(r.rows.is_empty());
+        assert!(r.columns.is_empty());
         assert!(r.summary.contains("no upsampling"), "{}", r.summary);
+    }
+
+    #[test]
+    fn same_rate_playback_still_tests_every_rate_the_device_takes() {
+        let mut s = Settings::default();
+        s.output.rate = crate::config::RateSetting::Source;
+        s.dsp.filter = "sinc-l-4k".into();
+        let mut d = output::null::device_info();
+        d.rates = vec![44_100, 88_200, 96_000];
+        let mut steps = Vec::new();
+        let cancel = AtomicBool::new(false);
+        // Stop after the first two filters to keep the test short.
+        let r = run(&s, Some(d), &CoefficientCache::disabled(), &cancel, |p| {
+            steps.push(p.current.clone());
+            if p.done >= 2 {
+                cancel.store(true, Ordering::Relaxed);
+            }
+        });
+        assert_eq!(r.unwrap_err(), "cancelled");
+        assert!(
+            steps.iter().all(|c| c.ends_with("at 88.2 kHz")),
+            "{steps:?}"
+        );
+        assert!(steps.len() >= 2);
     }
 
     #[test]

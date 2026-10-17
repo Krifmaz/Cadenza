@@ -280,6 +280,18 @@ impl Worker {
                     self.start_index(i, at);
                 }
             },
+            Command::Release => {
+                if self.state == PlayState::Playing {
+                    self.handle(Command::Pause);
+                }
+                if self.state == PlayState::Paused {
+                    // Keep the place: play restarts the track there on a fresh device.
+                    let at = self.position();
+                    self.stop_playback(false);
+                    self.resume_at = Some(at);
+                }
+                self.drop_output();
+            }
             Command::Reconnect => {
                 let resume = (self.state != PlayState::Stopped)
                     .then(|| (self.index, self.position(), self.state));

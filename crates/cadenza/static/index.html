@@ -129,6 +129,10 @@
   .plain { font-size: 12.5px; color: var(--text); background: var(--panel-2); border-radius: 10px; padding: 8px 10px; margin: -4px 0 12px; line-height: 1.45; }
   .plain:empty { display: none; }
   .badge.bad { color: var(--err); border-color: rgba(239,68,68,.35); background: rgba(239,68,68,.1); }
+  table.lim td, table.lim th { white-space: nowrap; }
+  table.lim th.cur { color: var(--text); }
+  table.lim td .badge { min-width: 52px; justify-content: center; }
+  table.lim tfoot button { font-size: 12px; padding: 4px 8px; }
   .meter { height: 6px; border-radius: 99px; background: var(--panel-2); overflow: hidden; margin: 10px 0; }
   .meter i { display: block; height: 100%; width: 0; background: var(--accent); transition: width .3s; }
   input[type=range] { width: 100%; accent-color: var(--accent); }
@@ -316,12 +320,12 @@
         </div>
         <div class="card">
           <h2>Find my limit</h2>
-          <div class="hint" style="margin:0 0 12px">Tests how long a filter this computer can run for your device and settings without the sound breaking up. Takes about a minute; pause the music first. Longer filters are more precise but need more computing power.</div>
+          <div class="hint" style="margin:0 0 12px">Tests how long a filter this computer can run at every rate your device takes, without the sound breaking up. Takes a few minutes (very long filters are designed the first time). The music pauses and the device is let go during the test; press play afterwards to carry on.</div>
           <div class="row"><button class="primary" id="lim-start">Run the test</button><button id="lim-cancel" hidden>Cancel</button><button id="lim-use" hidden></button></div>
           <div class="meter" id="lim-meter" hidden><i></i></div>
           <div class="small muted" id="lim-status"></div>
           <div class="small" id="lim-summary" style="margin-top:8px"></div>
-          <div style="overflow-x:auto"><table id="lim-table" hidden><thead><tr><th>Filter</th><th>Length</th><th>Speed</th><th></th></tr></thead><tbody></tbody></table></div>
+          <div style="overflow-x:auto"><table id="lim-table" class="lim" hidden><thead></thead><tbody></tbody><tfoot></tfoot></table></div>
         </div>
         <div class="card">
           <h2>Noise shaping</h2>
@@ -1050,7 +1054,7 @@ function eqAdd(b) {
 }
 
 // ----- Find my limit -----------------------------------------------------------------
-const VERDICT = { safe: ['ok', 'safe'], tight: ['warn', 'tight'], too_slow: ['bad', 'too slow'], error: ['bad', 'error'] };
+const VERDICT = { safe: ['ok', 'safe'], tight: ['warn', 'tight'], too_slow: ['bad', 'too slow'], skipped: ['bad', 'too slow'], error: ['bad', 'error'] };
 const tapsLabel = (t) => t >= 1 << 20 ? (t / (1 << 20)) + 'M' : (t / 1024) + 'k';
 let limTimer = null;
 function paintLimit(p) {
@@ -1063,15 +1067,19 @@ function paintLimit(p) {
     : p.state === 'cancelled' ? 'Cancelled.' : p.state === 'error' ? '' : r.output ? `${r.output} · ${r.conversion} · ${r.compute}` : '';
   $('lim-summary').textContent = p.state === 'error' ? (p.error || 'The test failed.') : (p.state === 'done' ? r.summary || '' : '');
   $('lim-summary').className = 'small' + (p.state === 'error' ? ' err' : '');
-  const rows = r.rows || [];
-  $('lim-table').hidden = !rows.length;
-  $('lim-table').tBodies[0].innerHTML = rows.map(x => {
-    const [cls, word] = VERDICT[x.verdict] || ['', x.verdict];
-    return `<tr title="${esc(x.note)}"><td>${esc(x.filter)}${x.current ? ' <span class="badge accent">now</span>' : ''}</td><td>${tapsLabel(x.taps)} taps</td><td>${x.speed ? x.speed.toFixed(1) + '×' : '–'}</td><td><span class="badge ${cls}">${word}</span></td></tr>`;
+  // Only the answer: per rate, the longest filter that runs safely.
+  const cols = r.columns || [];
+  $('lim-table').hidden = !cols.length;
+  $('lim-table').tHead.innerHTML = '<tr><th>Rate</th><th>Longest safe filter</th><th>Speed</th><th></th></tr>';
+  $('lim-table').tBodies[0].innerHTML = cols.map(c => {
+    const tried = (c.rows || []).filter(x => x.speed > 0);
+    const best = (c.rows || []).find(x => x.filter === c.best);
+    const done = p.state === 'done' || (c.rows || []).length === (cols[0]?.rows || []).length && tried.length;
+    const cell = c.best ? `<b>${esc(c.best)}</b> <span class="small muted">${tapsLabel(best.taps)} taps</span>` : (done ? '<span class="badge bad">none is safe</span>' : '<span class="muted">testing…</span>');
+    return `<tr><td>${esc(c.label)}${c.current ? ' <span class="badge accent">now</span>' : ''}</td><td>${cell}</td><td>${best ? best.speed.toFixed(1) + '×' : ''}</td><td>${p.state === 'done' && c.best ? `<button data-lim-rate="${c.rate}" data-lim-filter="${esc(c.best)}" title="Set the PCM rate to ${esc(c.label)} and the filter to ${esc(c.best)}">Use</button>` : ''}</td></tr>`;
   }).join('');
-  const rec = p.state === 'done' && r.recommended;
-  $('lim-use').hidden = !rec || $('filter').value === rec;
-  if (rec) { $('lim-use').textContent = `Use ${rec}`; $('lim-use').dataset.id = rec; }
+  $('lim-table').tFoot.innerHTML = '';
+  $('lim-use').hidden = true;
   clearTimeout(limTimer);
   if (running) limTimer = setTimeout(pollLimit, 700);
 }
@@ -1081,7 +1089,17 @@ $('lim-start').onclick = async () => {
   try { paintLimit(await api('POST', '/api/limit/start')); } catch (e) { $('lim-summary').textContent = e.message; $('lim-summary').className = 'small err'; }
 };
 $('lim-cancel').onclick = () => api('POST', '/api/limit/cancel').then(paintLimit).catch(() => {});
-$('lim-use').onclick = async () => { const id = $('lim-use').dataset.id; $('filter').value = id; await save({ dsp: { filter: id } }); $('lim-use').hidden = true; };
+$('lim-table').onclick = async (e) => {
+  const b = e.target.closest('[data-lim-filter]'); if (!b) return;
+  const id = b.dataset.limFilter, rate = Number(b.dataset.limRate);
+  $('filter').value = id;
+  const patch = { dsp: { filter: id } };
+  if (rate) patch.output = { rate };
+  await save(patch);
+  if (rate) fillRates(String(rate));
+  filterInfo();
+  b.textContent = 'Set ✓';
+};
 pollLimit();
 
 async function save(patch) {

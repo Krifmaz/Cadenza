@@ -354,6 +354,21 @@ fn an_unplugged_device_stops_playback_and_play_picks_up_where_it_was() {
         st.position
     );
 
+    // Release (the limit test): the device is let go, play carries on from the same place.
+    let before = e.status().position;
+    e.send(Command::Release);
+    std::thread::sleep(Duration::from_millis(300));
+    assert_eq!(e.status().state, PlayState::Stopped);
+    e.send(Command::Play);
+    std::thread::sleep(Duration::from_millis(400));
+    let st = e.status();
+    assert_eq!(st.state, PlayState::Playing, "{:?}", st.error);
+    assert!(
+        (st.position - before).abs() < 1.5,
+        "{} vs {before}",
+        st.position
+    );
+
     // Reconnect while playing keeps playing from about the same place.
     let before = e.status().position;
     e.send(Command::Reconnect);

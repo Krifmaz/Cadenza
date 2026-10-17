@@ -12,7 +12,7 @@ use super::host::{AsioError, Driver};
 use super::{AsioOutput, DriverSource};
 use crate::output::{DeviceInfo, OutputError};
 use std::ffi::c_void;
-use std::sync::{Arc, Mutex};
+use std::sync::Arc;
 use windows_sys::core::GUID;
 use windows_sys::Win32::Foundation::{ERROR_SUCCESS, RPC_E_CHANGED_MODE};
 use windows_sys::Win32::System::Com::{
@@ -167,18 +167,13 @@ impl DriverSource for RegistrySource {
 
 /// Open driver `name` (`""`: the first installed one).
 pub fn open(name: &str) -> Result<AsioOutput, OutputError> {
-    AsioOutput::with_source(Arc::new(RegistrySource), name)
+    Ok(AsioOutput::with_source(Arc::new(RegistrySource), name)?.hold())
 }
 
-/// The installed drivers, probed once per process (a driver in use by a stream may not
-/// load a second time, so later listings reuse the first answer).
+/// The installed drivers, probed afresh on every listing (so one plugged in later shows
+/// up), except the one playback holds: that one is listed from what it reported when it
+/// opened, never loaded a second time.
 pub fn list_devices() -> Vec<DeviceInfo> {
-    static CACHE: Mutex<Option<Vec<DeviceInfo>>> = Mutex::new(None);
-    let mut cache = CACHE.lock().unwrap_or_else(|e| e.into_inner());
-    cache
-        .get_or_insert_with(|| {
-            let src: Arc<dyn DriverSource> = Arc::new(RegistrySource);
-            super::list_devices_from(&src)
-        })
-        .clone()
+    let src: Arc<dyn DriverSource> = Arc::new(RegistrySource);
+    super::list_devices_from(&src)
 }
