@@ -108,6 +108,14 @@
   .badge.accent { color: color-mix(in srgb, var(--accent) 55%, var(--text)); border-color: rgba(var(--accent-rgb), .4); background: rgba(var(--accent-rgb), .14); }
   .hint { font-size: 12.5px; color: var(--muted); margin: -4px 0 12px; }
   .err { color: var(--err); }
+  .guide p, .guide li { color: var(--text); font-size: 14px; line-height: 1.55; }
+  .guide p { margin: 0 0 10px; }
+  .guide ul, .guide ol { margin: 0 0 10px; padding-left: 20px; }
+  .guide h3 { font-size: 15px; margin: 14px 0 6px; }
+  .guide dt { font-weight: 650; margin-top: 10px; }
+  .guide dd { margin: 2px 0 0; color: var(--muted); font-size: 13.5px; line-height: 1.5; }
+  .plain { font-size: 12.5px; color: var(--text); background: var(--panel-2); border-radius: 10px; padding: 8px 10px; margin: -4px 0 12px; line-height: 1.45; }
+  .plain:empty { display: none; }
   .badge.bad { color: var(--err); border-color: rgba(239,68,68,.35); background: rgba(239,68,68,.1); }
   .meter { height: 6px; border-radius: 99px; background: var(--panel-2); overflow: hidden; margin: 10px 0; }
   .meter i { display: block; height: 100%; width: 0; background: var(--accent); transition: width .3s; }
@@ -212,6 +220,7 @@
     <nav class="nav" id="nav">
       <a data-view="now"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="9"/><path d="m10 8.5 5 3.5-5 3.5z"/></svg>Now playing</a>
       <a data-view="library"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M4 4v16M9 4v16M14 4l5 16"/></svg>Library</a>
+      <a data-view="guide"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="9"/><path d="M9.5 9a2.5 2.5 0 1 1 3.5 2.3c-.6.3-1 .9-1 1.6V14M12 17h.01"/></svg>Guide</a>
       <div class="nav-label">Engine</div>
       <a data-view="sound"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="M4 21v-7M4 10V3M12 21v-9M12 8V3M20 21v-5M20 12V3M1 14h6M9 8h6M17 16h6"/></svg>Sound</a>
       <a data-view="filters"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="M3 12c3-8 5-8 6 0s3 8 6 0 4-4 6-2"/></svg>Filters</a>
@@ -286,6 +295,7 @@
         <div class="card">
           <h2>Upsampling</h2>
           <label class="field"><span>Filter</span><select id="filter"></select></label>
+          <div class="plain" id="filter-plain"></div>
           <div class="hint" id="filter-info"></div>
           <div class="grid2">
             <label class="field"><span>Headroom (dB; empty = auto)</span><input type="number" id="headroom_db" step="0.5" min="-30" max="0" placeholder="auto (−3 dB when upsampling)"></label>
@@ -304,6 +314,7 @@
         <div class="card">
           <h2>Noise shaping</h2>
           <label class="field"><span>Dither / noise shaper (PCM output)</span><select id="dither"></select></label>
+          <div class="plain" id="dither-plain"></div>
           <div class="hint" id="dither-info"></div>
           <div class="row" style="align-items:flex-end">
             <label class="field" style="flex:1;margin-bottom:0"><span>DAC noise floor (dBFS, A-weighted; empty = −120)</span><input type="number" id="dac_noise_floor_db" min="-160" max="-60" step="1" placeholder="-120"></label>
@@ -394,11 +405,13 @@
           <h2>Device</h2>
           <label class="field"><span>Device</span><div class="row" style="flex-wrap:nowrap"><select id="device" style="flex:1"></select><button id="dev-refresh" title="Look for devices again and reconnect to the chosen one">Refresh</button></div></label>
           <div class="hint" id="device-caps"></div>
+          <div class="plain" id="device-plain"></div>
           <label class="field"><span>Output mode</span><select id="output_mode"></select></label>
           <div class="grid2">
             <label class="field"><span>PCM rate</span><select id="rate"></select></label>
             <label class="field"><span>PCM bits</span><select id="bits"><option>16</option><option>24</option><option>32</option></select></label>
           </div>
+          <div class="plain">PCM is the normal format; DSD only if your DAC lists it. PCM rate: Auto picks the highest your device takes (the filter computes the extra points). Bits: 24 for any DAC, 16 for Bluetooth aptX Lossless (set 44.1 kHz too). The Guide page explains more.</div>
           <label class="switch"><input type="checkbox" id="bitperfect"><i></i><b>Bit-perfect</b></label>
           <div class="hint">Send the file untouched: no upsampling, dither, EQ, matrix or volume.</div>
         </div>
@@ -486,6 +499,64 @@
         <label class="field"><span>Device name shown in Encore</span><input type="text" id="enc-name" placeholder="Cadenza on this PC"></label>
         <div class="row" style="margin-top:10px"><button class="primary" id="enc-save">Sign in</button><button class="ghost" id="enc-out">Sign out</button></div>
         <div class="hint" id="enc-info" style="margin-top:12px"></div>
+      </div>
+    </section>
+    <section class="view guide" data-view="guide" hidden>
+      <div class="page-head"><div><h1>Guide</h1><p>What Cadenza does and what to pick, in plain words. No experience needed.</p></div></div>
+      <div class="grid">
+        <div class="card">
+          <h2>What Cadenza does</h2>
+          <p>Your music files store sound as numbers: usually 44,100 numbers a second per channel (CD quality). Your DAC (the thing your headphones plug into) turns those numbers back into sound.</p>
+          <p>Before the numbers reach the DAC, Cadenza can <b>upsample</b> them: calculate the in-between points very precisely, so the DAC gets 8, 16 or 32 times more points. DACs do this themselves too, but with small, cheap filters built into the chip. Your computer can run a far bigger, more precise filter.</p>
+          <p>Whether you hear a difference depends on your DAC and your ears. Nothing here makes the sound worse, and you can always turn on <b>Bit-perfect</b> (Output page) to send the music untouched.</p>
+        </div>
+        <div class="card">
+          <h2>Quick setup: 4 steps</h2>
+          <ol>
+            <li><b>Output → Device:</b> pick your DAC. Prefer <b>asio</b> or <b>wasapi … exclusive</b>: Cadenza then has the device to itself and Windows can't change the sound.</li>
+            <li><b>Output → PCM rate:</b> leave it on <b>Auto</b>. It picks the highest rate your device takes. (Bluetooth: see below.)</li>
+            <li><b>Sound → Find my limit:</b> press <b>Run the test</b>, then <b>Use …</b>. That picks the longest filter your PC handles without stutter.</li>
+            <li>Play something. The <b>Now playing</b> page shows the whole path the sound takes.</li>
+          </ol>
+          <p class="small muted">Something wrong? Output → <b>Refresh</b> looks for devices again (after plugging something in), and errors show under the song title at the bottom.</p>
+        </div>
+        <div class="card">
+          <h2>Your setup: which recipe?</h2>
+          <h3>USB DAC or dongle (cable to headphones)</h3>
+          <p>Device: asio or wasapi exclusive. PCM rate: Auto. Bits: 24 or 32. Filter: from Find my limit. If the device name says DSD, you can also try Output mode → DSD (see DSD below).</p>
+          <h3>Bluetooth headphones (e.g. through a FiiO Air Link)</h3>
+          <p>Bluetooth squeezes the sound to fit the radio link. The best mode, <b>aptX Lossless</b>, is only lossless at <b>44.1 kHz / 16-bit</b>. So set PCM rate <b>44.1 kHz</b> and bits <b>16</b>. At that rate no upsampling happens, so the filter choice doesn't matter; Cadenza still adds EQ, volume and clean dither. Higher rates make the link switch to a lossy mode, which is worse.</p>
+          <h3>Laptop speakers or "Speakers (…)" without "exclusive"</h3>
+          <p>That's Windows' shared mode: Windows mixes and resamples everything itself. Fine for casual listening; pick an exclusive device for the full effect.</p>
+        </div>
+        <div class="card">
+          <h2>Filters, explained</h2>
+          <p>Upsampling needs a <b>filter</b>: the recipe for computing the in-between points. Filter names look like <code>sinc-l-1m</code>:</p>
+          <dl>
+            <dt>The length (4k … 16m)</dt><dd>How many points of the music the filter looks at for each new point ("taps"). Longer = sharper cut-off above the audible range and more precise timing, but more work for your PC. 64k is already far beyond what DAC chips do; 1M and up is "as good as it gets". Find my limit tells you how far your PC goes.</dd>
+            <dt>l = linear phase</dt><dd>Treats every frequency the same in time. The faint "ringing" of the filter is spread before and after each sound. The usual, most accurate choice.</dd>
+            <dt>m = minimum phase</dt><dd>All the ringing comes after the sound, none before. Some people find it sounds more natural on drums; timing between frequencies shifts slightly.</dd>
+            <dt>a = apodizing (la, ma)</dt><dd>Cuts a little earlier, just below the top of the range, which also cleans up ringing that was already baked into the recording. Good for older CDs.</dd>
+            <dt>Families</dt><dd><b>sinc</b>: the classic, good default. <b>closed-form</b>: sharpest cut for its length. <b>poly-sinc-gauss</b>: gentlest, least ringing. <b>sinc-xtr</b>: extremely long (8M/16M), for strong PCs. <b>sinc-mx</b>: keeps the same shape at every output rate. <b>poly-sinc-ext3</b>: short and light, for weak PCs.</dd>
+          </dl>
+          <p class="small muted">Not sure? <b>sinc-l</b> at the longest length Find my limit marks safe.</p>
+        </div>
+        <div class="card">
+          <h2>Words you'll see</h2>
+          <dl>
+            <dt>Exclusive mode</dt><dd>Cadenza has the device to itself: no Windows mixer, no other app's sounds, no hidden resampling. Other apps go silent on that device while Cadenza plays.</dd>
+            <dt>ASIO / WASAPI</dt><dd>Two ways Windows talks to sound devices. Both can be exclusive. ASIO comes from the device maker's driver (e.g. "FiiO ASIO Driver"); WASAPI is Windows' own. Sound is the same; use whichever works.</dd>
+            <dt>Sample rate (kHz)</dt><dd>How many points per second. 44.1 kHz is CD. 705.6 kHz is 16× that. Higher only helps if a good filter computes the extra points.</dd>
+            <dt>Bit depth (16 / 24 / 32)</dt><dd>How fine each point is. 24-bit is more than enough for any DAC; 16 only for Bluetooth or old devices.</dd>
+            <dt>Dither / noise shaping</dt><dd>When the numbers are rounded to fit the bit depth, dither turns the rounding error into a faint, even hiss far below hearing. Noise shapers push that hiss up to frequencies you can't hear. "Auto" picks for you.</dd>
+            <dt>DSD</dt><dd>A different format: one bit per point, millions of points per second. Some DACs sound their best on it. A <b>modulator</b> converts the music to DSD; higher DSD rates (DSD256, 512…) need much more computing.</dd>
+            <dt>Bit-perfect</dt><dd>Sends the file exactly as it is: no upsampling, EQ or volume change. Useful to compare.</dd>
+            <dt>Headroom / soft clipper</dt><dd>Filters can briefly overshoot on very loud recordings. Headroom lowers the level a little (−3 dB) so nothing distorts; the soft clipper rounds off anything that still would.</dd>
+            <dt>EQ, room correction, crossfeed</dt><dd>EQ changes the tone. Room correction (Room &amp; measure page) fixes your room's echoes for speakers. Crossfeed (Headphones) makes headphones sound more like speakers in front of you.</dd>
+            <dt>GPU</dt><dd>Your graphics card can run very long filters faster than the CPU. "Automatic" uses it when Cadenza was built with GPU support.</dd>
+            <dt>Speed 7.5× (Find my limit)</dt><dd>Your PC computes 7.5 seconds of music per second. Anything under 1× stutters; Cadenza calls 1.5× and up safe.</dd>
+          </dl>
+        </div>
       </div>
     </section>
     <section class="view" data-view="appearance" hidden>
@@ -700,6 +771,19 @@ function paint(s) {
   if (!loaded) loadSettings(s.settings);
 }
 
+function devicePlain() {
+  const v = $('device').value || '', b = v.split('|')[0];
+  const t = {
+    asio: 'In plain words: ASIO talks to the device through its maker\'s driver, with Cadenza in sole control. Best choice when it works.',
+    wasapi: 'In plain words: Windows\' own exclusive mode: Cadenza has the device to itself, nothing in between. As good as ASIO.',
+    cpal: 'In plain words: shared mode. Windows mixes all apps and may resample the sound. Pick an "exclusive" entry for the full effect.',
+    coreaudio: 'In plain words: macOS\'s own audio path, with Cadenza in control of the device.',
+    alsa: 'In plain words: Linux\'s direct path to the device (hw: entries are untouched by the system mixer).',
+    endpoint: 'In plain words: another computer running "cadenza endpoint" next to the DAC; the finished sound streams to it.',
+    null: 'In plain words: no sound. For testing only.',
+  }[b] || '';
+  $('device-plain').textContent = v.endsWith('not connected') ? '' : t;
+}
 function paintDeviceCaps() {
   const d = status?.output_dsd;
   if (!status?.output) { $('device-caps').textContent = ''; return; }
@@ -738,12 +822,26 @@ function fillDsdRates() {
     : `staged: long filter to ${khz(r.hz_44 / (r.multiple <= 256 ? 8 : 16))} / ${khz(r.hz_48 / (r.multiple <= 256 ? 8 : 16))}, then a ×${r.multiple <= 256 ? 8 : 16} polyphase stage, then the ${$('dsd_modulator').selectedOptions[0]?.textContent || ''}.`) : '';
 }
 
+function filterPlain(id) {
+  const m = /^(poly-sinc-gauss|poly-sinc-ext3|closed-form|sinc-xtr|sinc-mx|sinc|custom)-?(la|ma|l|m)?-?(.*)$/.exec(id || '');
+  if (!m) return '';
+  if (m[1] === 'custom') return 'A filter you made in the filter designer.';
+  const fam = { sinc: 'The classic upsampling filter', 'closed-form': 'The sharpest cut-off for its length', 'poly-sinc-gauss': 'The gentlest filter, with the least ringing', 'sinc-xtr': 'An extremely long filter for strong PCs', 'sinc-mx': 'A long filter that keeps the same shape at every rate', 'poly-sinc-ext3': 'A short, light filter for slower PCs' }[m[1]];
+  const ph = { l: 'linear phase (most accurate timing; the usual choice)', m: 'minimum phase (no ringing before sounds)', la: 'linear phase, apodizing (also cleans up ringing baked into older recordings)', ma: 'minimum phase, apodizing (no pre-ringing, cleans up older recordings)' }[m[2]] || '';
+  const len = m[3].toLowerCase(), big = /m$/.test(len) || /long|xla/.test(len);
+  return `In plain words: ${fam}, ${ph}. ${big ? 'Very long: needs a capable PC.' : 'Light on the PC.'} Run "Find my limit" to see how long a filter yours handles. More in the Guide.`;
+}
 function filterInfo() {
+  $('filter-plain').textContent = filterPlain($('filter').value);
   const f = filters.find(x => x.id === $('filter').value);
   if (!f && $('filter').value.startsWith('custom-')) { $('filter-info').textContent = 'A filter from the filter designer (below).'; return; }
   $('filter-info').textContent = f ? `${f.family} · ${f.taps_at_rate?.toLocaleString()} taps at ×${Math.round(f.out_rate / f.in_rate)} · transition ${Math.round(f.transition_hz)} Hz (${(f.transition_percent ?? 0).toFixed(3)} %) · stopband ${Math.round(f.stopband_db)} dB · latency ${((f.latency_seconds || 0) * 1000).toFixed(1)} ms · ${f.window} window` : '';
 }
 function ditherInfo() {
+  const v = $('dither').value;
+  $('dither-plain').textContent = v === 'none' ? 'In plain words: no dither. Rounding to the bit depth can leave faint distortion on quiet passages; only for testing.'
+    : v === 'auto' ? 'In plain words: Cadenza picks the best way to hide rounding noise for your output. Leave this on Auto if unsure.'
+    : 'In plain words: hides the tiny rounding error as a faint hiss, pushed where you can\'t hear it. Auto is a safe choice.';
   const st = status?.signal_path?.stages?.find(x => x.id === 'dither');
   if ($('dither').value === 'auto') { $('dither-info').textContent = st?.params?.auto ? `now: ${st.detail}` : 'chosen per output from the DAC noise floor below; the pick shows here while playing'; return; }
   const d = dithers.find(x => x.id === $('dither').value);
@@ -822,6 +920,7 @@ function fillDevices() {
   }
   $('device').innerHTML = html;
   if (want) $('device').value = want;
+  devicePlain();
 }
 async function refreshDevices(reconnect) {
   const b = $('dev-refresh'); b.disabled = true; b.textContent = 'Looking…';
@@ -921,6 +1020,7 @@ $('headroom_db').onchange = () => save({ dsp: { headroom_db: $('headroom_db').va
 $('soft_clip').onchange = () => save({ dsp: { soft_clip: $('soft_clip').checked } });
 $('bits').onchange = () => save({ output: { bits: num('bits') } });
 $('rate').onchange = () => save({ output: { rate: /^\d+$/.test($('rate').value) ? Number($('rate').value) : $('rate').value } });
+$('device').addEventListener('change', devicePlain);
 $('device').onchange = () => { const [backend, ...rest] = $('device').value.split('|'); save({ output: { backend, device: rest.join('|') } }); };
 $('endpoints').onclick = (e) => { const b = e.target.closest('[data-ep]'); if (b) { $('device').value = 'endpoint|' + b.dataset.ep; save({ output: { backend: 'endpoint', device: b.dataset.ep } }); } };
 $('dsd_rate').onchange = () => { $('dsd_rate').dataset.want = $('dsd_rate').value; fillDsdRates(); save({ dsp: { dsd_rate: $('dsd_rate').value } }); };
