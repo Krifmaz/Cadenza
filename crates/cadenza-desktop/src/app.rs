@@ -1,6 +1,7 @@
 //! The window: state, messages, the shell (sidebar, player bar) and page switching. The
 //! engine runs in this process; pages read its status and call it directly.
 
+use crate::icons::{icon, Icon};
 use crate::pages;
 use crate::theme::{self, Appearance, Btn};
 use crate::ui::{self, El};
@@ -73,18 +74,18 @@ impl Page {
         }
     }
 
-    fn icon(self) -> &'static str {
+    fn icon(self) -> Icon {
         match self {
-            Page::Now => "▶",
-            Page::Library => "♫",
-            Page::Guide => "?",
-            Page::Sound => "≡",
-            Page::Filters => "∿",
-            Page::Output => "▭",
-            Page::Room => "◉",
-            Page::System => "▣",
-            Page::Encore => "☰",
-            Page::Appearance => "◐",
+            Page::Now => Icon::Play,
+            Page::Library => Icon::Library,
+            Page::Guide => Icon::Guide,
+            Page::Sound => Icon::Sliders,
+            Page::Filters => Icon::Wave,
+            Page::Output => Icon::Speaker,
+            Page::Room => Icon::Room,
+            Page::System => Icon::Monitor,
+            Page::Encore => Icon::Cloud,
+            Page::Appearance => Icon::Palette,
         }
     }
 }
@@ -174,6 +175,7 @@ pub enum Message {
     Room(pages::room::Msg),
     System(pages::system::Msg),
     Encore(pages::encore::Msg),
+    Appearance(pages::appearance::Msg),
     Shot(crate::shot::Msg),
     Nothing,
 }
@@ -203,6 +205,7 @@ pub struct App {
     pub room: pages::room::State,
     pub system: pages::system::State,
     pub encore: pages::encore::State,
+    pub picker: pages::appearance::Picker,
     pub shot: Option<crate::shot::State>,
     pub quitting: bool,
     pub ticks: u64,
@@ -244,6 +247,7 @@ impl App {
             room: Default::default(),
             system: Default::default(),
             encore: Default::default(),
+            picker: Default::default(),
             shot: crate::shot::State::from_env(),
             quitting: false,
             ticks: 0,
@@ -504,6 +508,10 @@ impl App {
             Message::Sound(m) => pages::sound::update(self, m),
             Message::Filters(m) => pages::filters::update(self, m),
             Message::Room(m) => pages::room::update(self, m),
+            Message::Appearance(m) => {
+                pages::appearance::update(self, m);
+                Task::none()
+            }
             Message::System(m) => pages::system::update(self, m),
             Message::Encore(m) => pages::encore::update(self, m),
             Message::Shot(m) => crate::shot::update(self, m),
@@ -556,10 +564,7 @@ impl App {
         let l = theme::look();
         let on = self.page == p;
         let mut r = row![
-            text(p.icon())
-                .size(15)
-                .width(20)
-                .color(if on { l.accent } else { l.muted }),
+            icon(p.icon(), 18.0, if on { l.accent } else { l.muted }),
             text(p.name()).size(14.5),
         ]
         .spacing(10)
@@ -601,7 +606,7 @@ impl App {
             nav = nav.push(self.nav_button(p, false));
         }
         let brand = row![
-            container(text("♪").size(18).color(l.on_accent))
+            container(icon(Icon::Music, 18.0, l.on_accent))
                 .width(34)
                 .height(34)
                 .center(34)
@@ -669,7 +674,7 @@ impl App {
             Some(h) => container(image(h).width(52).height(52))
                 .style(theme::inset)
                 .into(),
-            None => container(text("♪").size(22).color(l.on_accent))
+            None => container(icon(Icon::Music, 24.0, l.on_accent))
                 .width(52)
                 .height(52)
                 .center(52)
@@ -707,18 +712,22 @@ impl App {
             .align_y(Alignment::Center)
             .width(Length::FillPortion(3));
 
-        let icon_btn = |s: &'static str, tr: Transport| -> El<'_> {
-            button(text(s).size(17))
-                .padding([6, 10])
+        let icon_btn = |i: Icon, tr: Transport| -> El<'_> {
+            button(icon(i, 20.0, l.text))
+                .padding([8, 10])
                 .style(theme::btn(Btn::Ghost))
                 .on_press(Message::Transport(tr))
                 .into()
         };
         let playing = st.state == PlayState::Playing;
         let toggle = button(
-            container(text(if playing { "❚❚" } else { "▶" }).size(18))
-                .center_x(44)
-                .center_y(44),
+            container(icon(
+                if playing { Icon::Pause } else { Icon::Play },
+                20.0,
+                l.on_accent,
+            ))
+            .center_x(44)
+            .center_y(44),
         )
         .padding(0)
         .style(theme::play_btn)
@@ -741,10 +750,10 @@ impl App {
         .align_y(Alignment::Center);
         let ctrls = column![
             row![
-                icon_btn("⏮", Transport::Prev),
+                icon_btn(Icon::Prev, Transport::Prev),
                 toggle,
-                icon_btn("⏭", Transport::Next),
-                icon_btn("■", Transport::Stop)
+                icon_btn(Icon::Next, Transport::Next),
+                icon_btn(Icon::Stop, Transport::Stop)
             ]
             .spacing(8)
             .align_y(Alignment::Center),
@@ -754,7 +763,15 @@ impl App {
         .align_x(Alignment::Center)
         .width(Length::FillPortion(4));
         let vol = row![
-            text("🔊").size(15).color(l.muted),
+            icon(
+                if st.volume_linear <= 0.0 {
+                    Icon::Mute
+                } else {
+                    Icon::Volume
+                },
+                20.0,
+                l.muted,
+            ),
             slider(0.0..=1.0, st.volume_linear, Message::VolumeDrag)
                 .step(0.01)
                 .style(theme::range)

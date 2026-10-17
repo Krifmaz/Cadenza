@@ -8,6 +8,7 @@
 
 mod app;
 mod covers;
+mod icons;
 mod pages;
 mod platform;
 mod shot;

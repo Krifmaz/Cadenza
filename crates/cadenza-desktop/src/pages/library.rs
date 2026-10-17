@@ -2,6 +2,7 @@
 //! this engine.
 
 use crate::app::{App, Message};
+use crate::icons::{icon, Icon};
 use crate::theme::{self, Btn};
 use crate::ui::{self, El};
 use cadenza::engine::{Command, Track};
@@ -515,7 +516,7 @@ fn encore(app: &App) -> El<'_> {
         let tracks = a["tracks"].as_array().cloned().unwrap_or_default();
         let art: El = match app.cover(Some(&format!("/api/encore/cover/{id}"))) {
             Some(h) => image(h).width(160).height(160).into(),
-            None => container(text("♪").size(40).color(l.on_accent))
+            None => container(icon(Icon::Music, 48.0, l.on_accent))
                 .width(160)
                 .height(160)
                 .center(160)

@@ -586,3 +586,12 @@ pub fn scroll(theme: &Theme, status: scrollable::Status) -> scrollable::Style {
     s.container = container::Style::default();
     s
 }
+
+/// A plain box filled with `c`, for colour previews.
+pub fn swatch_box(c: Color) -> impl Fn(&Theme) -> container::Style {
+    move |_| container::Style {
+        background: Some(Background::Color(c)),
+        border: border(look().border, 1.0, 12.0),
+        ..Default::default()
+    }
+}

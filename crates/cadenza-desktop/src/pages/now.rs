@@ -1,6 +1,7 @@
 //! Now playing: the track, what the engine does to it (signal path) and the queue.
 
 use crate::app::{App, Message, Transport};
+use crate::icons::{icon, Icon};
 use crate::theme::{self, Badge, Btn};
 use crate::ui::{self, El};
 use cadenza_dsp::signal_path::Endpoint;
@@ -13,7 +14,7 @@ pub fn view(app: &App) -> El<'_> {
     let t = st.track.as_ref();
     let art: El = match app.cover(t.and_then(|t| t.cover.as_deref())) {
         Some(h) => container(image(h).width(180).height(180)).into(),
-        None => container(text("♪").size(64).color(l.on_accent))
+        None => container(icon(Icon::Music, 72.0, l.on_accent))
             .width(180)
             .height(180)
             .center(180)
