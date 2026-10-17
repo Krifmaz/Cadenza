@@ -542,6 +542,45 @@ pub fn choose_rate(
     }
 }
 
+/// A listed device seen as an [`Output`] that never opens: lets [`choose_rate`] and
+/// [`choose_dsd`] answer "what would playback open?" without touching the hardware.
+pub struct Probe(pub DeviceInfo);
+
+impl Output for Probe {
+    fn name(&self) -> String {
+        format!("{} · {}", self.0.backend, self.0.name)
+    }
+    fn open(&mut self, _: OutputFormat) -> Result<OutputFormat, OutputError> {
+        Err(OutputError::Backend("a probe does not open".into()))
+    }
+    fn supports(&self, rate: u32, bits: u32) -> bool {
+        (self.0.rates.is_empty() || self.0.rates.contains(&rate))
+            && (self.0.bits.is_empty() || self.0.bits.contains(&bits))
+    }
+    fn dsd_caps(&self) -> DsdCaps {
+        self.0.dsd.clone()
+    }
+    fn exclusive(&self) -> bool {
+        self.0.exclusive
+    }
+    fn write(&mut self, _: &[i32]) -> Result<(), OutputError> {
+        Ok(())
+    }
+    fn pause(&mut self, _: bool) -> Result<(), OutputError> {
+        Ok(())
+    }
+    fn drain(&mut self) -> Result<(), OutputError> {
+        Ok(())
+    }
+    fn discard(&mut self) -> Result<(), OutputError> {
+        Ok(())
+    }
+    fn close(&mut self) {}
+    fn format(&self) -> Option<OutputFormat> {
+        None
+    }
+}
+
 /// Pick the DSD rate and packing to open for a source of `family_base` (44 100 or 48 000):
 /// `wanted` if the output takes it, otherwise the highest lower rate it does; `packing` is
 /// kept when possible, and native falls back to DoP (never the other way round, because a

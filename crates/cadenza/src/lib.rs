@@ -14,6 +14,7 @@ pub mod encore;
 pub mod endpoint;
 pub mod engine;
 pub mod library;
+pub mod limit;
 pub mod output;
 pub mod render;
 pub mod room;

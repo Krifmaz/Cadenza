@@ -108,6 +108,9 @@
   .badge.accent { color: color-mix(in srgb, var(--accent) 55%, var(--text)); border-color: rgba(var(--accent-rgb), .4); background: rgba(var(--accent-rgb), .14); }
   .hint { font-size: 12.5px; color: var(--muted); margin: -4px 0 12px; }
   .err { color: var(--err); }
+  .badge.bad { color: var(--err); border-color: rgba(239,68,68,.35); background: rgba(239,68,68,.1); }
+  .meter { height: 6px; border-radius: 99px; background: var(--panel-2); overflow: hidden; margin: 10px 0; }
+  .meter i { display: block; height: 100%; width: 0; background: var(--accent); transition: width .3s; }
   input[type=range] { width: 100%; accent-color: var(--accent); }
   details summary { cursor: pointer; margin: 4px 0 8px; }
   table { width: 100%; border-collapse: collapse; font-size: 13px; } th { text-align: left; color: var(--muted); font-weight: 600; padding: 4px; } td { padding: 4px; } td input, td select { padding: 6px 8px; }
@@ -288,6 +291,15 @@
             <label class="field"><span>Headroom (dB; empty = auto)</span><input type="number" id="headroom_db" step="0.5" min="-30" max="0" placeholder="auto (−3 dB when upsampling)"></label>
             <div><label class="switch" style="margin-top:26px"><input type="checkbox" id="soft_clip"><i></i><b>Soft clipper</b></label></div>
           </div>
+        </div>
+        <div class="card">
+          <h2>Find my limit</h2>
+          <div class="hint" style="margin:0 0 12px">Tests how long a filter this computer can run for your device and settings without the sound breaking up. Takes about a minute; pause the music first. Longer filters are more precise but need more computing power.</div>
+          <div class="row"><button class="primary" id="lim-start">Run the test</button><button id="lim-cancel" hidden>Cancel</button><button id="lim-use" hidden></button></div>
+          <div class="meter" id="lim-meter" hidden><i></i></div>
+          <div class="small muted" id="lim-status"></div>
+          <div class="small" id="lim-summary" style="margin-top:8px"></div>
+          <div style="overflow-x:auto"><table id="lim-table" hidden><thead><tr><th>Filter</th><th>Length</th><th>Speed</th><th></th></tr></thead><tbody></tbody></table></div>
         </div>
         <div class="card">
           <h2>Noise shaping</h2>
@@ -841,6 +853,41 @@ function paintEq() {
     <td><input type="number" data-k="q" value="${b.q ?? 0.707}" step="0.01" min="0.1" max="20"></td>
     <td><button data-rm="${i}">✕</button></td></tr>`).join('') || '<tr><td colspan="5" class="muted">No bands.</td></tr>';
 }
+
+// ----- Find my limit -----------------------------------------------------------------
+const VERDICT = { safe: ['ok', 'safe'], tight: ['warn', 'tight'], too_slow: ['bad', 'too slow'], error: ['bad', 'error'] };
+const tapsLabel = (t) => t >= 1 << 20 ? (t / (1 << 20)) + 'M' : (t / 1024) + 'k';
+let limTimer = null;
+function paintLimit(p) {
+  const running = p.state === 'running';
+  $('lim-start').disabled = running; $('lim-cancel').hidden = !running;
+  $('lim-meter').hidden = !running;
+  $('lim-meter').firstElementChild.style.width = p.total ? `${(p.done / p.total) * 100}%` : '4%';
+  const r = p.report || {};
+  $('lim-status').textContent = running ? `Testing ${p.current}… (${p.done}/${p.total || '?'})`
+    : p.state === 'cancelled' ? 'Cancelled.' : p.state === 'error' ? '' : r.output ? `${r.output} · ${r.conversion} · ${r.compute}` : '';
+  $('lim-summary').textContent = p.state === 'error' ? (p.error || 'The test failed.') : (p.state === 'done' ? r.summary || '' : '');
+  $('lim-summary').className = 'small' + (p.state === 'error' ? ' err' : '');
+  const rows = r.rows || [];
+  $('lim-table').hidden = !rows.length;
+  $('lim-table').tBodies[0].innerHTML = rows.map(x => {
+    const [cls, word] = VERDICT[x.verdict] || ['', x.verdict];
+    return `<tr title="${esc(x.note)}"><td>${esc(x.filter)}${x.current ? ' <span class="badge accent">now</span>' : ''}</td><td>${tapsLabel(x.taps)} taps</td><td>${x.speed ? x.speed.toFixed(1) + '×' : '–'}</td><td><span class="badge ${cls}">${word}</span></td></tr>`;
+  }).join('');
+  const rec = p.state === 'done' && r.recommended;
+  $('lim-use').hidden = !rec || $('filter').value === rec;
+  if (rec) { $('lim-use').textContent = `Use ${rec}`; $('lim-use').dataset.id = rec; }
+  clearTimeout(limTimer);
+  if (running) limTimer = setTimeout(pollLimit, 700);
+}
+const pollLimit = () => api('GET', '/api/limit').then(paintLimit).catch(() => {});
+$('lim-start').onclick = async () => {
+  $('lim-summary').textContent = '';
+  try { paintLimit(await api('POST', '/api/limit/start')); } catch (e) { $('lim-summary').textContent = e.message; $('lim-summary').className = 'small err'; }
+};
+$('lim-cancel').onclick = () => api('POST', '/api/limit/cancel').then(paintLimit).catch(() => {});
+$('lim-use').onclick = async () => { const id = $('lim-use').dataset.id; $('filter').value = id; await save({ dsp: { filter: id } }); $('lim-use').hidden = true; };
+pollLimit();
 
 async function save(patch) {
   try { $('error').textContent = ''; await api('PUT', '/api/settings', patch); } catch (e) { $('error').textContent = e.message; }

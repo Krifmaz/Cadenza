@@ -4,6 +4,7 @@
 
 pub mod decoder;
 mod worker;
+pub(crate) use worker::pipeline_config;
 
 use crate::config::Settings;
 use crate::decode::Source;

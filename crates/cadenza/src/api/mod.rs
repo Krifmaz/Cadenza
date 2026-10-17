@@ -30,6 +30,14 @@ pub const INDEX_HTML: &str = include_str!("../../static/index.html");
 struct AppState {
     engine: Engine,
     room: Arc<Mutex<crate::room::Room>>,
+    limit: Arc<LimitTest>,
+}
+
+/// The limit test: one at a time, run on its own thread.
+#[derive(Default)]
+struct LimitTest {
+    progress: Mutex<crate::limit::Progress>,
+    cancel: std::sync::atomic::AtomicBool,
 }
 
 /// A JSON error with a status code.
@@ -103,9 +111,13 @@ pub fn router_with_room(engine: Engine, room: crate::room::Room) -> Router {
         )
         .route("/api/library/browse", get(library_browse))
         .route("/api/library/scan", get(library_scan))
+        .route("/api/limit", get(limit_status))
+        .route("/api/limit/start", post(limit_start))
+        .route("/api/limit/cancel", post(limit_cancel))
         .with_state(AppState {
             engine,
             room: Arc::new(Mutex::new(room)),
+            limit: Arc::default(),
         })
 }
 
@@ -516,6 +528,71 @@ pub fn merge(into: &mut Value, patch: &Value) {
         }
         (a, b) => *a = b.clone(),
     }
+}
+
+async fn limit_status(State(st): State<AppState>) -> Json<Value> {
+    let mut p = st.limit.progress.lock().unwrap().clone();
+    if p.state.is_empty() {
+        p.state = "idle".into();
+    }
+    Json(json!(p))
+}
+
+/// Start the limit test for the current settings and device. Refused while music plays:
+/// the test needs the whole machine, and playback would stutter during it.
+async fn limit_start(State(st): State<AppState>) -> Result<Json<Value>, ApiError> {
+    if st.engine.status().state == crate::engine::PlayState::Playing {
+        return Err(bad(
+            "Pause the music first: the test uses the whole computer for about a minute.",
+        ));
+    }
+    {
+        let mut p = st.limit.progress.lock().unwrap();
+        if p.state == "running" {
+            return Err(bad("The test is already running."));
+        }
+        *p = crate::limit::Progress {
+            state: "running".into(),
+            current: "looking at the device".into(),
+            ..Default::default()
+        };
+    }
+    st.limit
+        .cancel
+        .store(false, std::sync::atomic::Ordering::Relaxed);
+    let (engine, limit) = (st.engine.clone(), Arc::clone(&st.limit));
+    std::thread::Builder::new()
+        .name("cadenza-limit".into())
+        .spawn(move || {
+            let settings = engine.settings();
+            let device = crate::limit::find_device(&settings, &list_devices());
+            let r = crate::limit::run(&settings, device, &engine.cache(), &limit.cancel, |p| {
+                *limit.progress.lock().unwrap() = p.clone();
+            });
+            let mut p = limit.progress.lock().unwrap();
+            match r {
+                Ok(report) => {
+                    p.done = p.total;
+                    p.current.clear();
+                    p.report = report;
+                    p.state = "done".into();
+                }
+                Err(e) if e == "cancelled" => p.state = "cancelled".into(),
+                Err(e) => {
+                    p.state = "error".into();
+                    p.error = Some(e);
+                }
+            }
+        })
+        .map_err(|e| bad(e.to_string()))?;
+    Ok(limit_status(State(st)).await)
+}
+
+async fn limit_cancel(State(st): State<AppState>) -> Json<Value> {
+    st.limit
+        .cancel
+        .store(true, std::sync::atomic::Ordering::Relaxed);
+    limit_status(State(st)).await
 }
 
 async fn devices() -> Json<Value> {

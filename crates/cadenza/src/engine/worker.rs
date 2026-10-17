@@ -810,43 +810,15 @@ impl Worker {
         let got = self.output_format.unwrap();
 
         let convolution = self.load_convolution();
-        let filter_design = cadenza_dsp::design::FilterDesign::parse(&s.dsp.filter);
-        let filter = FilterKind::parse(&s.dsp.filter).unwrap_or_else(|| {
-            if filter_design.is_none() {
-                log::warn!("unknown filter {:?}, using the default", s.dsp.filter);
-            }
-            FilterKind::default()
-        });
-        let dither = DitherKind::parse(&s.dsp.dither).unwrap_or_else(|| {
-            log::warn!("unknown dither {:?}, using TPDF", s.dsp.dither);
-            DitherKind::Tpdf
-        });
-        let config = PipelineConfig {
-            bit_perfect: s.dsp.bit_perfect,
-            volume: self.volume,
-            eq: s.dsp.eq.clone(),
-            eq_enabled: s.dsp.eq_enabled,
+        let config = pipeline_config(
+            &s,
+            self.volume,
             convolution,
-            filter,
-            attenuation_db: s.dsp.attenuation_db,
-            output_rate: (!got.is_dsd() && got.rate != input.rate).then_some(got.rate),
-            output_bits: got.bits,
-            dither,
-            headroom_db: s.dsp.headroom_db,
-            soft_clip: s.dsp.soft_clip,
-            output_device: Some(self.output_name.clone()),
-            output_mode: if dsd.is_some() {
-                OutputMode::Dsd
-            } else {
-                OutputMode::Pcm
-            },
-            dsd: dsd.unwrap_or_else(|| s.dsp.dsd()),
-            gpu: s.dsp.gpu,
-            matrix: s.matrix.clone(),
-            headphone: s.dsp.headphones,
-            filter_design,
-            dac_noise_floor_db: s.dsp.dac_noise_floor_db,
-        };
+            got,
+            input.rate,
+            dsd,
+            self.output_name.clone(),
+        );
         let pipeline =
             Pipeline::new(input, config, &self.cache).map_err(|e: PipelineError| e.to_string())?;
         if pipeline.channels() as u32 != got.channels {
@@ -1126,5 +1098,56 @@ impl Worker {
         let status = Arc::new(status);
         *self.shared.status.lock().unwrap() = Arc::clone(&status);
         self.emit(Event::Status(status));
+    }
+}
+
+/// The pipeline settings for playing a `input_rate` source into a device opened as `got`
+/// (`dsd`: the DSD rate and packing chosen for it). Shared with the limit test, so it
+/// measures exactly what playback runs.
+pub(crate) fn pipeline_config(
+    s: &Settings,
+    volume: Volume,
+    convolution: Option<Arc<ConvolutionSpec>>,
+    got: OutputFormat,
+    input_rate: u32,
+    dsd: Option<DsdConfig>,
+    device: String,
+) -> PipelineConfig {
+    let filter_design = cadenza_dsp::design::FilterDesign::parse(&s.dsp.filter);
+    let filter = FilterKind::parse(&s.dsp.filter).unwrap_or_else(|| {
+        if filter_design.is_none() {
+            log::warn!("unknown filter {:?}, using the default", s.dsp.filter);
+        }
+        FilterKind::default()
+    });
+    let dither = DitherKind::parse(&s.dsp.dither).unwrap_or_else(|| {
+        log::warn!("unknown dither {:?}, using TPDF", s.dsp.dither);
+        DitherKind::Tpdf
+    });
+    PipelineConfig {
+        bit_perfect: s.dsp.bit_perfect,
+        volume,
+        eq: s.dsp.eq.clone(),
+        eq_enabled: s.dsp.eq_enabled,
+        convolution,
+        filter,
+        attenuation_db: s.dsp.attenuation_db,
+        output_rate: (!got.is_dsd() && got.rate != input_rate).then_some(got.rate),
+        output_bits: got.bits,
+        dither,
+        headroom_db: s.dsp.headroom_db,
+        soft_clip: s.dsp.soft_clip,
+        output_device: Some(device),
+        output_mode: if dsd.is_some() {
+            OutputMode::Dsd
+        } else {
+            OutputMode::Pcm
+        },
+        dsd: dsd.unwrap_or_else(|| s.dsp.dsd()),
+        gpu: s.dsp.gpu,
+        matrix: s.matrix.clone(),
+        headphone: s.dsp.headphones,
+        filter_design,
+        dac_noise_floor_db: s.dsp.dac_noise_floor_db,
     }
 }
