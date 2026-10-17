@@ -625,6 +625,9 @@ Encore's): the engine runs inside it and its control page opens in a native wind
     reaches the page.
 - **Encore page**: server address, username, password and device name. Signing in also makes
   Cadenza a playback device in Encore. A blank password keeps the saved one.
+- **Parametric EQ** (Sound page): a response graph with a point per band to drag, boxes to
+  type frequency (1.2k works), gain and Q, bell / shelf / notch / low and high cut at 12–48
+  dB/oct. Changes play straight away without interrupting the music.
 - **Guide page**: what upsampling does, a four-step setup, recipes (USB DAC, Bluetooth,
   shared mode), filter names and a glossary in plain words; short notes under the main
   controls too.
