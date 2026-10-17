@@ -604,25 +604,25 @@ two playing to the very same samples as the whole. Not yet tried with real disc 
 
 ## Desktop app
 
-Cadenza also comes as a desktop app (`crates/cadenza-desktop`, built with Tauri like
-Encore's): the engine runs inside it and its control page opens in a native window.
+Cadenza also comes as a desktop app (`crates/cadenza-desktop`): a native window built with
+[iced](https://iced.rs) in Rust, with the engine running in the same process. Every page
+calls the engine directly; no web view is involved.
 
 - **Tray icon**: what is playing, Play / Pause, Next, Previous, Show Cadenza, Quit. Closing
   the window keeps the music playing; Quit ends it.
 - **Media keys and the OS media controls**: Windows (SMTC), macOS (Now Playing), Linux (MPRIS:
   GNOME, KDE, `playerctl`).
 - **One instance**: opening it again brings the window forward. The window's size and
-  position are remembered.
+  the look (Appearance page) are remembered.
 - It runs the same services as `cadenza serve` from the same config file (Encore link, UPnP,
-  AirPlay, system input, as configured), and serves the control page on `[server] listen`
-  when that is free, so a phone can still reach it; otherwise on a free local port.
+  AirPlay, system input, as configured), and also serves the web control page on
+  `[server] listen` when that is free, so a phone or Encore can still drive it.
 - **Library page**, two sources feeding the same queue:
   - *Local*: browse drives and folders, play or queue a folder (sub-folders included, a CUE
     sheet stands in for its single-file rip), save folders as shortcuts. Files and folders
     dropped on the window are queued too (they start playing when nothing is).
   - *Encore*: after signing in, browse and search your Encore albums and songs, with covers.
-    Tracks stream from Encore into this engine; the login stays in the engine and never
-    reaches the page.
+    Tracks stream from Encore into this engine; the login stays in the engine.
 - **Encore page**: server address, username, password and device name. Signing in also makes
   Cadenza a playback device in Encore. A blank password keeps the saved one.
 - **Parametric EQ** (Sound page): a response graph with a point per band to drag, boxes to
@@ -633,7 +633,8 @@ Encore's): the engine runs inside it and its control page opens in a native wind
   controls too.
 - **Find my limit** (Sound page): runs the playback chain for your device and settings with
   ever longer filters, times each and offers the longest one this machine runs safely
-  (1.5× real time or faster, no single burst over 250 ms). Pause the music first.
+  (1.5× real time or faster, no single burst over 250 ms) at every rate the device takes.
+  The music pauses and the device is let go during the test.
 - **Devices that come and go**: Output → Refresh looks again; play reopens the device, so
   one plugged in later is found; an unplugged one stops playback with a message and play
   carries on from there once it is back.
@@ -645,22 +646,22 @@ Installers come with each release: `.deb` and `.AppImage` (Linux), `.exe` and `.
 Gatekeeper ask before the first start (on macOS: right-click → Open). To build it yourself:
 
 ```sh
-cargo install tauri-cli --version 2.12.3 --locked
-cd crates/cadenza-desktop
-cargo tauri build --features alsa,wgpu             # Linux (needs libwebkit2gtk-4.1-dev, libayatana-appindicator3-dev)
-cargo tauri build --features wasapi,asio,loopback,wgpu  # Windows
-cargo tauri build --features coreaudio,tap,wgpu    # macOS
+cargo build --release -p cadenza-desktop --features alsa,wgpu             # Linux (needs libgtk-3-dev, libayatana-appindicator3-dev, libxdo-dev)
+cargo build --release -p cadenza-desktop --features wasapi,asio,loopback,wgpu  # Windows
+cargo build --release -p cadenza-desktop --features coreaudio,tap,wgpu    # macOS
+# installers:
+cargo install cargo-packager --version 0.11.8 --locked
+cd crates/cadenza-desktop && cargo packager --release --formats deb,appimage   # or nsis,wix / dmg
 ```
 
-Tested on Linux: the window shows the page and plays, MPRIS reports the track and its
-Play/Pause reaches the engine, and a second launch hands over to the first without starting
-anything. The Windows and macOS builds come from CI; not yet run on those systems.
-
-The Library and Encore pages were tested in a browser against the engine (a local folder,
-and a stand-in Encore server for sign-in, albums, covers, search and playback). Not tested
-here: a real Encore server, drag-and-drop on a real desktop, and anything on Windows or
-macOS. The folder browser lists any folder the engine can read: keep `[server] listen` on
-`127.0.0.1` unless you trust everyone on your network.
+`CADENZA_CONFIG=<file>` runs it on another config file, and `CADENZA_SHOT=<dir>` (with
+`CADENZA_SHOT_PAGES=now,sound:1,…`) saves a screenshot of each page and quits, which is how
+the pages were checked here (Linux, under Xvfb). Tested on Linux: every page draws, the EQ
+graph uses the engine's own filter maths, a second launch hands over to the first. Not
+tested here: clicking through the pages by hand, the tray menu on a real desktop, and
+anything on Windows or macOS (those builds come from CI). The web page's folder browser
+lists any folder the engine can read: keep `[server] listen` on `127.0.0.1` unless you
+trust everyone on your network.
 
 ## Loopback verification
 
