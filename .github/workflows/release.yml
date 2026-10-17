@@ -85,21 +85,21 @@ jobs:
         include:
           - os: linux
             runner: ubuntu-22.04
-            features: alsa
+            features: alsa,wgpu
             bundles: deb,appimage
             files: |
               target/release/bundle/deb/*.deb
               target/release/bundle/appimage/*.AppImage
           - os: windows
             runner: windows-latest
-            features: wasapi,asio,loopback
+            features: wasapi,asio,loopback,wgpu
             bundles: nsis,msi
             files: |
               target/release/bundle/nsis/*.exe
               target/release/bundle/msi/*.msi
           - os: macos
             runner: macos-latest
-            features: coreaudio,tap
+            features: coreaudio,tap,wgpu
             bundles: dmg
             files: |
               target/release/bundle/dmg/*.dmg

@@ -625,6 +625,15 @@ Encore's): the engine runs inside it and its control page opens in a native wind
     reaches the page.
 - **Encore page**: server address, username, password and device name. Signing in also makes
   Cadenza a playback device in Encore. A blank password keeps the saved one.
+- **Guide page**: what upsampling does, a four-step setup, recipes (USB DAC, Bluetooth,
+  shared mode), filter names and a glossary in plain words; short notes under the main
+  controls too.
+- **Find my limit** (Sound page): runs the playback chain for your device and settings with
+  ever longer filters, times each and offers the longest one this machine runs safely
+  (1.5× real time or faster, no single burst over 250 ms). Pause the music first.
+- **Devices that come and go**: Output → Refresh looks again; play reopens the device, so
+  one plugged in later is found; an unplugged one stops playback with a message and play
+  carries on from there once it is back.
 - **System input page**: on/off, whole system or one application (picked from the running
   programs). No config file editing needed for any of these; changes are saved to it.
 
@@ -635,9 +644,9 @@ Gatekeeper ask before the first start (on macOS: right-click → Open). To build
 ```sh
 cargo install tauri-cli --version 2.12.3 --locked
 cd crates/cadenza-desktop
-cargo tauri build --features alsa                  # Linux (needs libwebkit2gtk-4.1-dev, libayatana-appindicator3-dev)
-cargo tauri build --features wasapi,asio,loopback  # Windows
-cargo tauri build --features coreaudio,tap         # macOS
+cargo tauri build --features alsa,wgpu             # Linux (needs libwebkit2gtk-4.1-dev, libayatana-appindicator3-dev)
+cargo tauri build --features wasapi,asio,loopback,wgpu  # Windows
+cargo tauri build --features coreaudio,tap,wgpu    # macOS
 ```
 
 Tested on Linux: the window shows the page and plays, MPRIS reports the track and its
