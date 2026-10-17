@@ -1,8 +1,7 @@
 # Cadenza releases: on a `v*` tag (or a manual run with a version), build the `cadenza` binary for Linux x86_64
 # (alsa + cuda + wgpu) and aarch64 (alsa + wgpu) on Ubuntu 22.04 (glibc 2.35: runs on Debian bookworm / trixie and newer)
-# and publish a GitHub release with one tar.gz per architecture plus SHA256SUMS, together with the desktop app
-# (one archive per OS) and its installers: Omnistall (github.com/Krifmaz/Omnistall) with Cadenza's manifest
-# (packaging/omnistall/cadenza.toml) stamped in, one CadenzaSetup per OS.
+# and publish a GitHub release with one tar.gz per architecture plus SHA256SUMS, together with the desktop app's
+# installers (Linux .deb / .AppImage, Windows .exe, macOS .dmg).
 # Encore's "Download tools" fetches the tar.gz files for server-side processing (`cadenza render`).
 name: Release
 
@@ -79,7 +78,6 @@ jobs:
           if-no-files-found: error
 
   desktop:
-    # The desktop app as a plain archive per OS: what the CadenzaSetup installers download.
     name: Desktop app ${{ matrix.os }}
     strategy:
       fail-fast: true
@@ -88,12 +86,22 @@ jobs:
           - os: linux
             runner: ubuntu-22.04
             features: alsa,wgpu
+            formats: deb,appimage
+            files: |
+              target/release/bundle/*.deb
+              target/release/bundle/*.AppImage
           - os: windows
             runner: windows-latest
             features: wasapi,asio,loopback,wgpu
+            formats: nsis
+            files: |
+              target/release/bundle/*.exe
           - os: macos
             runner: macos-latest
             features: coreaudio,tap,wgpu
+            formats: dmg
+            files: |
+              target/release/bundle/*.dmg
     runs-on: ${{ matrix.runner }}
     steps:
       - uses: actions/checkout@v4
@@ -102,136 +110,26 @@ jobs:
         if: matrix.os == 'linux'
         run: >
           sudo apt-get update && sudo apt-get install -y libasound2-dev pkg-config
-          libgtk-3-dev libayatana-appindicator3-dev libxdo-dev libxkbcommon-dev
+          libgtk-3-dev libayatana-appindicator3-dev libxdo-dev libxkbcommon-dev file
       - uses: Swatinem/rust-cache@v2
         with:
           key: desktop-iced-${{ matrix.os }}
-      - name: Version
-        id: ver
-        shell: bash
-        run: |
-          ver="${{ inputs.version || github.ref_name }}"
-          echo "ver=${ver#v}" >> "$GITHUB_OUTPUT"
       - name: Build the app
         run: cargo build --release --locked -p cadenza-desktop --features ${{ matrix.features }}
-      - name: Archive (Linux)
-        if: matrix.os == 'linux'
-        run: |
-          set -eux
-          mkdir -p dist/Cadenza
-          strip target/release/cadenza-desktop
-          cp target/release/cadenza-desktop dist/Cadenza/
-          cp crates/cadenza-desktop/icons/128x128.png dist/Cadenza/cadenza.png
-          tar -C dist -czf "dist/Cadenza-Desktop-${{ steps.ver.outputs.ver }}-linux-x86_64.tar.gz" Cadenza
-          rm -rf dist/Cadenza
-      - name: Archive (Windows)
-        if: matrix.os == 'windows'
-        shell: pwsh
-        run: |
-          New-Item -ItemType Directory -Force dist | Out-Null
-          Copy-Item target/release/cadenza-desktop.exe dist/Cadenza.exe
-          Compress-Archive -Path dist/Cadenza.exe -DestinationPath "dist/Cadenza-Desktop-${{ steps.ver.outputs.ver }}-windows-x86_64.zip"
-          Remove-Item dist/Cadenza.exe
-      - name: Archive (macOS)
-        if: matrix.os == 'macos'
-        run: |
-          set -eux
-          cargo install cargo-packager --version 0.11.8 --locked
-          (cd crates/cadenza-desktop && cargo packager --release --formats app)
-          # Apple Silicon refuses unsigned bundles: sign ad hoc (no Developer ID here).
-          codesign --force --deep --sign - target/release/bundle/Cadenza.app
-          mkdir -p dist
-          tar -C target/release/bundle -czf "dist/Cadenza-Desktop-${{ steps.ver.outputs.ver }}-macos-aarch64.tar.gz" Cadenza.app
+      - name: cargo-packager
+        run: cargo install cargo-packager --version 0.11.8 --locked
+      - name: Build the installers
+        working-directory: crates/cadenza-desktop
+        run: cargo packager --release --formats ${{ matrix.formats }}
       - uses: actions/upload-artifact@v4
         with:
           name: desktop-${{ matrix.os }}
-          path: dist/*
-          if-no-files-found: error
-
-  setup:
-    # CadenzaSetup: the Omnistall installer with Cadenza's manifest inside, per OS.
-    name: CadenzaSetup ${{ matrix.os }}
-    strategy:
-      fail-fast: true
-      matrix:
-        include:
-          - os: linux
-            runner: ubuntu-22.04
-          - os: windows
-            runner: windows-latest
-          - os: macos
-            runner: macos-latest
-    runs-on: ${{ matrix.runner }}
-    steps:
-      - uses: actions/checkout@v4
-      - uses: actions/checkout@v4
-        with:
-          repository: Krifmaz/Omnistall
-          path: omnistall
-      - uses: dtolnay/rust-toolchain@stable
-        with:
-          targets: ${{ matrix.os == 'macos' && 'x86_64-apple-darwin,aarch64-apple-darwin' || '' }}
-      - uses: Swatinem/rust-cache@v2
-        with:
-          workspaces: omnistall
-          key: omnistall-${{ matrix.os }}
-      - name: The manifest for this version
-        shell: bash
-        run: |
-          ver="${{ inputs.version || github.ref_name }}"
-          ver="${ver#v}"
-          py=$(command -v python3 || command -v python)
-          "$py" - "$ver" <<'EOF'
-          import re, sys
-          src = open("packaging/omnistall/cadenza.toml").read()
-          out = re.sub(r'(?m)^version = ".*"$', f'version = "{sys.argv[1]}"', src, count=1)
-          open("cadenza.toml", "w").write(out)
-          EOF
-          grep -m1 '^version' cadenza.toml
-          mkdir -p dist
-      - name: Linux (AppImage)
-        if: matrix.os == 'linux'
-        working-directory: omnistall
-        run: |
-          set -eux
-          sudo apt-get update && sudo apt-get install -y libfuse2 file
-          cargo build --release --locked -p installer-gui
-          cargo xtask validate ../cadenza.toml
-          cargo xtask appdir --binary target/release/omnistall --out ../Cadenza.AppDir --manifest ../cadenza.toml
-          curl -sSL -o appimagetool "https://github.com/AppImage/appimagetool/releases/download/continuous/appimagetool-x86_64.AppImage"
-          chmod +x appimagetool
-          ARCH=x86_64 ./appimagetool --appimage-extract-and-run ../Cadenza.AppDir ../dist/CadenzaSetup-linux-x86_64.AppImage
-      - name: Windows (.exe)
-        if: matrix.os == 'windows'
-        working-directory: omnistall
-        shell: pwsh
-        run: |
-          cargo build --release --locked -p installer-gui
-          cargo xtask brand --installer target/release/omnistall.exe --manifest ../cadenza.toml --out ../dist/CadenzaSetup-windows-x86_64.exe
-      - name: macOS (.dmg)
-        if: matrix.os == 'macos'
-        working-directory: omnistall
-        run: |
-          set -eux
-          cargo build --release --locked -p installer-gui --target aarch64-apple-darwin
-          cargo build --release --locked -p installer-gui --target x86_64-apple-darwin
-          lipo -create -output omnistall-universal \
-            target/aarch64-apple-darwin/release/omnistall target/x86_64-apple-darwin/release/omnistall
-          ver=$(grep -m1 '^version' ../cadenza.toml | cut -d'"' -f2)
-          cargo xtask app-bundle --binary omnistall-universal --out "../Cadenza Setup.app" --version "$ver" --manifest ../cadenza.toml
-          codesign --force --deep --sign - "../Cadenza Setup.app"
-          rm -rf ../dmg-root && mkdir ../dmg-root
-          cp -R "../Cadenza Setup.app" ../dmg-root/
-          hdiutil create -volname "Cadenza Setup" -srcfolder ../dmg-root -ov -format UDZO ../dist/CadenzaSetup-macos.dmg
-      - uses: actions/upload-artifact@v4
-        with:
-          name: setup-${{ matrix.os }}
-          path: dist/*
+          path: ${{ matrix.files }}
           if-no-files-found: error
 
   release:
     name: Publish
-    needs: [build, desktop, setup]
+    needs: [build, desktop]
     runs-on: ubuntu-22.04
     steps:
       - uses: actions/download-artifact@v4
@@ -241,6 +139,9 @@ jobs:
       - name: SHA256SUMS
         working-directory: dist
         run: |
+          # The desktop installers arrive in per-format folders (deb/, msi/, …): flatten.
+          find . -mindepth 2 -type f -exec mv -t . {} +
+          find . -mindepth 1 -type d -empty -delete
           ls -la
           sha256sum * > SHA256SUMS
           cat SHA256SUMS
@@ -252,6 +153,8 @@ jobs:
           generate_release_notes: true
           files: |
             dist/*.tar.gz
-            dist/*.zip
-            dist/CadenzaSetup-*
+            dist/*.deb
+            dist/*.AppImage
+            dist/*.exe
+            dist/*.dmg
             dist/SHA256SUMS

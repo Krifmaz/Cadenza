@@ -48,18 +48,24 @@ dirs.workspace = true
 [target.'cfg(target_os = "linux")'.dependencies]
 gtk = "0.18"
 
-# The macOS .app (`cargo packager --release --formats app`), shipped in a tar.gz that
-# Omnistall installs; see packaging/omnistall/.
+# Installers (`cargo packager --release` after `cargo build --release -p cadenza-desktop`).
 [package.metadata.packager]
 product-name = "Cadenza"
 identifier = "app.cadenza.desktop"
 category = "Music"
 description = "High-end upsampling audio engine"
+long-description = "Cadenza: an open-source upsampling engine for your DAC – long sinc filters, noise shaping, DSD modulators, room correction – in its own native window, with a tray and media keys."
 publisher = "Cadenza contributors"
 out-dir = "../../target/release/bundle"
 binaries-dir = "../../target/release"
 binaries = [{ path = "cadenza-desktop", main = true }]
 icons = ["icons/32x32.png", "icons/128x128.png", "icons/128x128@2x.png", "icons/icon.icns", "icons/icon.ico"]
+
+[package.metadata.packager.deb]
+depends = ["libxkbcommon-x11-0", "libgtk-3-0", "libayatana-appindicator3-1"]
+
+[package.metadata.packager.nsis]
+installer-mode = "currentUser"
 
 [package.metadata.packager.macos]
 minimum-system-version = "10.15"

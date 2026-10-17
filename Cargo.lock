@@ -792,7 +792,7 @@ checksum = "fc652a48c352aef3ea3aed32080501cf3ef6ed5da78602a020c991775b0aff04"
 
 [[package]]
 name = "cadenza"
-version = "3.0.2"
+version = "3.0.3"
 dependencies = [
  "aes",
  "alsa",
@@ -839,7 +839,7 @@ dependencies = [
 
 [[package]]
 name = "cadenza-desktop"
-version = "3.0.2"
+version = "3.0.3"
 dependencies = [
  "cadenza",
  "cadenza-dsp",
@@ -860,7 +860,7 @@ dependencies = [
 
 [[package]]
 name = "cadenza-dsp"
-version = "3.0.2"
+version = "3.0.3"
 dependencies = [
  "cudarc",
  "dirs",

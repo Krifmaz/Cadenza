@@ -641,27 +641,19 @@ calls the engine directly; no web view is involved.
 - **System input page**: on/off, whole system or one application (picked from the running
   programs). No config file editing needed for any of these; changes are saved to it.
 
-**Installing**: each release has one **CadenzaSetup** per system:
-`CadenzaSetup-windows-x86_64.exe`, `CadenzaSetup-macos.dmg` (Apple Silicon) and
-`CadenzaSetup-linux-x86_64.AppImage`. It is [Omnistall](https://github.com/Krifmaz/Omnistall)
-with Cadenza's manifest (`packaging/omnistall/cadenza.toml`) built in: double-click, press
-**Install**, and it downloads the matching `Cadenza-Desktop-<version>-<os>` archive from the
-same release, checks it against `SHA256SUMS`, installs it for your user only (no administrator
-password), and adds Start Menu / Launchpad / app-menu and Desktop shortcuts. Running it again
-offers **Update**, **Repair** or **Uninstall**. Nothing is code-signed yet, so Windows
-SmartScreen and macOS Gatekeeper ask before the first start (on macOS: right-click → Open).
-
-To build it yourself:
+Installers come with each release: `.exe` (Windows), `.dmg` (macOS), `.deb` and `.AppImage`
+(Linux). They are not code-signed, so Windows SmartScreen and macOS Gatekeeper ask before the
+first start (on macOS: right-click → Open). To update, close Cadenza (also from the tray) and
+run the new installer. To build it yourself:
 
 ```sh
 cargo build --release -p cadenza-desktop --features alsa,wgpu             # Linux (needs libgtk-3-dev, libayatana-appindicator3-dev, libxdo-dev)
 cargo build --release -p cadenza-desktop --features wasapi,asio,loopback,wgpu  # Windows
 cargo build --release -p cadenza-desktop --features coreaudio,tap,wgpu    # macOS
+# installers:
+cargo install cargo-packager --version 0.11.8 --locked
+cd crates/cadenza-desktop && cargo packager --release --formats deb,appimage   # or nsis / dmg
 ```
-
-The release workflow (`.github/workflows/release.yml`) packs the app per OS and builds the
-CadenzaSetup installers from Omnistall's source with `cargo xtask brand` / `appdir` /
-`app-bundle --manifest`.
 
 `CADENZA_CONFIG=<file>` runs it on another config file, and `CADENZA_SHOT=<dir>` (with
 `CADENZA_SHOT_PAGES=now,sound:1,…`) saves a screenshot of each page and quits, which is how
