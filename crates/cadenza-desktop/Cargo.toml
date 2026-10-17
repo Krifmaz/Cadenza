@@ -1,6 +1,6 @@
 [package]
 name = "cadenza-desktop"
-description = "Cadenza as a desktop app: the engine and its control page in a native window, with a tray and media keys"
+description = "Cadenza as a desktop app: the engine with a native window (iced), a tray and media keys"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
@@ -27,16 +27,19 @@ pipewire = ["cadenza/pipewire"]
 loopback = ["cadenza/loopback"]
 tap = ["cadenza/tap"]
 
-[build-dependencies]
-tauri-build = { version = "2", features = [] }
-
 [dependencies]
 cadenza = { path = "../cadenza", default-features = false }
-tauri = { version = "2", features = ["tray-icon", "image-png"] }
-tauri-plugin-single-instance = "2"
-tauri-plugin-window-state = "2"
+cadenza-dsp = { path = "../cadenza-dsp" }
+iced = { version = "0.14", features = ["canvas", "image", "tokio", "svg"] }
+tray-icon = "0.21"
 souvlaki = { version = "0.8", default-features = false, features = ["use_zbus"] }
-tokio = { version = "1", features = ["net"] }
+tokio = { version = "1", features = ["net", "rt-multi-thread", "macros"] }
+ureq = { version = "2", features = ["json"] }
+serde = { workspace = true }
+serde_json.workspace = true
 log.workspace = true
 env_logger = "0.11"
-serde_json.workspace = true
+dirs.workspace = true
+
+[target.'cfg(target_os = "linux")'.dependencies]
+gtk = "0.18"
