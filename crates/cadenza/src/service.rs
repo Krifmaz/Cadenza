@@ -21,12 +21,24 @@ pub struct Services {
 /// Start the engine and the configured receivers. `path` is the config file the settings
 /// are saved to when they change.
 pub fn start(config: &Config, path: PathBuf) -> Services {
-    let persist_cfg = Mutex::new(config.clone());
+    // One shared copy of the full config and one path, so engine settings and the system
+    // input (changed live from the web UI) both save to the same file.
+    let shared = Arc::new(Mutex::new(config.clone()));
+    let path = Arc::new(path);
+    let (sc, sp) = (shared.clone(), path.clone());
     let persist = Box::new(move |s: &Settings| {
-        let mut c = persist_cfg.lock().unwrap_or_else(|e| e.into_inner());
+        let mut c = sc.lock().unwrap_or_else(|e| e.into_inner());
         c.apply(s);
-        if let Err(e) = c.save(&path) {
-            log::warn!("could not save {}: {e}", path.display());
+        if let Err(e) = c.save(&sp) {
+            log::warn!("could not save {}: {e}", sp.display());
+        }
+    });
+    let (sc, sp) = (shared.clone(), path.clone());
+    crate::system::set_persist(move |sys: &crate::system::SystemConfig| {
+        let mut c = sc.lock().unwrap_or_else(|e| e.into_inner());
+        c.system = sys.clone();
+        if let Err(e) = c.save(&sp) {
+            log::warn!("could not save {}: {e}", sp.display());
         }
     });
     let engine = Engine::start(

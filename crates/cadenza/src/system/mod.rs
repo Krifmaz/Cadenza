@@ -309,6 +309,74 @@ pub fn start_global(engine: Engine, cfg: &SystemConfig) {
     }
 }
 
+/// A callback that writes the system configuration back to `config.toml`, registered by
+/// `cadenza::service::start`. The web UI changes the config live; this makes it stick.
+type Persist = Box<dyn Fn(&SystemConfig) + Send>;
+static PERSIST: Mutex<Option<Persist>> = Mutex::new(None);
+
+/// Register the function that persists the system configuration (called once at startup).
+pub fn set_persist(f: impl Fn(&SystemConfig) + Send + 'static) {
+    *PERSIST.lock().unwrap() = Some(Box::new(f));
+}
+
+fn persist(cfg: &SystemConfig) {
+    if let Some(f) = PERSIST.lock().unwrap().as_ref() {
+        f(cfg);
+    }
+}
+
+/// Stop the system input but remember the configuration (so `status` still shows it off).
+pub fn stop_global(cfg: &SystemConfig) {
+    let mut g = GLOBAL.lock().unwrap();
+    g.input = None;
+    g.config = Some(cfg.clone());
+    g.error = None;
+}
+
+/// Apply a configuration from the web UI: start or stop the capture, then save it. The
+/// status (`running`, `error`) reflects the result.
+pub fn set_config(engine: Engine, cfg: &SystemConfig) {
+    if cfg.enabled {
+        start_global(engine, cfg);
+    } else {
+        stop_global(cfg);
+    }
+    persist(cfg);
+}
+
+/// Candidate applications to capture (`mode = "app"`): the names of running programs, for
+/// the web UI's picker. Empty where the platform has no cheap way to list them; the UI
+/// still accepts a typed name.
+pub fn apps() -> Vec<String> {
+    #[allow(unused_mut)]
+    let mut v: Vec<String> = Vec::new();
+    #[cfg(target_os = "linux")]
+    {
+        if let Ok(dir) = std::fs::read_dir("/proc") {
+            for e in dir.flatten() {
+                if e.file_name()
+                    .to_str()
+                    .is_some_and(|n| n.bytes().all(|b| b.is_ascii_digit()))
+                {
+                    if let Ok(comm) = std::fs::read_to_string(e.path().join("comm")) {
+                        let name = comm.trim();
+                        if !name.is_empty() {
+                            v.push(name.to_string());
+                        }
+                    }
+                }
+            }
+        }
+    }
+    #[cfg(all(windows, feature = "loopback"))]
+    {
+        v = loopback::process_names();
+    }
+    v.sort_unstable();
+    v.dedup();
+    v
+}
+
 /// `GET /api/system`: whether this build can, the configuration, and what is arriving.
 pub fn status() -> serde_json::Value {
     let g = GLOBAL.lock().unwrap();
@@ -508,5 +576,34 @@ mod tests {
             vec![1.0, -1.0, 2.0, -2.0, 3.0, -3.0]
         );
         assert!(interleave_planar(&[]).is_empty());
+    }
+
+    #[test]
+    fn apps_are_sorted_and_deduped() {
+        let a = apps();
+        assert!(a.windows(2).all(|w| w[0] <= w[1]), "sorted");
+        assert!(a.windows(2).all(|w| w[0] != w[1]), "deduped");
+        // On Linux the /proc walk sees running processes (this test binary among them).
+        #[cfg(target_os = "linux")]
+        assert!(!a.is_empty());
+    }
+
+    #[test]
+    fn set_config_off_persists_and_reports_off() {
+        let saved = Arc::new(Mutex::new(None));
+        let s = saved.clone();
+        set_persist(move |c: &SystemConfig| *s.lock().unwrap() = Some(c.clone()));
+        let cfg = SystemConfig {
+            enabled: false,
+            mode: SystemMode::App,
+            app: "firefox".into(),
+            ..Default::default()
+        };
+        set_config(engine(), &cfg);
+        // The configuration is handed to the persist callback verbatim …
+        let got = saved.lock().unwrap().clone().expect("persisted");
+        assert_eq!((got.enabled, got.app.as_str()), (false, "firefox"));
+        // … and nothing is running.
+        assert_eq!(status()["running"], false);
     }
 }

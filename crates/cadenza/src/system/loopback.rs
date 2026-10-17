@@ -106,6 +106,38 @@ impl Drop for Capture {
 
 /// The process id of a running program by its executable name (`firefox`, `firefox.exe`,
 /// any case); the lowest id wins (usually the parent of a process tree).
+/// The executable names (without `.exe`) of every running process, for the web UI's app
+/// picker.
+pub fn process_names() -> Vec<String> {
+    let mut out = Vec::new();
+    // SAFETY: a snapshot handle we close; entries are plain data.
+    unsafe {
+        let Ok(snap) = CreateToolhelp32Snapshot(TH32CS_SNAPPROCESS, 0) else {
+            return out;
+        };
+        let mut entry = PROCESSENTRY32W {
+            dwSize: std::mem::size_of::<PROCESSENTRY32W>() as u32,
+            ..Default::default()
+        };
+        let mut ok = Process32FirstW(snap, &mut entry).is_ok();
+        while ok {
+            let len = entry
+                .szExeFile
+                .iter()
+                .position(|&c| c == 0)
+                .unwrap_or(entry.szExeFile.len());
+            let exe = String::from_utf16_lossy(&entry.szExeFile[..len]);
+            let name = exe_name(&exe);
+            if !name.is_empty() {
+                out.push(name);
+            }
+            ok = Process32NextW(snap, &mut entry).is_ok();
+        }
+        let _ = CloseHandle(snap);
+    }
+    out
+}
+
 pub fn find_process(name: &str) -> Option<u32> {
     let want = exe_name(name);
     // SAFETY: a snapshot handle we close; entries are plain data.

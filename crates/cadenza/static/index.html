@@ -410,6 +410,12 @@
         <div id="sys-info"></div>
         <div class="hint" style="margin-top:14px"><code>cadenza serve --system sink</code> adds an output device "Cadenza" that any app (or the whole desktop) can play to; <code>--system app:&lt;name&gt;</code> takes one application's sound before the mixer. Or <code>[system]</code> in the config. Linux: PipeWire (build feature <code>pipewire</code>). Windows 10 2004+: process loopback (feature <code>loopback</code>); there <code>sink</code> means all apps except Cadenza, as Windows has no virtual device without a signed driver. macOS 14.2+: process taps (feature <code>tap</code>), muted, so <code>sink</code> takes all apps but Cadenza and they are heard only through it.</div>
       </div>
+      <div class="card">
+        <h2>Upsample system audio<label class="switch" style="margin:0 0 0 auto"><input type="checkbox" id="sys-enabled"><i></i></label></h2>
+        <label class="field"><span>Source</span><select id="sys-mode"><option value="sink">Whole system (all apps)</option><option value="app">One application</option></select></label>
+        <label class="field" id="sys-app-field"><span>Application</span><input type="text" id="sys-app" list="sys-apps" placeholder="e.g. spotify, chrome, firefox"><datalist id="sys-apps"></datalist></label>
+        <div class="hint">Whole system captures everything except Cadenza. Set a different device as your system default so you do not hear it twice, and let Cadenza output to your DAC in exclusive mode. Changes apply right away.</div>
+      </div>
     </section>
 
     <!-- Appearance -->
@@ -819,6 +825,33 @@ async function paintSystem() {
   } catch (e) { $('sys-info').textContent = e.message; }
 }
 paintSystem(); setInterval(paintSystem, 2000);
+
+// System-input controls.
+let sysName = 'Cadenza', sysLatency = 150;
+const sysAppField = () => { $('sys-app-field').style.display = $('sys-mode').value === 'app' ? '' : 'none'; };
+async function sysApply() {
+  const cfg = { enabled: $('sys-enabled').checked, mode: $('sys-mode').value, app: $('sys-app').value.trim(), name: sysName, latency_ms: sysLatency };
+  try { await api('POST', '/api/system', cfg); } catch (e) { $('sys-info').textContent = e.message; }
+  paintSystem();
+}
+async function initSystem() {
+  try {
+    const j = await api('GET', '/api/system');
+    if (!j.available) { ['sys-enabled', 'sys-mode', 'sys-app'].forEach(id => $(id).disabled = true); return; }
+    const c = j.config || {};
+    sysName = c.name || 'Cadenza'; sysLatency = c.latency_ms || 150;
+    $('sys-enabled').checked = !!c.enabled;
+    $('sys-mode').value = c.mode === 'app' ? 'app' : 'sink';
+    $('sys-app').value = c.app || '';
+    sysAppField();
+    const a = await api('GET', '/api/system/apps');
+    $('sys-apps').innerHTML = (a.apps || []).map(n => `<option value="${esc(n)}">`).join('');
+  } catch (e) { /* leave the form as-is */ }
+  $('sys-enabled').addEventListener('change', sysApply);
+  $('sys-mode').addEventListener('change', () => { sysAppField(); sysApply(); });
+  $('sys-app').addEventListener('change', sysApply);
+}
+initSystem();
 
 // Filter designer.
 const fdNum = (x) => Number(x).toFixed(4).replace(/0+$/, '').replace(/\.$/, '');

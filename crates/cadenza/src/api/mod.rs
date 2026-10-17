@@ -82,7 +82,11 @@ pub fn router_with_room(engine: Engine, room: crate::room::Room) -> Router {
         .route("/api/room/verify", post(room_verify))
         .route(
             "/api/system",
-            get(|| async { Json(crate::system::status()) }),
+            get(|| async { Json(crate::system::status()) }).post(system_set),
+        )
+        .route(
+            "/api/system/apps",
+            get(|| async { Json(json!({ "apps": crate::system::apps() })) }),
         )
         .with_state(AppState {
             engine,
@@ -273,6 +277,24 @@ async fn put_settings(
     validate(&settings).map_err(bad)?;
     st.engine.update_settings(settings);
     Ok(Json(current))
+}
+
+/// `POST /api/system`: turn the system input on or off and pick the source (whole system,
+/// or one application), from the web UI. The body is a `SystemConfig`; the reply is the new
+/// status.
+async fn system_set(
+    State(st): State<AppState>,
+    Json(cfg): Json<crate::system::SystemConfig>,
+) -> Result<Json<Value>, ApiError> {
+    if !crate::system::AVAILABLE {
+        return Err(bad("the system input is not available in this build"));
+    }
+    if cfg.enabled && cfg.mode == crate::system::SystemMode::App && cfg.app.trim().is_empty() {
+        return Err(bad("pick an application to capture"));
+    }
+    let engine = st.engine.clone();
+    crate::system::set_config(engine, &cfg);
+    Ok(Json(crate::system::status()))
 }
 
 /// Checks beyond what deserialising enforces (shared with the Encore command handler).
