@@ -41,6 +41,14 @@ enum Chain {
 }
 
 impl Chain {
+    /// New EQ bands in place; `false` when the chain has to be rebuilt instead.
+    fn set_eq(&mut self, bands: &[cadenza_dsp::Band], enabled: bool) -> bool {
+        match self {
+            Chain::Pipeline(p) => p.set_eq(bands, enabled),
+            Chain::Passthrough(_) => false,
+        }
+    }
+
     fn process_pcm(&mut self, pcm: &[f64]) -> Vec<i32> {
         match self {
             Chain::Pipeline(p) => p.process(pcm),
@@ -405,7 +413,21 @@ impl Worker {
         dsp.muted = false;
         old_dsp.volume_db = 0.0;
         old_dsp.muted = false;
-        let chain_changed = old_dsp != dsp || old.matrix != self.settings.matrix;
+        let mut chain_changed = old_dsp != dsp || old.matrix != self.settings.matrix;
+        // Only the EQ moved (a band dragged on the page): retune it in place, no rebuild.
+        let eq_only = chain_changed && !output_changed && old.matrix == self.settings.matrix && {
+            let mut a = old_dsp.clone();
+            a.eq = dsp.eq.clone();
+            a.eq_enabled = dsp.eq_enabled;
+            a == dsp
+        };
+        if eq_only {
+            if let Some(c) = &mut self.chain {
+                if c.set_eq(&self.settings.dsp.eq, self.settings.dsp.eq_enabled) {
+                    chain_changed = false;
+                }
+            }
+        }
         // A DSD pass-through chain depends on the volume too (any gain means re-modulating).
         let passthrough_affected = self.chain.as_ref().is_some_and(Chain::is_passthrough)
             && old.dsp.volume_db != self.settings.dsp.volume_db;

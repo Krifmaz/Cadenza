@@ -296,6 +296,7 @@ mod tests {
             gain_db: -2.0,
             q: 1.0,
             enabled: true,
+            slope_db: 12,
         }];
         Engine::start(
             s,

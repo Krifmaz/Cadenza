@@ -41,6 +41,10 @@ pub struct Band {
     /// Bands can be kept in the list but switched off.
     #[serde(default = "default_true")]
     pub enabled: bool,
+    /// Low- and high-pass only: steepness in dB per octave (12, 24, 36 or 48; a
+    /// Butterworth cascade, with `q` shaping the corner). Other shapes ignore it.
+    #[serde(default = "default_slope")]
+    pub slope_db: u32,
 }
 
 fn default_q() -> f64 {
@@ -48,6 +52,9 @@ fn default_q() -> f64 {
 }
 fn default_true() -> bool {
     true
+}
+fn default_slope() -> u32 {
+    12
 }
 
 impl Band {
@@ -59,7 +66,33 @@ impl Band {
             gain_db,
             q,
             enabled: true,
+            slope_db: 12,
         }
+    }
+
+    /// The biquads this band runs as: one, or for a steep low/high-pass a Butterworth
+    /// cascade of `slope_db / 12` sections. `q` relative to 0.7071 sharpens (or softens)
+    /// the corner: it scales the section with the highest Q.
+    pub fn sections(&self, rate: f64) -> Vec<Coefficients> {
+        let n = match self.kind {
+            BandKind::LowPass | BandKind::HighPass => (self.slope_db / 12).clamp(1, 4) as usize,
+            _ => 1,
+        };
+        if n == 1 {
+            return vec![Coefficients::design(self, rate)];
+        }
+        let order = 2 * n;
+        let shape = self.q.max(0.01) / std::f64::consts::FRAC_1_SQRT_2;
+        (1..=n)
+            .map(|k| {
+                let angle = (2 * k - 1) as f64 * PI / (2 * order) as f64;
+                let mut q = 1.0 / (2.0 * angle.cos());
+                if k == n {
+                    q *= shape;
+                }
+                Coefficients::design(&Band { q, ..*self }, rate)
+            })
+            .collect()
     }
 }
 
@@ -201,8 +234,9 @@ impl Equalizer {
         let stages = bands
             .iter()
             .filter(|b| b.enabled)
-            .map(|b| Biquad {
-                c: Coefficients::design(b, rate),
+            .flat_map(|b| b.sections(rate))
+            .map(|c| Biquad {
+                c,
                 state: vec![(0.0, 0.0); channels],
             })
             .collect();
@@ -211,6 +245,20 @@ impl Equalizer {
             channels,
             bands,
             stages,
+        }
+    }
+
+    /// Swap in new `bands` while running. With the same number of biquads the filter
+    /// memory carries over, so dragging a band while music plays does not click.
+    pub fn retune(&mut self, bands: &[Band]) {
+        let fresh = Self::new(self.rate as u32, self.channels, bands);
+        if fresh.stages.len() == self.stages.len() {
+            for (old, new) in self.stages.iter_mut().zip(fresh.stages) {
+                old.c = new.c;
+            }
+            self.bands = fresh.bands;
+        } else {
+            *self = fresh;
         }
     }
 
@@ -288,6 +336,27 @@ mod tests {
     }
 
     #[test]
+    fn steep_cuts_are_butterworth_cascades() {
+        for (slope, per_octave) in [(12, 12.0), (24, 24.0), (36, 36.0), (48, 48.0)] {
+            let hp = Band {
+                kind: BandKind::HighPass,
+                freq: 1000.0,
+                gain_db: 0.0,
+                q: std::f64::consts::FRAC_1_SQRT_2,
+                enabled: true,
+                slope_db: slope,
+            };
+            let eq = Equalizer::new(96000, 1, &[hp]);
+            assert_eq!(eq.active_stages(), slope as usize / 12);
+            // -3 dB at the corner, flat far above, `slope` dB/oct far below.
+            assert!((eq.response_db(1000.0) + 3.01).abs() < 0.05, "{slope}");
+            assert!(eq.response_db(20000.0).abs() < 0.05, "{slope}");
+            let drop = eq.response_db(62.5) - eq.response_db(125.0);
+            assert!((drop + per_octave).abs() < 0.5, "{slope}: {drop}");
+        }
+    }
+
+    #[test]
     fn shelves_pass_and_notch_behave() {
         let rate = 44100.0;
         let low = Equalizer::new(
@@ -299,6 +368,7 @@ mod tests {
                 gain_db: -4.0,
                 q: std::f64::consts::FRAC_1_SQRT_2,
                 enabled: true,
+                slope_db: 12,
             }],
         );
         assert!((low.response_db(10.0) + 4.0).abs() < 0.05);
@@ -312,6 +382,7 @@ mod tests {
                 gain_db: 3.0,
                 q: std::f64::consts::FRAC_1_SQRT_2,
                 enabled: true,
+                slope_db: 12,
             }],
         );
         assert!((high.response_db(20000.0) - 3.0).abs() < 0.1);
@@ -324,6 +395,7 @@ mod tests {
                 gain_db: 0.0,
                 q: std::f64::consts::FRAC_1_SQRT_2,
                 enabled: true,
+                slope_db: 12,
             }],
         );
         assert!(
@@ -341,6 +413,7 @@ mod tests {
                 gain_db: 0.0,
                 q: std::f64::consts::FRAC_1_SQRT_2,
                 enabled: true,
+                slope_db: 12,
             }],
         );
         assert!(hp.response_db(50.0) < -50.0);
@@ -353,6 +426,7 @@ mod tests {
                 gain_db: 0.0,
                 q: 10.0,
                 enabled: true,
+                slope_db: 12,
             }],
         );
         assert!(notch.response_db(60.0) < -60.0);

@@ -108,6 +108,18 @@
   .badge.accent { color: color-mix(in srgb, var(--accent) 55%, var(--text)); border-color: rgba(var(--accent-rgb), .4); background: rgba(var(--accent-rgb), .14); }
   .hint { font-size: 12.5px; color: var(--muted); margin: -4px 0 12px; }
   .err { color: var(--err); }
+  .eq-graph { position: relative; background: var(--bg-2); border: 1px solid var(--border); border-radius: 12px; overflow: hidden; }
+  .eq-graph svg { display: block; width: 100%; height: 260px; touch-action: none; user-select: none; }
+  .eq-graph text { fill: var(--faint); font-size: 11px; font-family: inherit; }
+  .eq-strip { display: grid; grid-template-columns: repeat(auto-fill, minmax(118px, 1fr)); gap: 8px; margin-top: 10px; }
+  .eq-band { border: 1px solid var(--border); border-radius: 10px; padding: 8px; background: var(--panel-2); border-top: 3px solid var(--c); }
+  .eq-band.sel { box-shadow: 0 0 0 2px var(--c); }
+  .eq-band.off { opacity: .5; }
+  .eq-band .top { display: flex; align-items: center; gap: 6px; margin-bottom: 6px; }
+  .eq-band .top input[type=checkbox] { accent-color: var(--c); }
+  .eq-band .top button { margin-left: auto; padding: 0 6px; min-height: 0; line-height: 1.4; }
+  .eq-band select, .eq-band input[type=text] { width: 100%; padding: 4px 6px; font-size: 12.5px; margin-bottom: 4px; }
+  .eq-band label { display: block; font-size: 10.5px; color: var(--faint); text-transform: uppercase; letter-spacing: .04em; }
   .guide p, .guide li { color: var(--text); font-size: 14px; line-height: 1.55; }
   .guide p { margin: 0 0 10px; }
   .guide ul, .guide ol { margin: 0 0 10px; padding-left: 20px; }
@@ -343,8 +355,13 @@
         </div>
         <div class="card wide">
           <h2>Parametric EQ <label class="switch"><input type="checkbox" id="eq_enabled"><i></i>On</label></h2>
-          <div style="overflow-x:auto"><table><thead><tr><th>Type</th><th>Frequency (Hz)</th><th>Gain (dB)</th><th>Q</th><th></th></tr></thead><tbody id="eq"></tbody></table></div>
-          <div class="row" style="margin-top:10px"><button id="eq-add">Add band</button><button class="primary" id="eq-save">Apply EQ</button></div>
+          <div class="row" style="margin-bottom:10px">
+            <button id="eq-add">+ Band</button><button id="eq-flat" title="Set every gain to 0 dB">Flat</button><button id="eq-clear" title="Remove every band">Clear</button>
+            <label class="small muted" style="margin-left:auto">Range <select id="eq-range" style="width:auto;display:inline-block"><option value="6">±6 dB</option><option value="12" selected>±12 dB</option><option value="24">±24 dB</option></select></label>
+          </div>
+          <div class="eq-graph"><svg id="eq-svg" viewBox="0 0 1000 300" preserveAspectRatio="none"></svg></div>
+          <div class="eq-strip" id="eq"></div>
+          <div class="hint" style="margin-top:10px">Drag a point to move it (left/right = frequency, up/down = gain), scroll on it to change the width (Q), double-click the graph to add a bell there. Or type the numbers in the boxes: frequency in Hz (1.2k works), gain in dB. Changes play straight away. Up to 16 bands.</div>
         </div>
         <div class="card wide">
           <h2>Matrix <label class="switch"><input type="checkbox" id="matrix_enabled"><i></i>On</label></h2>
@@ -944,13 +961,92 @@ function fillRates(cur) {
   $('rate').value = cur;
   if (!$('rate').value) $('rate').value = 'auto';
 }
+// ----- EQ: graph + band strip --------------------------------------------------------
+// The response is drawn with the same Audio-EQ-Cookbook formulas the engine runs
+// (cadenza-dsp eq.rs), at 48 kHz.
+const EQ_RATE = 48000, EQ_FMIN = 20, EQ_FMAX = 20000, EQ_W = 1000, EQ_H = 300;
+const EQ_COLORS = ['#f97316', '#eab308', '#22c55e', '#06b6d4', '#3b82f6', '#a855f7', '#ec4899', '#ef4444'];
+const EQ_KINDS = [['high-pass', 'Low cut'], ['low-shelf', 'Low shelf'], ['peaking', 'Bell'], ['notch', 'Notch'], ['high-shelf', 'High shelf'], ['low-pass', 'High cut']];
+const EQ_HAS_GAIN = { peaking: 1, 'low-shelf': 1, 'high-shelf': 1 };
+let eqSel = -1;
+const eqColor = (i) => EQ_COLORS[i % EQ_COLORS.length];
+const eqRange = () => Number($('eq-range').value);
+const fx = (f) => Math.log(f / EQ_FMIN) / Math.log(EQ_FMAX / EQ_FMIN) * EQ_W;
+const xf = (x) => EQ_FMIN * Math.pow(EQ_FMAX / EQ_FMIN, Math.min(Math.max(x / EQ_W, 0), 1));
+const gy = (g) => EQ_H / 2 - g / eqRange() * (EQ_H / 2 - 14);
+const yg = (y) => (EQ_H / 2 - y) / (EQ_H / 2 - 14) * eqRange();
+function biquad(kind, f, g, q) {
+  f = Math.min(Math.max(f, 1), EQ_RATE * 0.499); q = Math.max(q, 0.01);
+  const a = Math.pow(10, g / 40), w0 = 2 * Math.PI * f / EQ_RATE, sn = Math.sin(w0), cs = Math.cos(w0), al = sn / (2 * q), s2 = 2 * Math.sqrt(a) * al;
+  const c = {
+    peaking: [1 + al * a, -2 * cs, 1 - al * a, 1 + al / a, -2 * cs, 1 - al / a],
+    'low-shelf': [a * ((a + 1) - (a - 1) * cs + s2), 2 * a * ((a - 1) - (a + 1) * cs), a * ((a + 1) - (a - 1) * cs - s2), (a + 1) + (a - 1) * cs + s2, -2 * ((a - 1) + (a + 1) * cs), (a + 1) + (a - 1) * cs - s2],
+    'high-shelf': [a * ((a + 1) + (a - 1) * cs + s2), -2 * a * ((a - 1) + (a + 1) * cs), a * ((a + 1) + (a - 1) * cs - s2), (a + 1) - (a - 1) * cs + s2, 2 * ((a - 1) - (a + 1) * cs), (a + 1) - (a - 1) * cs - s2],
+    'low-pass': [(1 - cs) / 2, 1 - cs, (1 - cs) / 2, 1 + al, -2 * cs, 1 - al],
+    'high-pass': [(1 + cs) / 2, -(1 + cs), (1 + cs) / 2, 1 + al, -2 * cs, 1 - al],
+    notch: [1, -2 * cs, 1, 1 + al, -2 * cs, 1 - al],
+  }[kind];
+  return c ? c.map(v => v / c[3]) : null;
+}
+function sections(b) {
+  const n = (b.kind === 'low-pass' || b.kind === 'high-pass') ? Math.min(Math.max(Math.floor((b.slope_db || 12) / 12), 1), 4) : 1;
+  if (n === 1) return [biquad(b.kind, b.freq, b.gain_db || 0, b.q ?? 0.707)];
+  const shape = (b.q ?? 0.707) / Math.SQRT1_2, out = [];
+  for (let k = 1; k <= n; k++) { let q = 1 / (2 * Math.cos((2 * k - 1) * Math.PI / (4 * n))); if (k === n) q *= shape; out.push(biquad(b.kind, b.freq, 0, q)); }
+  return out;
+}
+function respDb(c, f) {
+  const w = 2 * Math.PI * f / EQ_RATE, cr = Math.cos(w), ci = -Math.sin(w), c2r = Math.cos(2 * w), c2i = -Math.sin(2 * w);
+  const nr = c[0] + c[1] * cr + c[2] * c2r, ni = c[1] * ci + c[2] * c2i, dr = 1 + c[4] * cr + c[5] * c2r, di = c[4] * ci + c[5] * c2i;
+  return 10 * Math.log10((nr * nr + ni * ni) / (dr * dr + di * di));
+}
+const bandDb = (b, f) => sections(b).reduce((s, c) => s + (c ? respDb(c, f) : 0), 0);
+function parseHz(v) { v = String(v).trim().toLowerCase().replace(/hz$/, '').trim(); const k = v.endsWith('k'); const n = parseFloat(k ? v.slice(0, -1) : v); return isFinite(n) ? (k ? n * 1000 : n) : null; }
+const hzLabel = (f) => f >= 1000 ? `${+(f / 1000).toFixed(f >= 10000 ? 1 : 2)}k` : `${Math.round(f)}`;
+function paintEqGraph() {
+  const svg = $('eq-svg'), on = $('eq_enabled').checked, r = eqRange();
+  const N = 400, pts = [];
+  const live = eqBands.filter(b => b.enabled !== false);
+  for (let i = 0; i <= N; i++) { const x = i / N * EQ_W, f = xf(x); const g = on ? live.reduce((s, b) => s + bandDb(b, f), 0) : 0; pts.push([x, Math.min(Math.max(gy(g), -50), EQ_H + 50)]); }
+  let h = '';
+  for (const f of [20, 50, 100, 200, 500, 1000, 2000, 5000, 10000, 20000]) h += `<line x1="${fx(f)}" x2="${fx(f)}" y1="0" y2="${EQ_H}" stroke="var(--border)" stroke-width="1"/><text x="${f === 20000 ? fx(f) - 4 : fx(f) + 3}" y="${EQ_H - 5}" ${f === 20000 ? 'text-anchor="end"' : ''}>${hzLabel(f)}</text>`;
+  for (const g of [-r, -r / 2, 0, r / 2, r]) h += `<line x1="0" x2="${EQ_W}" y1="${gy(g)}" y2="${gy(g)}" stroke="var(--border)" stroke-width="${g === 0 ? 1.6 : 1}" ${g === 0 ? '' : 'stroke-dasharray="3 5"'}/><text x="4" y="${gy(g) - 3}">${g > 0 ? '+' : ''}${g}</text>`;
+  eqBands.forEach((b, i) => {
+    if (b.enabled === false || !on) return;
+    const p = [];
+    for (let k = 0; k <= 160; k++) { const x = k / 160 * EQ_W; p.push(`${x.toFixed(1)},${Math.min(Math.max(gy(bandDb(b, xf(x))), -50), EQ_H + 50).toFixed(1)}`); }
+    h += `<polyline points="${p.join(' ')}" fill="none" stroke="${eqColor(i)}" stroke-opacity="${i === eqSel ? .9 : .35}" stroke-width="1.2"/>`;
+  });
+  const line = pts.map(p => `${p[0].toFixed(1)},${p[1].toFixed(1)}`).join(' ');
+  h += `<polygon points="0,${gy(0)} ${line} ${EQ_W},${gy(0)}" fill="rgba(var(--accent-rgb), .18)"/><polyline points="${line}" fill="none" stroke="var(--accent)" stroke-width="2.4"/>`;
+  eqBands.forEach((b, i) => {
+    const y = EQ_HAS_GAIN[b.kind] ? gy(b.gain_db || 0) : gy(Math.max(-r, Math.min(r, bandDb(b, b.freq))));
+    h += `<circle data-band="${i}" cx="${fx(b.freq)}" cy="${y}" r="${i === eqSel ? 10 : 8}" fill="${eqColor(i)}" fill-opacity="${b.enabled === false ? .25 : .9}" stroke="var(--bg)" stroke-width="2" style="cursor:grab"/><text x="${fx(b.freq) - 3.5}" y="${y + 4}" style="fill:var(--bg);font-weight:700;pointer-events:none">${i + 1}</text>`;
+  });
+  svg.innerHTML = h;
+}
 function paintEq() {
-  $('eq').innerHTML = eqBands.map((b, i) => `<tr data-i="${i}">
-    <td><select data-k="kind">${EQ_TYPES.map(t => `<option ${b.kind === t ? 'selected' : ''}>${t}</option>`).join('')}</select></td>
-    <td><input type="number" data-k="freq" value="${b.freq ?? 1000}" min="10" max="40000"></td>
-    <td><input type="number" data-k="gain_db" value="${b.gain_db ?? 0}" step="0.1" min="-24" max="24"></td>
-    <td><input type="number" data-k="q" value="${b.q ?? 0.707}" step="0.01" min="0.1" max="20"></td>
-    <td><button data-rm="${i}">✕</button></td></tr>`).join('') || '<tr><td colspan="5" class="muted">No bands.</td></tr>';
+  $('eq').innerHTML = eqBands.map((b, i) => `<div class="eq-band${i === eqSel ? ' sel' : ''}${b.enabled === false ? ' off' : ''}" data-i="${i}" style="--c:${eqColor(i)}">
+    <div class="top"><input type="checkbox" data-k="enabled" ${b.enabled === false ? '' : 'checked'} title="On/off"><b class="small">${i + 1}</b><button data-rm="${i}" title="Remove">✕</button></div>
+    <select data-k="kind">${EQ_KINDS.map(([id, l]) => `<option value="${id}" ${b.kind === id ? 'selected' : ''}>${l}</option>`).join('')}</select>
+    <label>Frequency</label><input type="text" data-k="freq" value="${hzLabel(b.freq)} Hz">
+    ${EQ_HAS_GAIN[b.kind] ? `<label>Gain</label><input type="text" data-k="gain_db" value="${(b.gain_db || 0).toFixed(1)} dB">` : ''}
+    <label>Q (width)</label><input type="text" data-k="q" value="${(+(b.q ?? 0.707)).toFixed(2)}">
+    ${b.kind === 'low-pass' || b.kind === 'high-pass' ? `<label>Slope</label><select data-k="slope_db">${[12, 24, 36, 48].map(v => `<option value="${v}" ${(b.slope_db || 12) === v ? 'selected' : ''}>${v} dB/oct</option>`).join('')}</select>` : ''}
+  </div>`).join('') || '<div class="small muted">No bands yet. Press + Band, or double-click the graph.</div>';
+  paintEqGraph();
+}
+let eqSaveTimer = null, eqLastSave = 0;
+function eqChanged(now) {
+  clearTimeout(eqSaveTimer);
+  const go = () => { eqLastSave = Date.now(); save({ dsp: { eq: eqBands, eq_enabled: $('eq_enabled').checked } }); };
+  // While dragging: at most ~8 updates a second, and the last position always lands.
+  if (now || Date.now() - eqLastSave > 120) go(); else eqSaveTimer = setTimeout(go, 120);
+}
+function eqAdd(b) {
+  if (eqBands.length >= 16) return;
+  eqBands.push({ kind: 'peaking', freq: 1000, gain_db: 0, q: 0.707, enabled: true, slope_db: 12, ...b });
+  eqSel = eqBands.length - 1; paintEq(); eqChanged(true);
 }
 
 // ----- Find my limit -----------------------------------------------------------------
@@ -1038,11 +1134,59 @@ $('matrix_preset').onchange = () => { matrixInfo(); save({ matrix: { preset: $('
 const stereo = () => ({ mono: $('m_mono').checked, swap: $('m_swap').checked, balance_db: num('m_balance'), mid_side: $('m_mid_side').value });
 for (const id of ['m_mono', 'm_swap', 'm_balance', 'm_mid_side']) $(id).onchange = () => save({ matrix: { stereo: stereo() } });
 $('matrix-save').onclick = () => { try { save({ matrix: { preset: 'custom', outputs: JSON.parse($('matrix_outputs').value || '[]') } }); $('matrix_preset').value = 'custom'; } catch (e) { $('error').textContent = 'matrix outputs: ' + e.message; } };
-$('eq_enabled').onchange = () => save({ dsp: { eq_enabled: $('eq_enabled').checked } });
-$('eq').oninput = (e) => { const tr = e.target.closest('tr[data-i]'); const k = e.target.dataset.k; if (!tr || !k) return; const v = e.target.value; eqBands[+tr.dataset.i][k] = k === 'kind' ? v : Number(v); };
-$('eq').onclick = (e) => { const b = e.target.closest('[data-rm]'); if (b) { eqBands.splice(+b.dataset.rm, 1); paintEq(); } };
-$('eq-add').onclick = () => { eqBands.push({ kind: 'peaking', freq: 1000, gain_db: 0, q: 0.707 }); paintEq(); };
-$('eq-save').onclick = () => save({ dsp: { eq: eqBands, eq_enabled: $('eq_enabled').checked } });
+$('eq_enabled').onchange = () => { paintEqGraph(); save({ dsp: { eq_enabled: $('eq_enabled').checked } }); };
+$('eq').onchange = (e) => {
+  const card = e.target.closest('[data-i]'), k = e.target.dataset.k; if (!card || !k) return;
+  const b = eqBands[+card.dataset.i], v = e.target.value;
+  if (k === 'enabled') b.enabled = e.target.checked;
+  else if (k === 'kind') { b.kind = v; if ((v === 'low-pass' || v === 'high-pass') && !b.slope_db) b.slope_db = 12; }
+  else if (k === 'slope_db') b.slope_db = Number(v);
+  else if (k === 'freq') { const f = parseHz(v); if (f) b.freq = Math.min(Math.max(f, 10), 24000); }
+  else { const n = parseFloat(v); if (isFinite(n)) b[k] = k === 'q' ? Math.min(Math.max(n, 0.1), 20) : Math.min(Math.max(n, -24), 24); }
+  eqSel = +card.dataset.i; paintEq(); eqChanged(true);
+};
+$('eq').addEventListener('keydown', (e) => { if (e.key === 'Enter' && e.target.matches('input[type=text]')) e.target.dispatchEvent(new Event('change', { bubbles: true })); });
+$('eq').onclick = (e) => {
+  const rm = e.target.closest('[data-rm]');
+  if (rm) { eqBands.splice(+rm.dataset.rm, 1); eqSel = -1; paintEq(); eqChanged(true); return; }
+  const card = e.target.closest('[data-i]'); if (card && eqSel !== +card.dataset.i) { eqSel = +card.dataset.i; document.querySelectorAll('.eq-band').forEach(c => c.classList.toggle('sel', +c.dataset.i === eqSel)); paintEqGraph(); }
+};
+$('eq-add').onclick = () => eqAdd({});
+$('eq-flat').onclick = () => { eqBands.forEach(b => { if (EQ_HAS_GAIN[b.kind]) b.gain_db = 0; }); paintEq(); eqChanged(true); };
+$('eq-clear').onclick = () => { if (eqBands.length && confirm('Remove every EQ band?')) { eqBands = []; eqSel = -1; paintEq(); eqChanged(true); } };
+$('eq-range').onchange = paintEqGraph;
+{
+  const svg = $('eq-svg');
+  const pt = (e) => { const r = svg.getBoundingClientRect(); return [(e.clientX - r.left) / r.width * EQ_W, (e.clientY - r.top) / r.height * EQ_H]; };
+  let drag = -1;
+  svg.addEventListener('pointerdown', (e) => {
+    const c = e.target.closest('[data-band]'); if (!c) return;
+    drag = eqSel = +c.dataset.band; svg.setPointerCapture(e.pointerId); paintEq(); e.preventDefault();
+  });
+  svg.addEventListener('pointermove', (e) => {
+    if (drag < 0) return;
+    const [x, y] = pt(e), b = eqBands[drag];
+    b.freq = Math.round(xf(x) * 10) / 10;
+    if (EQ_HAS_GAIN[b.kind]) b.gain_db = Math.round(Math.max(-eqRange(), Math.min(eqRange(), yg(y))) * 10) / 10;
+    paintEqGraph(); eqChanged(false);
+    const card = document.querySelector(`.eq-band[data-i="${drag}"]`);
+    if (card) { card.querySelector('[data-k=freq]').value = `${hzLabel(b.freq)} Hz`; const g = card.querySelector('[data-k=gain_db]'); if (g) g.value = `${(b.gain_db || 0).toFixed(1)} dB`; }
+  });
+  const end = () => { if (drag >= 0) { drag = -1; paintEq(); eqChanged(true); } };
+  svg.addEventListener('pointerup', end); svg.addEventListener('pointercancel', end);
+  svg.addEventListener('wheel', (e) => {
+    const c = e.target.closest('[data-band]'); if (!c) return;
+    e.preventDefault();
+    const b = eqBands[+c.dataset.band];
+    b.q = Math.round(Math.min(20, Math.max(0.1, (b.q ?? 0.707) * (e.deltaY < 0 ? 1.1 : 1 / 1.1))) * 100) / 100;
+    eqSel = +c.dataset.band; paintEq(); eqChanged(false);
+  }, { passive: false });
+  svg.addEventListener('dblclick', (e) => {
+    if (e.target.closest('[data-band]')) return;
+    const [x, y] = pt(e);
+    eqAdd({ freq: Math.round(xf(x)), gain_db: Math.round(Math.max(-eqRange(), Math.min(eqRange(), yg(y))) * 10) / 10, q: 1 });
+  });
+}
 
 // System input.
 async function paintSystem() {

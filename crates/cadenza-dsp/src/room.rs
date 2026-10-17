@@ -379,6 +379,7 @@ mod tests {
                     gain_db: 8.0,
                     q: 5.0,
                     enabled: true,
+                    slope_db: 12,
                 },
                 Band {
                     kind: BandKind::Peaking,
@@ -386,6 +387,7 @@ mod tests {
                     gain_db: -6.0,
                     q: 4.0,
                     enabled: true,
+                    slope_db: 12,
                 },
                 Band {
                     kind: BandKind::HighShelf,
@@ -393,6 +395,7 @@ mod tests {
                     gain_db: -3.0,
                     q: 0.7,
                     enabled: true,
+                    slope_db: 12,
                 },
             ],
         );

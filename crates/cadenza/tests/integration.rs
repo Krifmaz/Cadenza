@@ -370,6 +370,51 @@ fn an_unplugged_device_stops_playback_and_play_picks_up_where_it_was() {
 }
 
 #[test]
+fn eq_changes_while_playing_retune_without_a_rebuild() {
+    let dir = temp_dir("eq-live");
+    let a = dir.join("a.wav");
+    write_sine_wav(&a, 44100, 16, 30.0, 440.0);
+    let mut s = settings(RateSetting::Fixed(88200), 24, "sinc-l-4k", "tpdf", false);
+    s.dsp.eq = vec![cadenza_dsp::Band::peaking(1000.0, -3.0, 1.0)];
+    let e = Engine::start(
+        s.clone(),
+        EngineOptions {
+            cache: CoefficientCache::disabled(),
+            realtime: true,
+            persist: None,
+        },
+    );
+    e.play_queue(vec![Track::from_arg(a.to_str().unwrap())], 0, 0.0);
+    std::thread::sleep(Duration::from_millis(500));
+    let detail = |st: &cadenza::engine::Status| {
+        st.signal_path
+            .as_ref()
+            .and_then(|p| p.stages.iter().find(|x| x.id == "eq").cloned())
+            .map(|x| x.params["bands"][0]["gain_db"].as_f64().unwrap())
+    };
+    assert_eq!(detail(&e.status()), Some(-3.0));
+    let before = e.status().position;
+
+    // Drag the band: many small changes, the track keeps playing and nothing restarts.
+    for g in 1..=10 {
+        s.dsp.eq[0].gain_db = -3.0 + g as f64 * 0.5;
+        e.update_settings(s.clone());
+        std::thread::sleep(Duration::from_millis(30));
+    }
+    std::thread::sleep(Duration::from_millis(300));
+    let st = e.status();
+    assert_eq!(st.state, PlayState::Playing, "{:?}", st.error);
+    assert_eq!(detail(&st), Some(2.0));
+    assert!(
+        st.position > before + 0.4,
+        "playback carried on: {} after {before}",
+        st.position
+    );
+    e.shutdown();
+    let _ = std::fs::remove_dir_all(dir);
+}
+
+#[test]
 fn dsd_output_mode_modulates_to_dop_and_reports_the_chain() {
     use cadenza_dsp::dsd::{DsdModulator, DsdRate, OutputMode};
     let dir = temp_dir("dsd");

@@ -566,6 +566,28 @@ impl Pipeline {
         }
     }
 
+    /// Change the EQ without rebuilding. Returns `false` when that is not possible
+    /// (the EQ turns on or off, which changes the rest of the chain): rebuild then.
+    pub fn set_eq(&mut self, bands: &[Band], enabled: bool) -> bool {
+        let wanted = !self.config.bit_perfect
+            && enabled
+            && bands.iter().take(crate::eq::MAX_BANDS).any(|b| b.enabled);
+        match (&mut self.eq, wanted) {
+            (Some(eq), true) => {
+                eq.retune(bands);
+                self.config.eq = bands.to_vec();
+                self.config.eq_enabled = enabled;
+                true
+            }
+            (None, false) => {
+                self.config.eq = bands.to_vec();
+                self.config.eq_enabled = enabled;
+                true
+            }
+            _ => false,
+        }
+    }
+
     /// `true` only when nothing in the chain alters any sample.
     pub fn bit_perfect(&self) -> bool {
         self.volume.is_unity()
@@ -1044,6 +1066,25 @@ mod tests {
         };
         let p = Pipeline::new(input(44100, 16), cfg, &CoefficientCache::disabled()).unwrap();
         assert!(!p.bit_perfect());
+    }
+
+    #[test]
+    fn eq_retunes_in_place_and_asks_for_a_rebuild_when_it_turns_on_or_off() {
+        let cfg = PipelineConfig {
+            output_bits: 24,
+            eq: vec![Band::peaking(1000.0, -6.0, 1.0)],
+            ..Default::default()
+        };
+        let mut p = Pipeline::new(input(44100, 16), cfg, &CoefficientCache::disabled()).unwrap();
+        let eq = |p: &Pipeline| p.eq.as_ref().unwrap().response_db(1000.0);
+        assert!((eq(&p) + 6.0).abs() < 1e-6);
+        assert!(p.set_eq(&[Band::peaking(1000.0, 3.0, 1.0)], true));
+        assert!((eq(&p) - 3.0).abs() < 1e-6);
+        // Off, or every band off: the chain changes shape, so the caller rebuilds.
+        assert!(!p.set_eq(&[Band::peaking(1000.0, 3.0, 1.0)], false));
+        let mut off = Band::peaking(1000.0, 3.0, 1.0);
+        off.enabled = false;
+        assert!(!p.set_eq(&[off], true));
     }
 
     #[test]

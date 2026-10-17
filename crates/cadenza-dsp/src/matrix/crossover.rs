@@ -315,6 +315,7 @@ fn butterworth_sections(order: usize, pass: Pass, freq: f64, rate: f64) -> Vec<S
             gain_db: 0.0,
             q,
             enabled: true,
+            slope_db: 12,
         };
         sections.push(Section::from_coefficients(Coefficients::design(
             &band, rate,

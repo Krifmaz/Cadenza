@@ -445,6 +445,7 @@ mod tests {
                 gain_db,
                 q: 5.0,
                 enabled: true,
+                slope_db: 12,
             }],
         )
         .process(&mut x);
