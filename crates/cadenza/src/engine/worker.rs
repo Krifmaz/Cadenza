@@ -158,6 +158,8 @@ struct Worker {
     play_reported: bool,
     last_publish: Instant,
     dirty: bool,
+    /// Settings changed by a volume drag, saved once the dragging settles.
+    save_at: Option<Instant>,
 }
 
 pub(super) fn run(
@@ -200,9 +202,10 @@ pub(super) fn run(
         play_reported: false,
         last_publish: Instant::now(),
         dirty: true,
+        save_at: None,
     };
     w.publish();
-    loop {
+    'run: loop {
         let cmd = if w.state == PlayState::Playing {
             match w.rx.try_recv() {
                 Ok(c) => Some(c),
@@ -221,6 +224,20 @@ pub(super) fn run(
                 break;
             }
             w.handle(cmd);
+            // Everything else waiting goes now too, not one per block: a volume drag
+            // sends dozens, which would otherwise trail behind the slider.
+            loop {
+                match w.rx.try_recv() {
+                    Ok(Command::Shutdown) => break 'run,
+                    Ok(c) => w.handle(c),
+                    Err(TryRecvError::Empty) => break,
+                    Err(TryRecvError::Disconnected) => break 'run,
+                }
+            }
+        }
+        if w.save_at.is_some_and(|t| Instant::now() >= t) {
+            w.save_at = None;
+            w.persist_settings();
         }
         if w.state == PlayState::Playing {
             w.pump();
@@ -231,6 +248,9 @@ pub(super) fn run(
         {
             w.publish();
         }
+    }
+    if w.save_at.take().is_some() {
+        w.persist_settings();
     }
     w.stop_playback(true);
     if let Some(o) = &mut w.output {
@@ -339,7 +359,8 @@ impl Worker {
                 if let Some(c) = &mut self.chain {
                     c.set_volume(v);
                 }
-                self.persist_settings();
+                self.save_at
+                    .get_or_insert_with(|| Instant::now() + Duration::from_secs(1));
             }
             Command::SetQueue {
                 tracks,
@@ -840,7 +861,61 @@ impl Worker {
             };
             OutputFormat::pcm(rate, bits, channels)
         };
-        self.open_output(wanted)?;
+        if let Some(d) = dsd.as_mut() {
+            // Drivers say yes to DSD rates they then refuse (or the DAC can't play): step
+            // down through the rates, native before DoP, before giving up.
+            let family = cadenza_dsp::dsd::family_base(input.rate);
+            let mut ladder: Vec<(DsdRate, DsdPacking)> = Vec::new();
+            let other = match d.packing {
+                DsdPacking::Native => DsdPacking::Dop,
+                DsdPacking::Dop => DsdPacking::Native,
+            };
+            for p in [d.packing, other] {
+                for &r in DsdRate::catalog().iter().rev() {
+                    // DoP above DSD256 needs a PCM carrier over 768 kHz, which no DAC takes.
+                    let dop_ok = r.dop_possible() && r <= DsdRate::Dsd256;
+                    if r <= d.rate && (p == DsdPacking::Native || dop_ok) {
+                        ladder.push((r, p));
+                    }
+                }
+            }
+            let mut first_err = None;
+            let mut opened = false;
+            for (r, p) in ladder {
+                match self.open_output(OutputFormat::dsd(r.hz(family), p, channels)) {
+                    Ok(()) => {
+                        if (r, p) != (d.rate, d.packing) {
+                            let msg = format!(
+                                "{} refused {} {}; playing {} {}",
+                                self.output_name,
+                                d.rate.label(),
+                                d.packing.label(),
+                                r.label(),
+                                p.label()
+                            );
+                            log::warn!("{msg}");
+                            self.error = Some(msg);
+                        }
+                        d.rate = r;
+                        d.packing = p;
+                        opened = true;
+                        break;
+                    }
+                    Err(e) => {
+                        log::warn!("{} {}: {e}", r.label(), p.label());
+                        first_err.get_or_insert(e);
+                    }
+                }
+            }
+            if !opened {
+                return Err(format!(
+                    "{} (no DSD rate worked; set Output mode to PCM)",
+                    first_err.unwrap_or_else(|| "DSD did not open".into())
+                ));
+            }
+        } else {
+            self.open_output(wanted)?;
+        }
         let got = self.output_format.unwrap();
 
         let convolution = self.load_convolution();

@@ -593,8 +593,13 @@ pub fn choose_dsd(
     packing: DsdPacking,
     channels: u32,
 ) -> Option<(DsdRate, DsdPacking)> {
+    // A driver that takes native DSD gets it even when DoP is chosen: DoP at DSD512
+    // needs a 1.4 MHz PCM carrier that ASIO drivers claim and USB DACs can't play,
+    // which comes out as loud static.
+    let native_ok = !output.dsd_caps().native.is_empty();
     let packings: &[DsdPacking] = match packing {
         DsdPacking::Native => &[DsdPacking::Native, DsdPacking::Dop],
+        DsdPacking::Dop if native_ok => &[DsdPacking::Native, DsdPacking::Dop],
         DsdPacking::Dop => &[DsdPacking::Dop],
     };
     for &p in packings {
@@ -652,11 +657,12 @@ mod tests {
 
     #[test]
     fn choose_dsd_steps_down_to_what_the_device_takes() {
-        // The null output: DoP and every native layout, up to DSD1024.
+        // The null output: DoP and every native layout, up to DSD1024. Native wins
+        // even when DoP is asked for.
         let out = null::NullOutput::new(false);
         assert_eq!(
             choose_dsd(&out, 44_100, DsdRate::Dsd256, DsdPacking::Dop, 2),
-            Some((DsdRate::Dsd256, DsdPacking::Dop))
+            Some((DsdRate::Dsd256, DsdPacking::Native))
         );
         // DSD2048 is above the null device's ceiling and DoP cannot carry it anyway.
         assert_eq!(

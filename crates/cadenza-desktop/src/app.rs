@@ -153,6 +153,7 @@ pub enum Message {
     SeekDrag(f64),
     SeekDone,
     VolumeDrag(f64),
+    VolumeDone,
     Edit(Edit),
     Patch(Value),
     /// A text box changed (`key`, text); `TextCommit` applies it.
@@ -196,6 +197,10 @@ pub struct App {
     pub devices_busy: bool,
     pub covers: HashMap<String, Option<image::Handle>>,
     pub seek_drag: Option<f64>,
+    /// The volume slider's value while it is held (the engine's status lags a little).
+    pub vol_drag: Option<f64>,
+    /// The tick the volume slider was let go on (it shows `vol_drag` until the engine agrees).
+    vol_released: Option<u64>,
     /// Text boxes being typed in, by key (applied on Enter / leaving).
     pub texts: HashMap<String, String>,
     pub error: Option<String>,
@@ -239,6 +244,8 @@ impl App {
             devices_busy: false,
             covers: HashMap::new(),
             seek_drag: None,
+            vol_drag: None,
+            vol_released: None,
             texts: HashMap::new(),
             error: None,
             library: Default::default(),
@@ -366,6 +373,12 @@ impl App {
                 // Settings changed elsewhere (phone, Encore) show up here; while a change
                 // of ours is on its way the engine's copy catches up within a tick.
                 self.settings = self.status.settings.clone();
+                if let (Some(v), Some(t)) = (self.vol_drag, self.vol_released) {
+                    if (self.status.volume_linear - v).abs() < 0.02 || self.ticks > t + 10 {
+                        self.vol_drag = None;
+                        self.vol_released = None;
+                    }
+                }
                 let mut tasks = Vec::new();
                 if let Some(c) = self.status.track.as_ref().and_then(|t| t.cover.clone()) {
                     tasks.push(self.want_cover(&c));
@@ -409,7 +422,13 @@ impl App {
                 Task::none()
             }
             Message::VolumeDrag(v) => {
+                self.vol_drag = Some(v);
+                self.vol_released = None;
                 self.engine.send(Transport::Volume(v).command());
+                Task::none()
+            }
+            Message::VolumeDone => {
+                self.vol_released = Some(self.ticks);
                 Task::none()
             }
             Message::Edit(Edit(f)) => {
@@ -762,6 +781,7 @@ impl App {
         .spacing(6)
         .align_x(Alignment::Center)
         .width(Length::FillPortion(4));
+        let vol = self.vol_drag.unwrap_or(st.volume_linear);
         let vol = row![
             icon(
                 if st.volume_linear <= 0.0 {
@@ -772,7 +792,8 @@ impl App {
                 20.0,
                 l.muted,
             ),
-            slider(0.0..=1.0, st.volume_linear, Message::VolumeDrag)
+            slider(0.0..=1.0, vol, Message::VolumeDrag)
+                .on_release(Message::VolumeDone)
                 .step(0.01)
                 .style(theme::range)
                 .width(150)

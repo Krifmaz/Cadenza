@@ -469,21 +469,24 @@ fn text_box<'a>(
         .into()
 }
 
+/// The filter families in plain words, in the order the picker shows them.
+const FAMILIES: [(&str, &str); 6] = [
+    ("sinc", "The classic upsampling filter"),
+    (
+        "poly-sinc-gauss",
+        "The gentlest filter, with the least ringing",
+    ),
+    ("poly-sinc-ext3", "A short, light filter for slower PCs"),
+    ("closed-form", "The sharpest cut-off for its length"),
+    (
+        "sinc-mx",
+        "A long filter that keeps the same shape at every rate",
+    ),
+    ("sinc-xtr", "An extremely long filter for strong PCs"),
+];
+
 fn filter_plain(id: &str) -> String {
-    let fam_of = [
-        (
-            "poly-sinc-gauss",
-            "The gentlest filter, with the least ringing",
-        ),
-        ("poly-sinc-ext3", "A short, light filter for slower PCs"),
-        ("closed-form", "The sharpest cut-off for its length"),
-        ("sinc-xtr", "An extremely long filter for strong PCs"),
-        (
-            "sinc-mx",
-            "A long filter that keeps the same shape at every rate",
-        ),
-        ("sinc", "The classic upsampling filter"),
-    ];
+    let fam_of = FAMILIES;
     if id.starts_with("custom") {
         return "A filter you made in the filter designer.".into();
     }
@@ -507,6 +510,77 @@ fn filter_plain(id: &str) -> String {
         "In plain words: {fam}, {phase}. {} Run \"Find my limit\" to see how long a filter yours handles. More in the Guide.",
         if big { "Very long: needs a capable PC, and waits a while before the first sound." } else { "Light on the PC." }
     )
+}
+
+/// The DSD card (on the Output page, next to the output mode that turns DSD on).
+pub fn dsd_card(app: &App) -> El<'_> {
+    let d = &app.settings.dsp;
+    let caps = &app.status.output_dsd;
+    let mut rates = Vec::new();
+    for r in app.options["dsd_rates"]
+        .as_array()
+        .cloned()
+        .unwrap_or_default()
+    {
+        let id = r["id"].as_str().unwrap_or("").to_string();
+        let hz = r["hz_44"].as_u64().unwrap_or(0) as u32;
+        let ok = caps.max_rate.is_none_or(|m| hz <= m) || app.status.output.is_empty();
+        let label = format!(
+            "{} · {:.4} MHz{}",
+            r["label"].as_str().unwrap_or(""),
+            hz as f64 / 1e6,
+            if ok { "" } else { " (above this device)" }
+        );
+        rates.push(Choice::new(id, label));
+    }
+    let dsd_on = d.output_mode == cadenza_dsp::dsd::OutputMode::Dsd;
+    let dsd = column![
+        row![ui::h2("DSD"), ui::badge(if dsd_on { "DSD mode" } else { "PCM mode" }, if dsd_on { Badge::Accent } else { Badge::Plain })]
+            .spacing(8)
+            .align_y(Alignment::Center),
+        row![
+            ui::field("Rate", ui::pick(rates, &d.dsd_rate.id(), |v| patch(json!({ "dsp": { "dsd_rate": v } })))),
+            ui::field(
+                "Modulator",
+                ui::pick(
+                    app.options["dsd_modulators"]
+                        .as_array()
+                        .map(|a| a
+                            .iter()
+                            .map(|m| Choice::new(
+                                m["id"].as_str().unwrap_or(""),
+                                format!(
+                                    "{} · order {}{}",
+                                    m["label"].as_str().unwrap_or(""),
+                                    m["order"].as_u64().unwrap_or(0),
+                                    if m["dithered"].as_bool() == Some(true) { " · dithered" } else { "" }
+                                )
+                            ))
+                            .collect())
+                        .unwrap_or_default(),
+                    d.dsd_modulator.id(),
+                    |v| patch(json!({ "dsp": { "dsd_modulator": v } }))
+                )
+            ),
+        ]
+        .spacing(12),
+        row![
+            ui::field(
+                "Packing",
+                ui::pick(ui::choices(&app.options["dsd_packings"], "id", "label"), d.dsd_packing.id(), |v| patch(json!({ "dsp": { "dsd_packing": v } })))
+            ),
+            ui::field("Gain before the modulator (dB)", text_box(app, "snd_dsd_gain", "-3", || d.dsd_gain_db.to_string())),
+        ]
+        .spacing(12),
+        ui::field(
+            "Oversampling",
+            ui::pick(ui::choices(&app.options["dsd_oversampling"], "id", "id"), d.dsd_oversampling.id(), |v| patch(json!({ "dsp": { "dsd_oversampling": v } })))
+        ),
+        ui::switch(d.dsd_passthrough, "DSD pass-through", |on| edit(move |s| s.dsp.dsd_passthrough = on)),
+        ui::hint("DSF/DFF bits go to a DSD output untouched when the output mode is DSD (or bit-perfect) and the rate matches; in PCM mode they are converted to 352.8/384 kHz PCM. Packing: a driver that takes native DSD (ASIO, most FiiO / iFi / Topping) always gets native; DoP is for the rest, and only up to DSD256."),
+    ]
+    .spacing(12);
+    ui::card(dsd)
 }
 
 fn limit_card(app: &App) -> El<'_> {
@@ -654,10 +728,85 @@ pub fn view(app: &App, wide: bool) -> El<'_> {
     let s = &app.settings;
     let d = &s.dsp;
 
-    // Upsampling.
+    // Upsampling: the family first, then that family's filters (a hundred in one list
+    // is too many to read).
+    let family_of = |id: &str| {
+        app.filters
+            .iter()
+            .find(|f| f["id"] == json!(id))
+            .and_then(|f| f["family"].as_str())
+            .unwrap_or(if id.starts_with("custom") {
+                "custom"
+            } else {
+                ""
+            })
+            .to_string()
+    };
+    let fam = family_of(&d.filter);
+    let mut fams: Vec<String> = Vec::new();
+    for f in &app.filters {
+        let f = f["family"].as_str().unwrap_or("").to_string();
+        if !f.is_empty() && !fams.contains(&f) {
+            fams.push(f);
+        }
+    }
+    fams.sort_by_key(|f| FAMILIES.iter().position(|(id, _)| id == f).unwrap_or(99));
+    if !fams.contains(&fam) {
+        fams.push(fam.clone());
+    }
+    let fam_choices: Vec<Choice> = fams
+        .iter()
+        .map(|f| {
+            let what = FAMILIES
+                .iter()
+                .find(|(id, _)| id == f)
+                .map(|(_, w)| w.to_lowercase())
+                .unwrap_or_else(|| {
+                    if f == "custom" {
+                        "made in the filter designer".into()
+                    } else {
+                        String::new()
+                    }
+                });
+            Choice::new(
+                f.clone(),
+                if what.is_empty() {
+                    f.clone()
+                } else {
+                    format!("{f}: {what}")
+                },
+            )
+        })
+        .collect();
+    // Switching family keeps the phase (and apodizing) when the new family has it.
+    let kind = |label: &str| (label.contains("minimum"), label.contains("apodizing"));
+    let current_kind = app
+        .filters
+        .iter()
+        .find(|f| f["id"] == json!(d.filter))
+        .map(|f| kind(f["label"].as_str().unwrap_or("")))
+        .unwrap_or((false, false));
+    let catalogue = app.filters.clone();
+    let family_pick = ui::pick(fam_choices, &fam, move |f| {
+        let in_fam: Vec<&serde_json::Value> = catalogue
+            .iter()
+            .filter(|x| x["family"] == json!(f))
+            .collect();
+        let to = in_fam
+            .iter()
+            .find(|x| kind(x["label"].as_str().unwrap_or("")) == current_kind)
+            .or(in_fam.first())
+            .and_then(|x| x["id"].as_str())
+            .map(str::to_string);
+        match to {
+            Some(id) => edit(move |s| s.dsp.filter = id.clone()),
+            None => Message::Nothing,
+        }
+    });
     let mut filters: Vec<Choice> = app
         .filters
         .iter()
+        .filter(|f| f["family"] == json!(fam))
         .map(|f| {
             Choice::new(
                 f["id"].as_str().unwrap_or(""),
@@ -688,6 +837,7 @@ pub fn view(app: &App, wide: bool) -> El<'_> {
         .unwrap_or_default();
     let up = column![
         ui::h2("Upsampling"),
+        ui::field("Filter family", family_pick),
         ui::field(
             "Filter",
             ui::pick(filters, &d.filter, |v| edit(
@@ -751,73 +901,6 @@ pub fn view(app: &App, wide: bool) -> El<'_> {
         noise = noise.push(ui::small(app.sound.noise_msg.clone()));
     }
 
-    // DSD.
-    let caps = &app.status.output_dsd;
-    let mut rates = Vec::new();
-    for r in app.options["dsd_rates"]
-        .as_array()
-        .cloned()
-        .unwrap_or_default()
-    {
-        let id = r["id"].as_str().unwrap_or("").to_string();
-        let hz = r["hz_44"].as_u64().unwrap_or(0) as u32;
-        let ok = caps.max_rate.is_none_or(|m| hz <= m) || app.status.output.is_empty();
-        let label = format!(
-            "{} · {:.4} MHz{}",
-            r["label"].as_str().unwrap_or(""),
-            hz as f64 / 1e6,
-            if ok { "" } else { " (above this device)" }
-        );
-        rates.push(Choice::new(id, label));
-    }
-    let dsd_on = d.output_mode == cadenza_dsp::dsd::OutputMode::Dsd;
-    let dsd = column![
-        row![ui::h2("DSD"), ui::badge(if dsd_on { "DSD mode" } else { "PCM mode" }, if dsd_on { Badge::Accent } else { Badge::Plain })]
-            .spacing(8)
-            .align_y(Alignment::Center),
-        row![
-            ui::field("Rate", ui::pick(rates, &d.dsd_rate.id(), |v| patch(json!({ "dsp": { "dsd_rate": v } })))),
-            ui::field(
-                "Modulator",
-                ui::pick(
-                    app.options["dsd_modulators"]
-                        .as_array()
-                        .map(|a| a
-                            .iter()
-                            .map(|m| Choice::new(
-                                m["id"].as_str().unwrap_or(""),
-                                format!(
-                                    "{} · order {}{}",
-                                    m["label"].as_str().unwrap_or(""),
-                                    m["order"].as_u64().unwrap_or(0),
-                                    if m["dithered"].as_bool() == Some(true) { " · dithered" } else { "" }
-                                )
-                            ))
-                            .collect())
-                        .unwrap_or_default(),
-                    d.dsd_modulator.id(),
-                    |v| patch(json!({ "dsp": { "dsd_modulator": v } }))
-                )
-            ),
-        ]
-        .spacing(12),
-        row![
-            ui::field(
-                "Packing",
-                ui::pick(ui::choices(&app.options["dsd_packings"], "id", "label"), d.dsd_packing.id(), |v| patch(json!({ "dsp": { "dsd_packing": v } })))
-            ),
-            ui::field("Gain before the modulator (dB)", text_box(app, "snd_dsd_gain", "-3", || d.dsd_gain_db.to_string())),
-        ]
-        .spacing(12),
-        ui::field(
-            "Oversampling",
-            ui::pick(ui::choices(&app.options["dsd_oversampling"], "id", "id"), d.dsd_oversampling.id(), |v| patch(json!({ "dsp": { "dsd_oversampling": v } })))
-        ),
-        ui::switch(d.dsd_passthrough, "DSD pass-through", |on| edit(move |s| s.dsp.dsd_passthrough = on)),
-        ui::hint("DSF/DFF bits go to a DSD output untouched when the output mode is DSD (or bit-perfect) and the rate matches; in PCM mode they are converted to 352.8/384 kHz PCM. Output → Output mode switches to DSD."),
-    ]
-    .spacing(12);
-
     // Headphones & convolution.
     let hp = column![
         ui::h2("Headphones & convolution"),
@@ -844,19 +927,13 @@ pub fn view(app: &App, wide: bool) -> El<'_> {
 
     let mut page = column![ui::h1(
         "Sound",
-        "Upsampling, dither, DSD and the processing before them."
+        "Filters, dither, EQ and the rest of the processing."
     )];
     if let Some(e) = &app.error {
         page = page.push(ui::err(e.clone()));
     }
     page.push(ui::grid(
-        vec![
-            ui::card(up),
-            limit_card(app),
-            ui::card(noise),
-            ui::card(dsd),
-            ui::card(hp),
-        ],
+        vec![ui::card(up), limit_card(app), ui::card(noise), ui::card(hp)],
         wide,
     ))
     .push(iced::widget::space().height(18))

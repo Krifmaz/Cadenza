@@ -75,10 +75,11 @@ impl Probe {
         }
         driver.set_dsd(false);
         let format = SampleFormat::from_asio(driver.channel_info(0, false)?.sample_type);
+        // Above 1536 kHz there is only DSD; some drivers say yes to those rates in PCM mode.
         let rates: Vec<u32> = STANDARD_RATES
             .iter()
             .copied()
-            .filter(|&r| driver.can_sample_rate(r as f64))
+            .filter(|&r| r <= super::MAX_PCM_RATE && driver.can_sample_rate(r as f64))
             .collect();
         let dop_max = format
             .filter(|f| f.carries_dop())
@@ -230,6 +231,10 @@ impl AsioOutput {
         }
     }
 
+    fn refused(&self, format: OutputFormat, why: &str) -> OutputError {
+        OutputError::Backend(format!("{} refused {format}: {why}", self.name()))
+    }
+
     fn open_stream(&mut self, format: OutputFormat) -> Result<Stream, OutputError> {
         let d = &self.driver;
         let ch = format.channels as usize;
@@ -252,13 +257,13 @@ impl AsioOutput {
         };
         if native {
             if !d.set_dsd(true) {
-                return Err(self.unsupported(format));
+                return Err(self.refused(format, "the driver would not switch to DSD"));
             }
         } else {
             d.set_dsd(false);
         }
         if !d.can_sample_rate(rate as f64) {
-            return Err(self.unsupported(format));
+            return Err(self.refused(format, &format!("the driver does not take {rate} Hz")));
         }
         d.set_sample_rate(rate as f64)?;
         let mut sample = None;
@@ -279,7 +284,14 @@ impl AsioOutput {
         }
         let sample = sample.expect("at least one channel");
         if native != sample.is_dsd() {
-            return Err(self.unsupported(format));
+            return Err(self.refused(
+                format,
+                if native {
+                    "the driver stayed in PCM after switching to DSD"
+                } else {
+                    "the driver stayed in DSD"
+                },
+            ));
         }
         let mut opened = format;
         match format.encoding {
@@ -783,10 +795,8 @@ mod tests {
             Err(OutputError::Unsupported { .. })
         ));
         let native = OutputFormat::dsd(2_822_400, DsdPacking::Native, 2);
-        assert!(matches!(
-            out.open(native),
-            Err(OutputError::Unsupported { .. })
-        ));
+        let e = out.open(native).unwrap_err().to_string();
+        assert!(e.contains("would not switch to DSD"), "{e}");
         // PCM through float channels is fine (24 bits are exact in f32).
         assert_eq!(out.open(OutputFormat::pcm(48_000, 24, 2)).unwrap().bits, 24);
         // A rate the driver lacks, or more channels than it has.

@@ -97,8 +97,8 @@ pub fn view(app: &App, wide: bool) -> El<'_> {
         patch(json!({ "dsp": { "output_mode": v } }))
     });
     let mut rates = vec![
-        Choice::new("auto", "Auto (highest multiple of the source)"),
-        Choice::new("source", "Same as the source"),
+        Choice::new("auto", "Auto (best multiple)"),
+        Choice::new("source", "Same as source"),
     ];
     let mut all: Vec<u32> = app.options["pcm_rates"]
         .as_array()
@@ -119,7 +119,7 @@ pub fn view(app: &App, wide: bool) -> El<'_> {
             if ok {
                 ui::khz(r)
             } else {
-                format!("{} — not supported by this device", ui::khz(r))
+                format!("{} (DAC can't)", ui::khz(r))
             },
         ));
     }
@@ -157,8 +157,8 @@ pub fn view(app: &App, wide: bool) -> El<'_> {
     if !p.is_empty() && connected {
         dev = dev.push(ui::plain(p));
     }
+    dev = dev.push(ui::field("Output mode", mode));
     dev = dev
-        .push(ui::field("Output mode", mode))
         .push(row![ui::field("PCM rate", rate), ui::field("PCM bits", bits)].spacing(12))
         .push(ui::plain("PCM is the normal format; DSD only if your DAC lists it. PCM rate: Auto picks the highest your device takes (the filter computes the extra points). Bits: 24 for any DAC, 16 for Bluetooth aptX Lossless (set 44.1 kHz too). The Guide page explains more."))
         .push(ui::switch(s.dsp.bit_perfect, "Bit-perfect", |on| {
@@ -260,10 +260,17 @@ pub fn view(app: &App, wide: bool) -> El<'_> {
     if let Some(e) = &app.error {
         page = page.push(ui::err(e.clone()));
     }
-    page.push(ui::grid(vec![ui::card(dev), ui::card(gpu)], wide))
-        .push(iced::widget::space().height(18))
-        .push(ui::card(ep))
-        .into()
+    page.push(ui::grid(
+        vec![
+            ui::card(dev),
+            crate::pages::sound::dsd_card(app),
+            ui::card(gpu),
+        ],
+        wide,
+    ))
+    .push(iced::widget::space().height(18))
+    .push(ui::card(ep))
+    .into()
 }
 
 /// The GPU device box.
