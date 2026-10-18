@@ -654,6 +654,9 @@ impl App {
         let foot = column![
             ui::badge(gpu, theme::Badge::Accent),
             text(out).size(12).color(l.muted),
+            text(concat!("Cadenza ", env!("CARGO_PKG_VERSION")))
+                .size(11.5)
+                .color(l.muted),
         ]
         .spacing(6);
         container(
