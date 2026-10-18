@@ -20,11 +20,12 @@ mod update;
 use cadenza::config::Config;
 
 fn main() -> iced::Result {
-    init_log();
+    // The log starts only once this is the running copy: a second launch would
+    // otherwise replace the first one's log.
     if !platform::init() {
-        log::info!("Cadenza is already running: brought its window forward");
         return Ok(());
     }
+    init_log();
     let path = std::env::var_os("CADENZA_CONFIG")
         .map(std::path::PathBuf::from)
         .unwrap_or_else(Config::default_path);
