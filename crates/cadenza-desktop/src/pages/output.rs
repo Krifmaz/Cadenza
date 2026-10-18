@@ -164,7 +164,18 @@ pub fn view(app: &App, wide: bool) -> El<'_> {
         .push(ui::switch(s.dsp.bit_perfect, "Bit-perfect", |on| {
             crate::app::edit(move |s| s.dsp.bit_perfect = on)
         }))
-        .push(ui::hint("Send the file untouched: no upsampling, dither, EQ, matrix or volume."));
+        .push(ui::hint("Send the file untouched: no upsampling, dither, EQ, matrix or volume."))
+        .push(
+            row![
+                iced::widget::container(ui::small(
+                    "Something not working? The log says what the device refused."
+                ))
+                .width(Length::Fill),
+                ui::btn("Show log file", Btn::Ghost, Some(Message::ShowLog)),
+            ]
+            .spacing(12)
+            .align_y(Alignment::Center),
+        );
 
     // GPU.
     let gpu_modes = ui::choices(&app.options["gpu_modes"], "id", "label");

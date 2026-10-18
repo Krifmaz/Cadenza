@@ -111,6 +111,10 @@ impl Probe {
                 (a, b) => a.or(b),
             },
         };
+        log::info!(
+            "ASIO {}: {outputs} outputs, {format:?}, PCM rates {rates:?}, DoP up to {dop_max:?}, native DSD up to {native_max:?}",
+            driver.name()
+        );
         Ok(Self {
             outputs: outputs as u32,
             format,

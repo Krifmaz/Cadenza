@@ -12,6 +12,31 @@ fn dir() -> PathBuf {
         .unwrap_or_else(|| PathBuf::from("."))
 }
 
+/// The app's log (the one from the run before is kept as `cadenza.previous.log`).
+pub fn log_path() -> PathBuf {
+    dir().join("cadenza.log")
+}
+
+/// Show `path` in the file manager (Explorer, Finder, the desktop's own).
+pub fn reveal(path: &std::path::Path) {
+    #[cfg(windows)]
+    let r = std::process::Command::new("explorer")
+        .arg(format!("/select,{}", path.display()))
+        .spawn();
+    #[cfg(target_os = "macos")]
+    let r = std::process::Command::new("open")
+        .arg("-R")
+        .arg(path)
+        .spawn();
+    #[cfg(not(any(windows, target_os = "macos")))]
+    let r = std::process::Command::new("xdg-open")
+        .arg(path.parent().unwrap_or(path))
+        .spawn();
+    if let Err(e) = r {
+        log::warn!("cannot show {}: {e}", path.display());
+    }
+}
+
 fn read<T: for<'de> Deserialize<'de> + Default>(name: &str) -> T {
     std::fs::read_to_string(dir().join(name))
         .ok()

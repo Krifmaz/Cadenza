@@ -160,6 +160,9 @@ struct Worker {
     dirty: bool,
     /// Settings changed by a volume drag, saved once the dragging settles.
     save_at: Option<Instant>,
+    /// A settings change is rebuilding: reopen the device without waiting for it to play
+    /// out what it holds.
+    no_drain: bool,
 }
 
 pub(super) fn run(
@@ -203,6 +206,7 @@ pub(super) fn run(
         last_publish: Instant::now(),
         dirty: true,
         save_at: None,
+        no_drain: false,
     };
     w.publish();
     'run: loop {
@@ -468,14 +472,12 @@ impl Worker {
             c.set_volume(self.volume);
         }
         if (output_changed || chain_changed || passthrough_affected) && self.decoder.is_some() {
-            // Push out what the old chain still holds, then build the new one.
-            if let Some(c) = &mut self.chain {
-                let tail = c.flush();
-                self.write_out(&tail);
-            }
+            // Switch now: what the old chain still holds is dropped (a moment of music;
+            // with a long filter, playing it out took seconds before the change was heard).
+            self.chain = None;
+            self.no_drain = true;
             if output_changed {
                 if let Some(o) = &mut self.output {
-                    let _ = o.drain();
                     o.close();
                 }
                 self.output = None;
@@ -486,6 +488,7 @@ impl Worker {
                     self.fail(format!("rebuilding the chain: {e}"));
                 }
             }
+            self.no_drain = false;
         } else if output_changed {
             self.output = None;
             self.output_format = None;
@@ -947,7 +950,7 @@ impl Worker {
     fn open_output(&mut self, wanted: OutputFormat) -> Result<(), String> {
         let out = self.output.as_mut().ok_or("no output")?;
         if self.output_format != Some(wanted) {
-            if self.output_format.is_some() {
+            if self.output_format.is_some() && !self.no_drain {
                 let _ = out.drain();
             }
             let got = out.open(wanted).map_err(|e| e.to_string())?;

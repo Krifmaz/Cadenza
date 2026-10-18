@@ -49,6 +49,8 @@ pub struct NullOutput {
     timeline: Option<std::io::BufWriter<std::fs::File>>,
     /// `unplug=`: writes fail while this file exists.
     unplug: Option<std::path::PathBuf>,
+    /// `dsd=dop`: a DAC that takes DSD only as DoP.
+    dop_only: bool,
 }
 
 impl NullOutput {
@@ -66,6 +68,7 @@ impl NullOutput {
             ppm: 0.0,
             timeline: None,
             unplug: None,
+            dop_only: false,
         }
     }
 
@@ -80,7 +83,7 @@ impl NullOutput {
     }
 
     /// A null output for a configured device name: `capture:<file>`, or `;`-separated
-    /// `capture=<file>`, `ppm=<n>`, `timeline=<file>`.
+    /// `capture=<file>`, `ppm=<n>`, `timeline=<file>`, `unplug=<file>`, `dsd=dop`.
     pub fn for_device(realtime: bool, device: &str) -> Self {
         let mut out = Self::new(realtime);
         if let Some(path) = device.strip_prefix("capture:") {
@@ -105,6 +108,7 @@ impl NullOutput {
             match k.trim() {
                 "ppm" => out.ppm = v.trim().parse().unwrap_or(0.0),
                 "unplug" => out.unplug = Some(v.trim().into()),
+                "dsd" => out.dop_only = v.trim() == "dop",
                 "capture" => out.capture = file(),
                 "timeline" => {
                     epoch();
@@ -180,7 +184,11 @@ impl Output for NullOutput {
     }
 
     fn dsd_caps(&self) -> DsdCaps {
-        dsd_caps()
+        let mut c = dsd_caps();
+        if self.dop_only {
+            c.native.clear();
+        }
+        c
     }
 
     fn exclusive(&self) -> bool {

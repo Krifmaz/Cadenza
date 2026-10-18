@@ -5,6 +5,7 @@ pub mod cue;
 pub mod dsd;
 pub mod dst;
 pub mod live;
+mod opus;
 pub mod sacd;
 pub mod source;
 
@@ -128,8 +129,8 @@ impl Decoder {
             .ok_or(DecodeError::NoTrack)?;
         let params = track.codec_params.clone();
         let track_id = track.id;
-        let decoder = symphonia::default::get_codecs().make(&params, &DecoderOptions::default())?;
-        let codec = symphonia::default::get_codecs()
+        let decoder = opus::codecs().make(&params, &DecoderOptions::default())?;
+        let codec = opus::codecs()
             .get_codec(params.codec)
             .map(|d| d.short_name.to_ascii_uppercase())
             .unwrap_or_else(|| "PCM".into());
@@ -443,6 +444,47 @@ mod tests {
         }
         w.finalize().unwrap();
         written
+    }
+
+    #[test]
+    fn decodes_opus_in_ogg_and_webm() {
+        // 0.5 s of a 1 kHz sine, stereo, made with ffmpeg / libopus.
+        let dir = std::env::temp_dir().join(format!("cadenza-opus-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        for (name, bytes) in [
+            ("t.opus", &include_bytes!("testdata/sine-1k.opus")[..]),
+            ("t.webm", &include_bytes!("testdata/sine-1k.webm")[..]),
+        ] {
+            let path = dir.join(name);
+            std::fs::write(&path, bytes).unwrap();
+            let mut d = Decoder::open(&Source::Path { path }).unwrap();
+            let info = d.info().clone();
+            assert_eq!((info.rate, info.channels), (48_000, 2), "{name}");
+            let mut all = Vec::new();
+            while let Some(chunk) = d.next_chunk().unwrap() {
+                all.extend(chunk);
+            }
+            let frames = all.len() / 2;
+            assert!(
+                (23_000..=25_000).contains(&frames),
+                "{name}: {frames} frames"
+            );
+            // The left channel's 1 kHz amplitude over the middle (codec delay aside).
+            let (mut re, mut im) = (0.0, 0.0);
+            let mid = 4_800..19_200;
+            for i in mid.clone() {
+                let w = 2.0 * std::f64::consts::PI * 1000.0 * i as f64 / 48_000.0;
+                re += all[2 * i] * w.cos();
+                im += all[2 * i] * w.sin();
+            }
+            let amp = 2.0 * (re * re + im * im).sqrt() / mid.len() as f64;
+            // ffmpeg's sine is at 1/8, then −6 dB, then −3 dB for mono to stereo.
+            let want = 0.125 * 10f64.powf(-6.0 / 20.0) * std::f64::consts::FRAC_1_SQRT_2;
+            assert!(
+                (amp / want - 1.0).abs() < 0.05,
+                "{name}: amplitude {amp}, want {want}"
+            );
+        }
     }
 
     #[test]

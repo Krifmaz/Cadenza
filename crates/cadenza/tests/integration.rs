@@ -440,6 +440,8 @@ fn dsd_output_mode_modulates_to_dop_and_reports_the_chain() {
     s.dsp.output_mode = OutputMode::Dsd;
     s.dsp.dsd_rate = DsdRate::Dsd64;
     s.dsp.dsd_modulator = DsdModulator::Asdm5;
+    // A DoP-only DAC: one that takes native DSD gets native whatever the packing says.
+    s.output.device = "dsd=dop".into();
     let e = engine(s);
     let runs = e.status().runs_finished;
     e.play_queue(vec![Track::from_arg(wav.to_str().unwrap())], 0, 0.0);

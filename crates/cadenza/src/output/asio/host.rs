@@ -238,7 +238,8 @@ impl Driver {
                 &mut f as *mut IoFormat as *mut c_void,
             )
         };
-        r == sys::ASE_SUCCESS
+        // Most drivers answer future calls with ASE_SUCCESS, some with ASE_OK.
+        r == sys::ASE_SUCCESS || r == sys::ASE_OK
     }
 
     /// Whether the driver can switch to DSD (`kAsioCanDoIoFormat`).

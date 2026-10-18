@@ -15,13 +15,12 @@ mod shot;
 mod store;
 mod theme;
 mod ui;
+mod update;
 
 use cadenza::config::Config;
 
 fn main() -> iced::Result {
-    env_logger::Builder::from_env(env_logger::Env::default().default_filter_or("info"))
-        .format_timestamp_millis()
-        .init();
+    init_log();
     if !platform::init() {
         log::info!("Cadenza is already running: brought its window forward");
         return Ok(());
@@ -53,6 +52,36 @@ fn main() -> iced::Result {
     .run();
     drop(services);
     r
+}
+
+/// Log to a file next to the config (there is no console on Windows), keeping the
+/// previous run's log, and record panics with a backtrace before the app goes down.
+fn init_log() {
+    let mut b = env_logger::Builder::from_env(env_logger::Env::default().default_filter_or("info"));
+    b.format_timestamp_millis();
+    let path = store::log_path();
+    if let Some(dir) = path.parent() {
+        let _ = std::fs::create_dir_all(dir);
+    }
+    let _ = std::fs::rename(&path, path.with_file_name("cadenza.previous.log"));
+    if let Ok(f) = std::fs::File::create(&path) {
+        b.target(env_logger::Target::Pipe(Box::new(f)));
+    }
+    b.init();
+    log::info!(
+        "Cadenza {} on {}",
+        env!("CARGO_PKG_VERSION"),
+        std::env::consts::OS
+    );
+    let prev = std::panic::take_hook();
+    std::panic::set_hook(Box::new(move |info| {
+        log::error!(
+            "crash: {info}\n{}",
+            std::backtrace::Backtrace::force_capture()
+        );
+        log::logger().flush();
+        prev(info);
+    }));
 }
 
 /// The web control page and API for phones and Encore, on its own thread: the configured

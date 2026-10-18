@@ -50,6 +50,7 @@ env_logger = "0.11"
 clap = { version = "4", features = ["derive"] }
 toml = "0.8"
 symphonia = { version = "0.5", features = ["all"] }
+opus-decoder = "0.1"
 ureq = { version = "2", features = ["json"] }
 tokio = { version = "1", features = ["rt-multi-thread", "macros", "sync", "time", "net"] }
 axum = { version = "0.8", features = ["json", "query"] }

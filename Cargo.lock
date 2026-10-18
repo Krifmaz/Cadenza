@@ -792,7 +792,7 @@ checksum = "fc652a48c352aef3ea3aed32080501cf3ef6ed5da78602a020c991775b0aff04"
 
 [[package]]
 name = "cadenza"
-version = "3.0.4"
+version = "3.0.5"
 dependencies = [
  "aes",
  "alsa",
@@ -818,6 +818,7 @@ dependencies = [
  "objc2-core-audio-types",
  "objc2-core-foundation",
  "objc2-foundation 0.3.2",
+ "opus-decoder",
  "pipewire",
  "rsa",
  "serde",
@@ -839,7 +840,7 @@ dependencies = [
 
 [[package]]
 name = "cadenza-desktop"
-version = "3.0.4"
+version = "3.0.5"
 dependencies = [
  "cadenza",
  "cadenza-dsp",
@@ -860,7 +861,7 @@ dependencies = [
 
 [[package]]
 name = "cadenza-dsp"
-version = "3.0.4"
+version = "3.0.5"
 dependencies = [
  "cudarc",
  "dirs",
@@ -4519,6 +4520,15 @@ name = "option-ext"
 version = "0.2.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "04744f49eae99ab78e0d5c0b603ab218f515ea8cfe5a456d7629ad883a3b6e7d"
+
+[[package]]
+name = "opus-decoder"
+version = "0.1.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "15ae32c275dabb0cd2c863460bf349e9abc3568ba2abf0f9eb7b7d2edeeed07e"
+dependencies = [
+ "thiserror 2.0.21",
+]
 
 [[package]]
 name = "orbclient"

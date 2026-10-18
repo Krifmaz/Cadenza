@@ -161,7 +161,9 @@ pub fn view(app: &App, wide: bool) -> El<'_> {
         .push(row![
             ui::h2("Upsample system audio"),
             iced::widget::space().width(Length::Fill),
-            ui::switch(c.enabled, "On", |v| Message::System(Msg::Enabled(v))),
+            ui::switch(c.enabled, if c.enabled { "On" } else { "Off" }, |v| {
+                Message::System(Msg::Enabled(v))
+            }),
         ])
         .push(ui::field(
             "Source",

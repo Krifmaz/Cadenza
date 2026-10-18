@@ -402,6 +402,29 @@ pub fn view(app: &App, wide: bool) -> El<'_> {
                     }
                     c.push(custom_row)
                 }),
+                ui::card(
+                    column![
+                        ui::h2("Updates"),
+                        ui::small(format!("This is Cadenza {}.", crate::update::current())),
+                        row![
+                            ui::btn(
+                                "Check for updates",
+                                Btn::Secondary,
+                                (!app.update_busy).then_some(Message::UpdateCheck(true))
+                            ),
+                            ui::btn(
+                                "Update now",
+                                Btn::Primary,
+                                (app.update.is_some() && !app.update_busy)
+                                    .then_some(Message::UpdateInstall)
+                            ),
+                        ]
+                        .spacing(8),
+                        ui::small(app.update_msg.clone()),
+                        ui::hint("Cadenza looks for a new version when it starts and every few hours. On Windows, Update installs it and restarts Cadenza; elsewhere it opens the download page."),
+                    ]
+                    .spacing(12)
+                ),
             ],
             wide
         ),

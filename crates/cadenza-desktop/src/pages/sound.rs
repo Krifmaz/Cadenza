@@ -940,6 +940,8 @@ pub fn view(app: &App, wide: bool) -> El<'_> {
     .push(eq_card(app))
     .push(iced::widget::space().height(18))
     .push(matrix_card(app))
+    .push(iced::widget::space().height(18))
+    .push(crate::pages::filters::view(app, wide))
     .into()
 }
 

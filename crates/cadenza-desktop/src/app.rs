@@ -22,7 +22,6 @@ pub enum Page {
     Library,
     Guide,
     Sound,
-    Filters,
     Output,
     Room,
     System,
@@ -31,12 +30,11 @@ pub enum Page {
 }
 
 impl Page {
-    pub const ALL: [Page; 10] = [
+    pub const ALL: [Page; 9] = [
         Page::Now,
         Page::Library,
         Page::Guide,
         Page::Sound,
-        Page::Filters,
         Page::Output,
         Page::Room,
         Page::System,
@@ -50,7 +48,6 @@ impl Page {
             Page::Library => "Library",
             Page::Guide => "Guide",
             Page::Sound => "Sound",
-            Page::Filters => "Filters",
             Page::Output => "Output",
             Page::Room => "Room & measure",
             Page::System => "System input",
@@ -65,7 +62,6 @@ impl Page {
             Page::Library => "library",
             Page::Guide => "guide",
             Page::Sound => "sound",
-            Page::Filters => "filters",
             Page::Output => "output",
             Page::Room => "room",
             Page::System => "system",
@@ -80,7 +76,6 @@ impl Page {
             Page::Library => Icon::Library,
             Page::Guide => Icon::Guide,
             Page::Sound => Icon::Sliders,
-            Page::Filters => Icon::Wave,
             Page::Output => Icon::Speaker,
             Page::Room => Icon::Room,
             Page::System => Icon::Monitor,
@@ -168,6 +163,14 @@ pub enum Message {
     CloseRequested(window::Id),
     Resized(Size),
     Raise,
+    /// Show the log file in the file manager.
+    ShowLog,
+    /// Look for a newer release (`true`: asked for, so say when there is none).
+    UpdateCheck(bool),
+    UpdateChecked(Result<Option<crate::update::Update>, String>, bool),
+    UpdateInstall,
+    UpdateInstalled(Result<bool, String>),
+    UpdateLater,
     Quit,
     FilesDropped(Vec<std::path::PathBuf>),
     Library(pages::library::Msg),
@@ -213,6 +216,14 @@ pub struct App {
     pub picker: pages::appearance::Picker,
     pub shot: Option<crate::shot::State>,
     pub quitting: bool,
+    /// Settings sent to the engine and when (tick), until its status shows them.
+    pending: Option<(Settings, u64)>,
+    /// A newer release, once found.
+    pub update: Option<crate::update::Update>,
+    /// What the updater last said ("up to date", "downloading…", an error).
+    pub update_msg: String,
+    pub update_busy: bool,
+    update_hidden: bool,
     pub ticks: u64,
 }
 
@@ -257,6 +268,11 @@ impl App {
             picker: Default::default(),
             shot: crate::shot::State::from_env(),
             quitting: false,
+            pending: None,
+            update: None,
+            update_msg: String::new(),
+            update_busy: false,
+            update_hidden: false,
             ticks: 0,
         };
         let (open, task) = crate::platform::open_window();
@@ -268,6 +284,7 @@ impl App {
             pages::system::init(&mut app),
             pages::encore::init(&mut app),
             pages::room::init(&mut app),
+            Task::done(Message::UpdateCheck(false)),
         ]);
         (app, first)
     }
@@ -360,6 +377,7 @@ impl App {
             Ok(()) => {
                 self.error = None;
                 self.settings = s.clone();
+                self.pending = Some((s.clone(), self.ticks));
                 self.engine.update_settings(s);
             }
             Err(e) => self.error = Some(e),
@@ -370,9 +388,15 @@ impl App {
         match msg {
             Message::Tick => {
                 self.status = self.engine.status();
-                // Settings changed elsewhere (phone, Encore) show up here; while a change
-                // of ours is on its way the engine's copy catches up within a tick.
-                self.settings = self.status.settings.clone();
+                // Settings changed elsewhere (phone, Encore) show up here. A change of ours stays on screen until the engine has taken it (it can
+                // be busy for seconds designing a long filter), so nothing flips back.
+                match &self.pending {
+                    Some((p, at)) if *p != self.status.settings && self.ticks < at + 30 * 5 => {}
+                    _ => {
+                        self.pending = None;
+                        self.settings = self.status.settings.clone();
+                    }
+                }
                 if let (Some(v), Some(t)) = (self.vol_drag, self.vol_released) {
                     if (self.status.volume_linear - v).abs() < 0.02 || self.ticks > t + 10 {
                         self.vol_drag = None;
@@ -387,6 +411,9 @@ impl App {
                 self.ticks += 1;
                 if self.ticks % 25 == 0 {
                     tasks.push(pages::encore::poll());
+                }
+                if self.ticks % (6 * 3600 * 5) == 0 {
+                    tasks.push(Task::done(Message::UpdateCheck(false)));
                 }
                 if self.page == Page::System && self.ticks % 10 == 0 {
                     tasks.push(pages::system::init(self));
@@ -496,6 +523,84 @@ impl App {
                 self.height = s.height;
                 Task::none()
             }
+            Message::UpdateCheck(asked) => {
+                if self.update_busy || std::env::var_os("CADENZA_SHOT").is_some() {
+                    return Task::none();
+                }
+                self.update_busy = asked;
+                if asked {
+                    self.update_msg = "Checking…".into();
+                }
+                Task::perform(
+                    async {
+                        tokio::task::spawn_blocking(crate::update::check)
+                            .await
+                            .unwrap_or_else(|e| Err(e.to_string()))
+                    },
+                    move |r| Message::UpdateChecked(r, asked),
+                )
+            }
+            Message::UpdateChecked(r, asked) => {
+                self.update_busy = false;
+                match r {
+                    Ok(Some(u)) => {
+                        self.update_msg = format!("Cadenza {} is available.", u.version);
+                        self.update = Some(u);
+                    }
+                    Ok(None) => {
+                        self.update = None;
+                        self.update_msg = format!(
+                            "Cadenza {} is the latest version.",
+                            crate::update::current()
+                        );
+                    }
+                    Err(e) => {
+                        log::warn!("update check: {e}");
+                        if asked {
+                            self.update_msg = format!("Could not check for updates: {e}");
+                        }
+                    }
+                }
+                Task::none()
+            }
+            Message::UpdateInstall => {
+                let Some(u) = self.update.clone() else {
+                    return Task::none();
+                };
+                self.update_busy = true;
+                self.update_msg = format!("Downloading Cadenza {}…", u.version);
+                Task::perform(
+                    async move {
+                        tokio::task::spawn_blocking(move || {
+                            crate::update::install(&u)
+                                .map(|i| matches!(i, crate::update::Installed::Quit))
+                        })
+                        .await
+                        .unwrap_or_else(|e| Err(e.to_string()))
+                    },
+                    Message::UpdateInstalled,
+                )
+            }
+            Message::UpdateInstalled(r) => {
+                self.update_busy = false;
+                match r {
+                    // The installer closes and restarts Cadenza; make room for it.
+                    Ok(true) => return self.update(Message::Quit),
+                    Ok(false) => {
+                        self.update_msg = "The download page is open in your browser.".into()
+                    }
+                    Err(e) => self.update_msg = format!("Update failed: {e}"),
+                }
+                Task::none()
+            }
+            Message::UpdateLater => {
+                self.update_hidden = true;
+                Task::none()
+            }
+            Message::ShowLog => {
+                crate::store::reveal(&crate::store::log_path());
+                Task::none()
+            }
             Message::Raise => match self.window {
                 Some(id) => Task::batch([window::minimize(id, false), window::gain_focus(id)]),
                 None => {
@@ -545,12 +650,15 @@ impl App {
             Page::Library => pages::library::view(self, wide),
             Page::Guide => pages::guide::view(self, wide),
             Page::Sound => pages::sound::view(self, wide),
-            Page::Filters => pages::filters::view(self, wide),
             Page::Output => pages::output::view(self, wide),
             Page::Room => pages::room::view(self, wide),
             Page::System => pages::system::view(self, wide),
             Page::Encore => pages::encore::view(self, wide),
             Page::Appearance => pages::appearance::view(self, wide),
+        };
+        let page: El = match (&self.update, self.update_hidden) {
+            (Some(u), false) => column![self.update_banner(u), page].spacing(18).into(),
+            _ => page,
         };
         let main = scrollable(container(page).padding([26, 32]).width(Length::Fill))
             .id(MAIN_SCROLL)
@@ -617,7 +725,7 @@ impl App {
             nav = nav.push(self.nav_button(p, false));
         }
         nav = nav.push(section("ENGINE"));
-        for p in [Page::Sound, Page::Filters, Page::Output] {
+        for p in [Page::Sound, Page::Output] {
             nav = nav.push(self.nav_button(p, false));
         }
         nav = nav.push(section("TOOLS"));
@@ -672,6 +780,37 @@ impl App {
         .height(Length::Fill)
         .style(theme::sidebar)
         .into()
+    }
+
+    fn update_banner(&self, u: &crate::update::Update) -> El<'_> {
+        let what = if cfg!(windows) {
+            "Update installs it and restarts Cadenza (the music stops for a moment)."
+        } else {
+            "Update opens the download page."
+        };
+        let r = row![
+            column![
+                text(format!("Cadenza {} is available", u.version))
+                    .size(15)
+                    .font(ui::bold()),
+                ui::small(if self.update_busy {
+                    self.update_msg.clone()
+                } else {
+                    format!("You have {}. {what}", crate::update::current())
+                }),
+            ]
+            .spacing(3)
+            .width(Length::Fill),
+            ui::btn(
+                "Update",
+                Btn::Primary,
+                (!self.update_busy).then_some(Message::UpdateInstall)
+            ),
+            ui::btn("Later", Btn::Ghost, Some(Message::UpdateLater)),
+        ]
+        .spacing(10)
+        .align_y(Alignment::Center);
+        ui::card(r)
     }
 
     fn topnav(&self) -> El<'_> {

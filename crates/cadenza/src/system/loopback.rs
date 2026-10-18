@@ -279,7 +279,9 @@ unsafe fn run(
 ) -> Result<(), String> {
     let e = |e: windows::core::Error| e.to_string();
     let rate = mix_rate();
+    log::info!("process loopback: activating for pid {pid} at {rate} Hz");
     let client = activate(pid, mode)?;
+    log::info!("process loopback: activated");
     let format = float_format(rate);
     client
         .Initialize(
@@ -297,6 +299,7 @@ unsafe fn run(
     client.SetEventHandle(event).map_err(e)?;
     let capture: IAudioCaptureClient = client.GetService().map_err(e)?;
     client.Start().map_err(e)?;
+    log::info!("process loopback: capturing");
     feed.set_format(rate, CHANNELS as u32);
     let _ = ready.send(Ok(()));
     let mut buf: Vec<f32> = Vec::new();

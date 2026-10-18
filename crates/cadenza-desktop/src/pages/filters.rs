@@ -323,14 +323,14 @@ pub fn view(app: &App, _wide: bool) -> El<'_> {
         );
     }
     c = c.push(ui::hint("Cadenza works out the length (it grows with the ratio, so the filter has the same shape in Hz at every output rate), designs it in 64-bit and caches it. Top: the response up to twice the source Nyquist. Left: the passband ripple. Right: the impulse around its peak. Filters over 2M taps at the chosen rate are not plotted."));
-    column![
-        ui::h1(
-            "Filter designer",
-            "Make an upsampling filter to measure, and look at any filter's response."
-        ),
-        ui::card(c)
-    ]
-    .into()
+    ui::card(
+        column![
+            ui::h2("Filter designer"),
+            ui::hint("Make an upsampling filter to measure, and look at any filter's response."),
+            c
+        ]
+        .spacing(12),
+    )
 }
 
 fn plot_box<'a>(p: Plot, h: f32) -> El<'a> {

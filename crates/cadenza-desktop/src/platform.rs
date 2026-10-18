@@ -35,34 +35,76 @@ pub fn init() -> bool {
 // ----- one instance --------------------------------------------------------------------
 
 /// A local port only Cadenza's window listens on: the first instance holds it; a second
-/// launch connects, says "raise", and exits.
+/// launch connects and says `hello <version>`. The running one answers `quit` when the
+/// newcomer is newer (just updated: it hands over and exits) and `ok` otherwise (it comes
+/// forward and the newcomer exits). Before 3.0.5 the listener only knew `raise`.
 const INSTANCE_PORT: u16 = 47_731;
 
 fn single_instance() -> bool {
     use std::io::{Read, Write};
-    match std::net::TcpListener::bind(("127.0.0.1", INSTANCE_PORT)) {
-        Ok(l) => {
-            std::thread::Builder::new()
-                .name("cadenza-instance".into())
-                .spawn(move || {
-                    for s in l.incoming().flatten() {
-                        let mut s = s;
-                        let mut buf = [0u8; 5];
-                        if s.read_exact(&mut buf).is_ok() && &buf == b"raise" {
-                            send(Message::Raise);
-                        }
+    use std::time::{Duration, Instant};
+    let listen = || std::net::TcpListener::bind(("127.0.0.1", INSTANCE_PORT));
+    let serve = |l: std::net::TcpListener| {
+        std::thread::Builder::new()
+            .name("cadenza-instance".into())
+            .spawn(move || {
+                for s in l.incoming().flatten() {
+                    let mut s = s;
+                    let _ = s.set_read_timeout(Some(Duration::from_secs(1)));
+                    let mut msg = Vec::new();
+                    let mut b = [0u8; 1];
+                    while msg.len() < 64 && matches!(s.read(&mut b), Ok(1)) && b[0] != b'\n' {
+                        msg.push(b[0]);
                     }
-                })
-                .ok();
+                    let msg = String::from_utf8_lossy(&msg).to_string();
+                    let newer = msg.strip_prefix("hello ").is_some_and(|v| {
+                        crate::update::parse_version(v)
+                            > crate::update::parse_version(crate::update::current())
+                    });
+                    if newer {
+                        log::info!("a newer Cadenza ({msg}) is starting: handing over");
+                        let _ = s.write_all(b"quit\n");
+                        send(Message::Quit);
+                        return;
+                    }
+                    let _ = s.write_all(b"ok\n");
+                    send(Message::Raise);
+                }
+            })
+            .ok();
+    };
+    if let Ok(l) = listen() {
+        serve(l);
+        return true;
+    }
+    let Ok(mut s) = std::net::TcpStream::connect(("127.0.0.1", INSTANCE_PORT)) else {
+        // Something else holds the port: run anyway.
+        return true;
+    };
+    let _ = s.write_all(format!("hello {}\n", crate::update::current()).as_bytes());
+    let _ = s.set_read_timeout(Some(Duration::from_secs(3)));
+    let mut reply = String::new();
+    let _ = s.read_to_string(&mut reply);
+    match reply.trim() {
+        "quit" => {
+            // The old one is closing: wait for the port, then carry on as the only one.
+            let until = Instant::now() + Duration::from_secs(15);
+            while Instant::now() < until {
+                if let Ok(l) = listen() {
+                    serve(l);
+                    return true;
+                }
+                std::thread::sleep(Duration::from_millis(200));
+            }
             true
         }
-        Err(_) => {
+        "ok" => false,
+        _ => {
+            // A version before 3.0.5: it only knows "raise".
             if let Ok(mut s) = std::net::TcpStream::connect(("127.0.0.1", INSTANCE_PORT)) {
                 let _ = s.write_all(b"raise");
-                return false;
             }
-            // Something else holds the port: run anyway.
-            true
+            false
         }
     }
 }

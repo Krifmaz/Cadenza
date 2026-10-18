@@ -515,11 +515,10 @@ pub fn choose_rate(
     match preferred {
         Some(r) if output.supports(r, bits) => r,
         Some(r) => {
-            log::warn!(
-                "{} does not support {r} Hz; staying at {source_rate} Hz",
-                output.name()
-            );
-            source_rate
+            // The highest the device takes up to the chosen rate, not the source rate.
+            let got = choose_rate(output, source_rate, None, max_rate.min(r), bits);
+            log::warn!("{} does not support {r} Hz; using {got} Hz", output.name());
+            got
         }
         None => {
             let base = if source_rate % 11025 == 0 {
