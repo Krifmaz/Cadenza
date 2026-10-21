@@ -288,14 +288,8 @@ pub struct Config {
     pub encore: EncoreConfig,
     /// `cadenza endpoint` (the DAC-side network endpoint).
     pub endpoint: EndpointConfig,
-    /// UPnP / DLNA renderer (`cadenza serve`).
-    pub upnp: crate::upnp::UpnpConfig,
-    /// AirPlay 1 receiver (`cadenza serve`).
-    pub airplay: crate::airplay::AirplayConfig,
     /// System-wide input: a virtual output device or one app (`cadenza serve`).
     pub system: crate::system::SystemConfig,
-    /// Local library: saved music folders.
-    pub library: crate::library::LibraryConfig,
 }
 
 impl Config {

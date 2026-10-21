@@ -4,7 +4,6 @@
 //! drive the real engine with the null output.
 #![warn(missing_docs)]
 
-pub mod airplay;
 pub mod api;
 pub mod bench;
 pub mod config;
@@ -13,11 +12,9 @@ pub mod embed;
 pub mod encore;
 pub mod endpoint;
 pub mod engine;
-pub mod library;
 pub mod limit;
 pub mod output;
 pub mod render;
 pub mod room;
 pub mod service;
 pub mod system;
-pub mod upnp;

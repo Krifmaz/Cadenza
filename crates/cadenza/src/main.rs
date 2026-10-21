@@ -3,13 +3,11 @@
 mod cli;
 
 use cadenza::config::{Config, RateSetting};
-use cadenza::engine::{Engine, EngineOptions, Event, Track};
 use cadenza_dsp::dsd::{DsdModulator, DsdOversampling, DsdPacking, DsdRate, OutputMode};
 use cadenza_dsp::gpu::GpuMode;
 use cadenza_dsp::{CoefficientCache, FilterKind};
 use clap::Parser;
 use cli::{Cli, Commands, Overrides};
-use std::time::Duration;
 
 fn main() {
     let cli = Cli::parse();
@@ -30,14 +28,6 @@ fn main() {
         }
     };
     let result = match cli.command {
-        Commands::Play {
-            items,
-            seek,
-            overrides,
-        } => {
-            apply_overrides(&mut config, &overrides);
-            play(&config, items, seek)
-        }
         Commands::Serve {
             listen,
             no_encore,
@@ -463,66 +453,6 @@ fn devices() {
         "\nCompiled backends: {} (endpoint://<name> streams to a `cadenza endpoint` on the network)",
         cadenza::output::backends().join(", ")
     );
-}
-
-fn play(config: &Config, items: Vec<String>, seek: f64) -> anyhow::Result<()> {
-    let mut tracks: Vec<Track> = Vec::new();
-    for a in &items {
-        tracks.extend(
-            Track::from_arg(a)
-                .expand()
-                .map_err(|e| anyhow::anyhow!("{a}: {e}"))?,
-        );
-    }
-    let engine = Engine::start(
-        config.settings(),
-        EngineOptions {
-            cache: CoefficientCache::default_location(),
-            realtime: true,
-            persist: None,
-        },
-    );
-    let mut events = engine.subscribe();
-    let runs = engine.status().runs_finished;
-    engine.play_queue(tracks, 0, seek);
-    let mut last_label = String::new();
-    loop {
-        let st = engine.status();
-        if st.runs_finished > runs {
-            if let Some(e) = &st.error {
-                eprintln!("{e}");
-            }
-            break;
-        }
-        while let Ok(ev) = events.try_recv() {
-            match ev {
-                Event::TrackStarted(t) => println!(
-                    "▶ {}{}",
-                    t.title,
-                    if t.artist.is_empty() {
-                        String::new()
-                    } else {
-                        format!(" — {}", t.artist)
-                    }
-                ),
-                Event::Status(s) => {
-                    if let Some(p) = &s.signal_path {
-                        if p.label != last_label {
-                            last_label = p.label.clone();
-                            println!("  {} → {}", p.label, s.output);
-                            for stage in p.stages.iter().filter(|s| s.active) {
-                                println!("    · {}: {}", stage.name, stage.detail);
-                            }
-                        }
-                    }
-                }
-                Event::TrackPlayed { .. } => {}
-            }
-        }
-        std::thread::sleep(Duration::from_millis(50));
-    }
-    engine.shutdown();
-    Ok(())
 }
 
 fn serve(config: Config, path: std::path::PathBuf) -> anyhow::Result<()> {

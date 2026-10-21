@@ -15,7 +15,6 @@
 
 mod client;
 pub mod commands;
-pub mod library;
 pub mod state;
 
 pub use client::Client;

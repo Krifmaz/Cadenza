@@ -1,6 +1,6 @@
 //! Everything `cadenza serve` runs, as a library call: the engine (with its settings saved
-//! back to the config file) and, as configured, the Encore link, the UPnP renderer, the
-//! AirPlay receiver and the system input. Used by `cadenza serve` and the desktop app.
+//! back to the config file) and, as configured, the Encore link and the system input.
+//! Used by `cadenza serve`.
 
 use crate::config::{Config, Settings};
 use crate::engine::{Engine, EngineOptions};
@@ -8,16 +8,13 @@ use cadenza_dsp::CoefficientCache;
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
 
-/// The running services; dropping it stops the receivers (the engine runs on while any
-/// clone of it lives).
+/// The running services (the engine runs on while any clone of it lives).
 pub struct Services {
     /// The engine.
     pub engine: Engine,
-    _upnp: Option<crate::upnp::UpnpRenderer>,
-    _airplay: Option<crate::airplay::AirplayReceiver>,
 }
 
-/// Start the engine and the configured receivers. `path` is the config file the settings
+/// Start the engine and the configured inputs. `path` is the config file the settings
 /// are saved to when they change.
 pub fn start(config: &Config, path: PathBuf) -> Services {
     // One shared copy of the full config and one path, so engine settings and the system
@@ -57,31 +54,8 @@ pub fn start(config: &Config, path: PathBuf) -> Services {
         }
     });
     crate::encore::start_global(engine.clone(), &config.encore);
-    crate::library::init(config.library.folders.clone());
-    let (sc, sp) = (shared.clone(), path.clone());
-    crate::library::set_persist(move |lib: &crate::library::LibraryConfig| {
-        let mut c = sc.lock().unwrap_or_else(|e| e.into_inner());
-        c.library = lib.clone();
-        if let Err(e) = c.save(&sp) {
-            log::warn!("could not save {}: {e}", sp.display());
-        }
-    });
-    let upnp = config
-        .upnp
-        .enabled
-        .then(|| crate::upnp::start(engine.clone(), &config.upnp, true))
-        .and_then(|r| r.map_err(|e| log::error!("UPnP renderer: {e}")).ok());
-    let airplay = config
-        .airplay
-        .enabled
-        .then(|| crate::airplay::start(engine.clone(), &config.airplay, true))
-        .and_then(|r| r.map_err(|e| log::error!("AirPlay receiver: {e}")).ok());
     if config.system.enabled {
         crate::system::start_global(engine.clone(), &config.system);
     }
-    Services {
-        engine,
-        _upnp: upnp,
-        _airplay: airplay,
-    }
+    Services { engine }
 }
