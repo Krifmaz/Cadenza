@@ -23,6 +23,7 @@ wgpu = ["dep:wgpu", "dep:pollster", "dep:naga"]
 rustfft.workspace = true
 realfft.workspace = true
 hound.workspace = true
+cadenza-eq = { path = "../cadenza-eq", version = "3.0.6" }
 serde.workspace = true
 serde_json.workspace = true
 thiserror.workspace = true
