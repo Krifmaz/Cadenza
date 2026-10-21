@@ -171,6 +171,8 @@ pub enum Message {
     UpdateInstall,
     UpdateInstalled(Result<bool, String>),
     UpdateLater,
+    /// Hotfix builds on or off (Settings → Appearance → Updates).
+    UpdateHotfix(bool),
     Quit,
     FilesDropped(Vec<std::path::PathBuf>),
     Library(pages::library::Msg),
@@ -223,6 +225,8 @@ pub struct App {
     /// What the updater last said ("up to date", "downloading…", an error).
     pub update_msg: String,
     pub update_busy: bool,
+    /// The update check also offers hotfix builds.
+    pub update_hotfix: bool,
     update_hidden: bool,
     pub ticks: u64,
 }
@@ -272,6 +276,7 @@ impl App {
             update: None,
             update_msg: String::new(),
             update_busy: false,
+            update_hotfix: crate::store::load_updates().hotfix,
             update_hidden: false,
             ticks: 0,
         };
@@ -531,14 +536,21 @@ impl App {
                 if asked {
                     self.update_msg = "Checking…".into();
                 }
+                let hotfix = self.update_hotfix;
                 Task::perform(
-                    async {
-                        tokio::task::spawn_blocking(crate::update::check)
+                    async move {
+                        tokio::task::spawn_blocking(move || crate::update::check(hotfix))
                             .await
                             .unwrap_or_else(|e| Err(e.to_string()))
                     },
                     move |r| Message::UpdateChecked(r, asked),
                 )
+            }
+            Message::UpdateHotfix(on) => {
+                self.update_hotfix = on;
+                crate::store::save_updates(&crate::store::Updates { hotfix: on });
+                self.update = None;
+                self.update(Message::UpdateCheck(true))
             }
             Message::UpdateChecked(r, asked) => {
                 self.update_busy = false;

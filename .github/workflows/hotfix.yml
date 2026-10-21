@@ -1,0 +1,28 @@
+# A hotfix build on every push to main: release.yml with channel = hotfix (its header says what that makes – a
+# prerelease hotfix-<version> with the Linux tar.gz files and the Linux and Windows installers, the newest three
+# kept). Full releases are unchanged: push a v* tag or run Release by hand. A push that only touches docs makes
+# none, and neither does one whose head commit says [skip hotfix].
+name: Hotfix
+
+on:
+  push:
+    branches: [main]
+    paths-ignore:
+      - "docs/**"
+      - "**/*.md"
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+# a newer push cancels the hotfix still on its way
+concurrency:
+  group: hotfix
+  cancel-in-progress: true
+
+jobs:
+  hotfix:
+    if: ${{ !contains(github.event.head_commit.message, '[skip hotfix]') }}
+    uses: ./.github/workflows/release.yml
+    with:
+      channel: hotfix

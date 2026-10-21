@@ -3,6 +3,11 @@
 # and publish a GitHub release with one tar.gz per architecture plus SHA256SUMS, together with the desktop app's
 # installers (Linux .deb / .AppImage, Windows .exe, macOS .dmg).
 # Encore's "Download tools" fetches the tar.gz files for server-side processing (`cadenza render`).
+# Hotfixes: hotfix.yml calls this file with channel = hotfix on every push to main. Version <crate version>.<run
+# number> (3.0.6.17; the desktop app shows it, the CLI keeps the crate version), the Linux tar.gz files and the Linux
+# and Windows installers (no macOS: its runner costs 10× minutes), a *prerelease* tagged hotfix-<version> that is never
+# "Latest" – Encore's tool download and the app's normal update check never see it; the app offers it with
+# Hotfixes on. Only the newest three hotfixes are kept.
 name: Release
 
 on:
@@ -13,6 +18,12 @@ on:
       version:
         description: "Version to release (must match the crate version, e.g. 2.2.0)"
         required: true
+  workflow_call:
+    inputs:
+      channel:
+        type: string
+        required: false
+        default: stable
 
 permissions:
   contents: write
@@ -21,8 +32,40 @@ env:
   CARGO_TERM_COLOR: always
 
 jobs:
+  # the version and which desktop builds run (a hotfix leaves macOS out)
+  plan:
+    runs-on: ubuntu-22.04
+    outputs:
+      ver: ${{ steps.p.outputs.ver }}
+      tag: ${{ steps.p.outputs.tag }}
+      desktop: ${{ steps.p.outputs.desktop }}
+    steps:
+      - uses: actions/checkout@v4
+      - id: p
+        shell: bash
+        env:
+          CHANNEL: ${{ inputs.channel }}
+          WANT: ${{ inputs.version || github.ref_name }}
+        run: |
+          crate=$(sed -n '/^\[workspace.package\]/,/^\[/ s/^version *= *"\(.*\)"/\1/p' Cargo.toml)
+          # the desktop builds: os, runner, features, installer formats, the files they make
+          linux='{"os":"linux","runner":"ubuntu-22.04","features":"alsa,wgpu","formats":"deb,appimage","files":"target/release/bundle/*.deb\ntarget/release/bundle/*.AppImage"}'
+          windows='{"os":"windows","runner":"windows-latest","features":"wasapi,asio,loopback,wgpu","formats":"nsis","files":"target/release/bundle/*.exe"}'
+          macos='{"os":"macos","runner":"macos-latest","features":"coreaudio,tap,wgpu","formats":"dmg","files":"target/release/bundle/*.dmg"}'
+          if [ "$CHANNEL" = hotfix ]; then
+            ver="$crate.$GITHUB_RUN_NUMBER"; tag="hotfix-$ver"
+            desktop="[$linux,$windows]"
+          else
+            ver="${WANT#v}"; tag="v$ver"
+            [ "$ver" = "$crate" ] || { echo "version $ver does not match the crate version $crate" >&2; exit 1; }
+            desktop="[$linux,$windows,$macos]"
+          fi
+          echo "ver=$ver" >> "$GITHUB_OUTPUT"; echo "tag=$tag" >> "$GITHUB_OUTPUT"; echo "desktop=$desktop" >> "$GITHUB_OUTPUT"
+          echo "$tag"
+
   build:
     name: Build ${{ matrix.arch }}
+    needs: plan
     strategy:
       fail-fast: true
       matrix:
@@ -47,21 +90,19 @@ jobs:
         id: ver
         shell: bash
         run: |
-          ver="${{ inputs.version || github.ref_name }}"
-          ver="${ver#v}"
+          ver="${{ needs.plan.outputs.ver }}"
           crate=$(cargo metadata --no-deps --format-version 1 | python3 -c 'import json,sys; print(next(p["version"] for p in json.load(sys.stdin)["packages"] if p["name"]=="cadenza"))')
-          if [ "$ver" != "$crate" ]; then
-            echo "version $ver does not match the crate version $crate" >&2
-            exit 1
-          fi
+          # a hotfix (3.0.6.17) is built from the crate version 3.0.6, which the binary reports
+          case "$ver" in "$crate" | "$crate".*) ;; *) echo "version $ver does not match the crate version $crate" >&2; exit 1 ;; esac
           echo "ver=$ver" >> "$GITHUB_OUTPUT"
+          echo "crate=$crate" >> "$GITHUB_OUTPUT"
       - name: Build
         run: cargo build --release --locked -p cadenza --bin cadenza --features ${{ matrix.features }}
       - name: Check the binary
         shell: bash
         run: |
           ./target/release/cadenza render --describe
-          ./target/release/cadenza render --describe | python3 -c 'import json,sys; d=json.load(sys.stdin); assert d["protocol"]==1 and d["version"]=="${{ steps.ver.outputs.ver }}", d'
+          ./target/release/cadenza render --describe | python3 -c 'import json,sys; d=json.load(sys.stdin); assert d["protocol"]==1 and d["version"]=="${{ steps.ver.outputs.crate }}", d'
           objdump -T target/release/cadenza | grep -o 'GLIBC_[0-9.]*' | sort -uV | tail -1
       - name: Package
         shell: bash
@@ -79,29 +120,12 @@ jobs:
 
   desktop:
     name: Desktop app ${{ matrix.os }}
+    needs: plan
     strategy:
       fail-fast: true
       matrix:
-        include:
-          - os: linux
-            runner: ubuntu-22.04
-            features: alsa,wgpu
-            formats: deb,appimage
-            files: |
-              target/release/bundle/*.deb
-              target/release/bundle/*.AppImage
-          - os: windows
-            runner: windows-latest
-            features: wasapi,asio,loopback,wgpu
-            formats: nsis
-            files: |
-              target/release/bundle/*.exe
-          - os: macos
-            runner: macos-latest
-            features: coreaudio,tap,wgpu
-            formats: dmg
-            files: |
-              target/release/bundle/*.dmg
+        # from plan: linux, windows and macos (a hotfix has no macos)
+        include: ${{ fromJSON(needs.plan.outputs.desktop) }}
     runs-on: ${{ matrix.runner }}
     steps:
       - uses: actions/checkout@v4
@@ -115,11 +139,16 @@ jobs:
         with:
           key: desktop-iced-${{ matrix.os }}
       - name: Build the app
+        env:
+          # the version the app shows and compares updates with (a hotfix's 3.0.6.17)
+          CADENZA_VERSION: ${{ needs.plan.outputs.ver }}
         run: cargo build --release --locked -p cadenza-desktop --features ${{ matrix.features }}
       - name: cargo-packager
         run: cargo install cargo-packager --version 0.11.8 --locked
       - name: Build the installers
         working-directory: crates/cadenza-desktop
+        env:
+          CADENZA_VERSION: ${{ needs.plan.outputs.ver }}
         run: cargo packager --release --formats ${{ matrix.formats }}
       - uses: actions/upload-artifact@v4
         with:
@@ -129,7 +158,7 @@ jobs:
 
   release:
     name: Publish
-    needs: [build, desktop]
+    needs: [plan, build, desktop]
     runs-on: ubuntu-22.04
     steps:
       - uses: actions/download-artifact@v4
@@ -147,10 +176,12 @@ jobs:
           cat SHA256SUMS
       - uses: softprops/action-gh-release@v2
         with:
-          tag_name: ${{ inputs.version && format('v{0}', inputs.version) || github.ref_name }}
+          tag_name: ${{ needs.plan.outputs.tag }}
           target_commitish: ${{ github.sha }}
-          name: Cadenza ${{ inputs.version && format('v{0}', inputs.version) || github.ref_name }}
+          name: Cadenza ${{ inputs.channel == 'hotfix' && format('{0} (hotfix)', needs.plan.outputs.ver) || needs.plan.outputs.tag }}
           generate_release_notes: true
+          prerelease: ${{ inputs.channel == 'hotfix' }}
+          make_latest: ${{ inputs.channel == 'hotfix' && 'false' || 'true' }}
           files: |
             dist/*.tar.gz
             dist/*.deb
@@ -158,3 +189,14 @@ jobs:
             dist/*.exe
             dist/*.dmg
             dist/SHA256SUMS
+      # a hotfix: only the newest three hotfix releases (and their tags) stay
+      - name: Keep only the newest three hotfixes
+        if: inputs.channel == 'hotfix'
+        continue-on-error: true
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          KEEP: 3
+        run: |
+          OLD=$(gh release list --repo "$GITHUB_REPOSITORY" --limit 200 --json tagName -q '.[].tagName' \
+                | sed -n 's/^hotfix-\([0-9]*\.[0-9]*\.[0-9]*\.[0-9]*\)$/\1/p' | sort -t. -k1,1n -k2,2n -k3,3n -k4,4n -r | tail -n +$((KEEP + 1)))
+          for v in $OLD; do echo "deleting hotfix-$v"; gh release delete "hotfix-$v" --repo "$GITHUB_REPOSITORY" --yes --cleanup-tag || true; done

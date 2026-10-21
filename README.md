@@ -644,7 +644,11 @@ calls the engine directly; no web view is involved.
 Installers come with each release: `.exe` (Windows), `.dmg` (macOS), `.deb` and `.AppImage`
 (Linux). They are not code-signed, so Windows SmartScreen and macOS Gatekeeper ask before the
 first start (on macOS: right-click → Open). To update, close Cadenza (also from the tray) and
-run the new installer. To build it yourself:
+run the new installer, or use *Update now* (Appearance → Updates; on Windows it installs and
+restarts by itself). Every push to `main` also builds a hotfix, a prerelease `hotfix-<version>.<n>`
+with the Linux and Windows installers and the Linux tar.gz files; switch on *Hotfixes* there to
+be offered them (a full release is still offered when it is newer). Only the newest three
+hotfixes are kept. To build it yourself:
 
 ```sh
 cargo build --release -p cadenza-desktop --features alsa,wgpu             # Linux (needs libgtk-3-dev, libayatana-appindicator3-dev, libxdo-dev)

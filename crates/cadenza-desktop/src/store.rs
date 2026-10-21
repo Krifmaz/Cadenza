@@ -62,6 +62,21 @@ pub fn save_appearance(a: &Appearance) {
     write("appearance.json", a);
 }
 
+/// Whether the update check also offers hotfix builds (every push to main).
+#[derive(Clone, Debug, Default, Serialize, Deserialize)]
+pub struct Updates {
+    #[serde(default)]
+    pub hotfix: bool,
+}
+
+pub fn load_updates() -> Updates {
+    read("updates.json")
+}
+
+pub fn save_updates(u: &Updates) {
+    write("updates.json", u);
+}
+
 /// The window's last size (logical pixels) and position.
 #[derive(Clone, Debug, Default, Serialize, Deserialize)]
 pub struct WindowState {

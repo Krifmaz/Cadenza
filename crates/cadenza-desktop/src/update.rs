@@ -1,11 +1,18 @@
 //! Updates: look at the latest GitHub release, and on Windows download its installer and
 //! run it hands-off (it closes Cadenza, installs, and starts the new version). Elsewhere
 //! the release page opens in the browser.
+//!
+//! With hotfixes on (Settings → Appearance → Updates), the newest of the full releases and the
+//! hotfix prereleases CI publishes on every push to main (`hotfix-3.0.6.17`) counts; a full
+//! release is newer than every hotfix before it (3.0.7 > 3.0.6.17). Older downloaded
+//! installers are deleted before a new one is fetched.
 
 use serde::Deserialize;
 use std::path::PathBuf;
 
 const REPO: &str = "Krifmaz/Cadenza";
+/// The tag prefix of the builds CI publishes on every push (.github/workflows/hotfix.yml).
+const HOTFIX: &str = "hotfix-";
 
 /// A newer release than this build.
 #[derive(Clone, Debug)]
@@ -34,10 +41,12 @@ struct Asset {
     browser_download_url: String,
 }
 
-/// `3.0.12` → `(3, 0, 12)`; anything unparsable counts as 0.
-pub fn parse_version(v: &str) -> (u32, u32, u32) {
+/// `3.0.12` → `(3, 0, 12, 0)`, a hotfix `hotfix-3.0.12.4` → `(3, 0, 12, 4)`; anything
+/// unparsable counts as 0.
+pub fn parse_version(v: &str) -> (u32, u32, u32, u32) {
     let mut p = v
         .trim()
+        .trim_start_matches(HOTFIX)
         .trim_start_matches('v')
         .split(['.', '-', '+'])
         .map(|x| x.parse::<u32>().unwrap_or(0));
@@ -45,11 +54,42 @@ pub fn parse_version(v: &str) -> (u32, u32, u32) {
         p.next().unwrap_or(0),
         p.next().unwrap_or(0),
         p.next().unwrap_or(0),
+        p.next().unwrap_or(0),
     )
 }
 
+/// This build's version: the hotfix number when CI built it as one (`CADENZA_VERSION`).
 pub fn current() -> &'static str {
-    env!("CARGO_PKG_VERSION")
+    option_env!("CADENZA_VERSION").unwrap_or(env!("CARGO_PKG_VERSION"))
+}
+
+/// The release to offer from GitHub's list: full releases, and with `hotfix` also the hotfix
+/// prereleases; the highest version wins. Drafts and other prereleases never count.
+fn pick(releases: Vec<Release>, hotfix: bool) -> Option<Release> {
+    releases
+        .into_iter()
+        .filter(|r| !r.draft)
+        .filter(|r| {
+            let is_hotfix = r.tag_name.starts_with(HOTFIX);
+            if r.prerelease {
+                hotfix && is_hotfix
+            } else {
+                !is_hotfix
+            }
+        })
+        .max_by_key(|r| parse_version(&r.tag_name))
+}
+
+fn get(url: &str) -> Result<ureq::Response, String> {
+    ureq::get(url)
+        .set(
+            "User-Agent",
+            concat!("cadenza-desktop/", env!("CARGO_PKG_VERSION")),
+        )
+        .set("Accept", "application/vnd.github+json")
+        .timeout(std::time::Duration::from_secs(15))
+        .call()
+        .map_err(|e| e.to_string())
 }
 
 /// The installer that fits this system, from a release's file names.
@@ -68,22 +108,26 @@ fn pick_asset(names: &[String]) -> Option<usize> {
         .position(|n| ends.iter().any(|e| n.ends_with(e)))
 }
 
-/// Ask GitHub for the latest release; `Ok(None)` when this build is up to date.
-pub fn check() -> Result<Option<Update>, String> {
-    let r: Release = ureq::get(&format!(
-        "https://api.github.com/repos/{REPO}/releases/latest"
-    ))
-    .set(
-        "User-Agent",
-        concat!("cadenza-desktop/", env!("CARGO_PKG_VERSION")),
-    )
-    .set("Accept", "application/vnd.github+json")
-    .timeout(std::time::Duration::from_secs(15))
-    .call()
-    .map_err(|e| e.to_string())?
-    .into_json()
-    .map_err(|e| e.to_string())?;
-    if r.draft || r.prerelease || parse_version(&r.tag_name) <= parse_version(current()) {
+/// Ask GitHub for the latest release (with `hotfix`, the newest release or hotfix);
+/// `Ok(None)` when this build is up to date.
+pub fn check(hotfix: bool) -> Result<Option<Update>, String> {
+    let releases: Vec<Release> = if hotfix {
+        get(&format!(
+            "https://api.github.com/repos/{REPO}/releases?per_page=30"
+        ))?
+        .into_json()
+        .map_err(|e| e.to_string())?
+    } else {
+        vec![get(&format!(
+            "https://api.github.com/repos/{REPO}/releases/latest"
+        ))?
+        .into_json()
+        .map_err(|e| e.to_string())?]
+    };
+    let Some(r) = pick(releases, hotfix) else {
+        return Ok(None);
+    };
+    if parse_version(&r.tag_name) <= parse_version(current()) {
         return Ok(None);
     }
     let names: Vec<String> = r.assets.iter().map(|a| a.name.clone()).collect();
@@ -94,7 +138,11 @@ pub fn check() -> Result<Option<Update>, String> {
         )
     });
     Ok(Some(Update {
-        version: r.tag_name.trim_start_matches('v').to_string(),
+        version: r
+            .tag_name
+            .trim_start_matches(HOTFIX)
+            .trim_start_matches('v')
+            .to_string(),
         asset,
         page: r.html_url,
     }))
@@ -111,6 +159,8 @@ fn download(name: &str, url: &str) -> Result<PathBuf, String> {
         .call()
         .map_err(|e| e.to_string())?;
     let dir = std::env::temp_dir().join("cadenza-update");
+    // installers of earlier updates are no use any more
+    let _ = std::fs::remove_dir_all(&dir);
     std::fs::create_dir_all(&dir).map_err(|e| e.to_string())?;
     let path = dir.join(name);
     let part = path.with_extension("part");
@@ -166,8 +216,43 @@ mod tests {
     fn versions_compare_by_number() {
         assert!(parse_version("v3.0.10") > parse_version("3.0.9"));
         assert!(parse_version("3.1.0") > parse_version("3.0.99"));
-        assert_eq!(parse_version("v3.0.5"), (3, 0, 5));
-        assert_eq!(parse_version("junk"), (0, 0, 0));
+        assert_eq!(parse_version("v3.0.5"), (3, 0, 5, 0));
+        assert_eq!(parse_version("junk"), (0, 0, 0, 0));
+        assert_eq!(parse_version("hotfix-3.0.6.17"), (3, 0, 6, 17));
+        assert!(parse_version("hotfix-3.0.6.17") > parse_version("3.0.6"));
+        assert!(parse_version("v3.0.7") > parse_version("hotfix-3.0.6.17"));
+    }
+
+    fn rel(tag: &str, prerelease: bool, draft: bool) -> Release {
+        Release {
+            tag_name: tag.into(),
+            html_url: String::new(),
+            assets: vec![],
+            draft,
+            prerelease,
+        }
+    }
+
+    #[test]
+    fn hotfixes_count_only_when_switched_on() {
+        let list = || {
+            vec![
+                rel("hotfix-3.0.6.18", true, true),
+                rel("hotfix-3.0.6.17", true, false),
+                rel("v3.1.0-beta", true, false),
+                rel("v3.0.6", false, false),
+            ]
+        };
+        assert_eq!(pick(list(), true).unwrap().tag_name, "hotfix-3.0.6.17");
+        assert_eq!(pick(list(), false).unwrap().tag_name, "v3.0.6");
+        let mut l = list();
+        l.push(rel("v3.0.7", false, false));
+        assert_eq!(
+            pick(l, true).unwrap().tag_name,
+            "v3.0.7",
+            "a full release beats older hotfixes"
+        );
+        assert!(pick(vec![], true).is_none());
     }
 
     #[test]

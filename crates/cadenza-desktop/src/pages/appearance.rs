@@ -421,7 +421,8 @@ pub fn view(app: &App, wide: bool) -> El<'_> {
                         ]
                         .spacing(8),
                         ui::small(app.update_msg.clone()),
-                        ui::hint("Cadenza looks for a new version when it starts and every few hours. On Windows, Update installs it and restarts Cadenza; elsewhere it opens the download page."),
+                        ui::switch(app.update_hotfix, "Hotfixes", Message::UpdateHotfix),
+                        ui::hint("Cadenza looks for a new version when it starts and every few hours. On Windows, Update installs it and restarts Cadenza; elsewhere it opens the download page. Hotfixes: also the build of every change on GitHub (Linux and Windows); a full release is still offered when it is newer."),
                     ]
                     .spacing(12)
                 ),
