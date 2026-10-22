@@ -214,7 +214,7 @@ pub fn start(app: &App) -> Task<Message> {
     window::run(id, |w| {
         #[cfg(target_os = "windows")]
         {
-            use raw_window_handle::{HasWindowHandle, RawWindowHandle};
+            use raw_window_handle::RawWindowHandle;
             if let Ok(RawWindowHandle::Win32(h)) = w.window_handle().map(|h| h.as_raw()) {
                 return Some(h.hwnd.get());
             }
