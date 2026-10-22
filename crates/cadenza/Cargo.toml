@@ -1,6 +1,6 @@
 [package]
 name = "cadenza"
-description = "Cadenza: an open-source bit-perfect / upsampling music playback engine with a control API, a web UI and Encore integration"
+description = "Cadenza: an open-source bit-perfect upsampling engine for your DAC, with a control API and Encore integration"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
@@ -60,14 +60,6 @@ gethostname = "1"
 cpal = { version = "0.15", optional = true }
 # Endpoint discovery (`_cadenza-endpoint._tcp`).
 mdns-sd = "0.13"
-# UPnP renderer: SSDP socket options and the interface list.
-socket2 = { version = "0.6", features = ["all"] }
-if-addrs = "0.13"
-rsa = "0.9"
-sha1 = "0.10"
-aes = "0.8"
-cbc = "0.1"
-base64 = "0.22"
 
 [target.'cfg(target_os = "linux")'.dependencies]
 alsa = { version = "0.9", optional = true }

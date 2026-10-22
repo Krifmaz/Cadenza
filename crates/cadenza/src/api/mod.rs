@@ -100,17 +100,6 @@ pub fn router_with_room(engine: Engine, room: crate::room::Room) -> Router {
             "/api/encore",
             get(|| async { Json(crate::encore::status()) }).post(encore_set),
         )
-        .route("/api/encore/albums", get(encore_albums))
-        .route("/api/encore/albums/{id}", get(encore_album))
-        .route("/api/encore/tracks", get(encore_tracks))
-        .route("/api/encore/cover/{id}", get(encore_cover))
-        .route("/api/encore/play", post(encore_play))
-        .route(
-            "/api/library/folders",
-            get(library_folders).post(library_set_folders),
-        )
-        .route("/api/library/browse", get(library_browse))
-        .route("/api/library/scan", get(library_scan))
         .route("/api/limit", get(limit_status))
         .route("/api/limit/start", post(limit_start))
         .route("/api/limit/cancel", post(limit_cancel))
@@ -325,131 +314,13 @@ async fn system_set(
 }
 
 /// `POST /api/encore`: sign in to an Encore server (so Cadenza appears as a playback
-/// device and its library is available), switch servers, or sign out with an empty URL.
+/// device), switch servers, or sign out with an empty URL.
 async fn encore_set(
     State(st): State<AppState>,
     Json(cfg): Json<crate::config::EncoreConfig>,
 ) -> Result<Json<Value>, ApiError> {
     crate::encore::set_config(st.engine.clone(), &cfg);
     Ok(Json(crate::encore::status()))
-}
-
-/// Run a request against the signed-in Encore server off the async runtime.
-async fn with_encore<T: Send + 'static>(
-    f: impl FnOnce(&Arc<crate::encore::Client>) -> Result<T, String> + Send + 'static,
-) -> Result<T, ApiError> {
-    let c = crate::encore::client()
-        .ok_or_else(|| ApiError(StatusCode::CONFLICT, "not signed in to Encore".into()))?;
-    tokio::task::spawn_blocking(move || f(&c))
-        .await
-        .map_err(|e| ApiError(StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?
-        .map_err(|e| ApiError(StatusCode::BAD_GATEWAY, e))
-}
-
-#[derive(Deserialize, Default)]
-#[serde(default)]
-struct LibQuery {
-    q: String,
-    offset: u32,
-    limit: Option<u32>,
-    s: Option<u32>,
-    path: String,
-}
-
-async fn encore_albums(Query(q): Query<LibQuery>) -> Result<Json<Value>, ApiError> {
-    let limit = q.limit.unwrap_or(120);
-    with_encore(move |c| crate::encore::library::albums(c, q.q.trim(), q.offset, limit))
-        .await
-        .map(Json)
-}
-
-async fn encore_album(Path(id): Path<String>) -> Result<Json<Value>, ApiError> {
-    with_encore(move |c| crate::encore::library::album(c, &id))
-        .await
-        .map(Json)
-}
-
-async fn encore_tracks(Query(q): Query<LibQuery>) -> Result<Json<Value>, ApiError> {
-    let limit = q.limit.unwrap_or(200);
-    with_encore(move |c| crate::encore::library::tracks(c, q.q.trim(), limit))
-        .await
-        .map(Json)
-}
-
-async fn encore_cover(
-    Path(id): Path<String>,
-    Query(q): Query<LibQuery>,
-) -> Result<Response, ApiError> {
-    let size = q.s.unwrap_or(0).min(2000);
-    let (kind, body) = with_encore(move |c| crate::encore::library::cover(c, &id, size)).await?;
-    Ok((
-        [
-            (axum::http::header::CONTENT_TYPE, kind),
-            (
-                axum::http::header::CACHE_CONTROL,
-                "private, max-age=3600".to_string(),
-            ),
-        ],
-        body,
-    )
-        .into_response())
-}
-
-#[derive(Deserialize)]
-struct EncorePlayBody {
-    items: Vec<Value>,
-    #[serde(default)]
-    index: usize,
-    #[serde(default)]
-    mode: Option<String>,
-}
-
-/// `POST /api/encore/play`: Encore tracks (as the library endpoints list them) into the
-/// queue; the stream credentials are added here, never by the page.
-async fn encore_play(
-    State(st): State<AppState>,
-    Json(b): Json<EncorePlayBody>,
-) -> Result<Json<Value>, ApiError> {
-    let engine = st.engine.clone();
-    let mode = b.mode.unwrap_or_default();
-    let n =
-        with_encore(move |c| crate::encore::library::play(c, &engine, &b.items, b.index, &mode))
-            .await?;
-    Ok(Json(json!({ "ok": true, "queued": n })))
-}
-
-async fn library_folders() -> Json<Value> {
-    Json(json!({ "folders": crate::library::folders() }))
-}
-
-#[derive(Deserialize)]
-struct FoldersBody {
-    folders: Vec<String>,
-}
-
-/// `POST /api/library/folders`: the saved music folders (shortcuts in the local library).
-async fn library_set_folders(Json(b): Json<FoldersBody>) -> Json<Value> {
-    crate::library::set_folders(b.folders);
-    Json(json!({ "folders": crate::library::folders() }))
-}
-
-/// `GET /api/library/browse?path=`: a folder's sub-folders and audio files (the drives or
-/// the file-system root when `path` is empty).
-async fn library_browse(Query(q): Query<LibQuery>) -> Result<Json<Value>, ApiError> {
-    tokio::task::spawn_blocking(move || crate::library::browse(&q.path))
-        .await
-        .map_err(|e| ApiError(StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?
-        .map(Json)
-        .map_err(bad)
-}
-
-/// `GET /api/library/scan?path=`: every audio file under a folder, in play order.
-async fn library_scan(Query(q): Query<LibQuery>) -> Result<Json<Value>, ApiError> {
-    tokio::task::spawn_blocking(move || crate::library::scan(std::path::Path::new(&q.path)))
-        .await
-        .map_err(|e| ApiError(StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?
-        .map(|files| Json(json!({ "files": files })))
-        .map_err(bad)
 }
 
 /// Checks beyond what deserialising enforces (shared with the Encore command handler).

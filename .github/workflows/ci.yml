@@ -25,7 +25,6 @@ jobs:
           sudo apt-get update && sudo apt-get install -y libasound2-dev pkg-config mesa-vulkan-drivers
           libpipewire-0.3-dev libspa-0.2-dev clang libclang-dev
           pipewire pipewire-bin wireplumber dbus
-          libgtk-3-dev libayatana-appindicator3-dev libxdo-dev libxkbcommon-dev libssl-dev
       - uses: Swatinem/rust-cache@v2
       - name: Format
         run: cargo fmt --all -- --check
@@ -56,8 +55,6 @@ jobs:
           cargo test --release -p cadenza-dsp --features wgpu -- --ignored wgpu_backend
       - name: Build with CUDA feature (no toolkit needed)
         run: cargo build --release --features cuda
-      - name: Build the desktop app
-        run: cargo build --release -p cadenza-desktop --features alsa
 
   macos:
     name: macOS · build (coreaudio)
@@ -68,8 +65,6 @@ jobs:
       - uses: Swatinem/rust-cache@v2
       - name: Build
         run: cargo build --release --features coreaudio,wgpu,tap
-      - name: Build the desktop app
-        run: cargo build --release -p cadenza-desktop --features coreaudio,tap
       - name: Unit tests (output + endpoint, no device needed)
         run: "cargo test --release -p cadenza --features coreaudio,tap --lib -- output:: endpoint:: system::"
 
@@ -82,8 +77,6 @@ jobs:
       - uses: Swatinem/rust-cache@v2
       - name: Build
         run: cargo build --release --features wasapi,asio,wgpu,loopback
-      - name: Build the desktop app
-        run: cargo build --release -p cadenza-desktop --features wasapi,asio,loopback
       - name: Device listing (no audio device on the runner)
         run: cargo run --release --features wasapi,asio -- devices
       - name: Unit tests (output + endpoint, no device needed)

@@ -161,24 +161,17 @@
   .arrow { display: grid; place-items: center; color: var(--faint); font-size: 16px; }
   .chain .summary { flex-basis: 100%; margin-top: 4px; }
   @media (max-width: 560px) { .arrow { display: none; } .stage { flex-basis: 100%; } }
-  .queue div { padding: 8px 10px; border-radius: 10px; cursor: pointer; display: flex; gap: 10px; }
-  .queue div:hover { background: var(--panel-2); }
-  .queue .cur { color: var(--text); background: rgba(var(--accent-rgb), .14); font-weight: 650; }
 
   /* player bar */
   .player { position: fixed; left: 0; right: 0; bottom: 0; height: var(--player-h); z-index: 20;
     background: color-mix(in srgb, var(--bg-2) 88%, transparent); backdrop-filter: blur(18px); -webkit-backdrop-filter: blur(18px);
-    border-top: 1px solid var(--border); display: grid; grid-template-columns: minmax(0, 1fr) minmax(0, 1.4fr) minmax(0, 1fr); align-items: center; gap: 18px; padding: 0 18px; }
+    border-top: 1px solid var(--border); display: grid; grid-template-columns: minmax(0, 1fr) minmax(0, 1fr); align-items: center; gap: 18px; padding: 0 18px; }
   .player .now { display: flex; align-items: center; gap: 12px; min-width: 0; }
   .player .thumb { width: 52px; height: 52px; border-radius: 8px; background: var(--grad); overflow: hidden; flex: none; display: grid; place-items: center; }
   .player .thumb img { width: 100%; height: 100%; object-fit: cover; }
   .player .thumb svg { width: 22px; height: 22px; }
   .thumb > *, .art > * { grid-area: 1 / 1; }
   .player .t { font-weight: 650; }
-  .player .ctrls { display: flex; flex-direction: column; align-items: center; gap: 4px; }
-  .player .ctrls .row { gap: 6px; flex-wrap: nowrap; }
-  .player #toggle { width: 40px; height: 40px; padding: 0; border-radius: 50%; }
-  .seek { display: flex; align-items: center; gap: 10px; width: 100%; max-width: 560px; font-size: 11px; color: var(--faint); font-variant-numeric: tabular-nums; }
   .player .vol { display: flex; align-items: center; justify-content: flex-end; gap: 10px; }
   .player .vol input { max-width: 140px; }
   .player .vol svg { width: 18px; height: 18px; color: var(--muted); flex: none; }
@@ -206,27 +199,14 @@
     .nav a.active { box-shadow: inset 0 -3px 0 var(--accent); }
     .main { padding: 18px 16px calc(var(--player-h) + 24px); }
     .player { grid-template-columns: minmax(0, 1fr) auto; grid-template-rows: auto auto; height: auto; padding: 10px 14px calc(10px + env(safe-area-inset-bottom)); gap: 8px 12px; }
-    .player .ctrls { grid-column: 1 / -1; grid-row: 2; }
-    .player .vol { grid-column: 2; grid-row: 1; }
+      .player .vol { grid-column: 2; grid-row: 1; }
     .player .vol input { width: 90px; }
   }
-  .lib-list > div { display: flex; align-items: center; gap: 10px; padding: 7px 10px; border-radius: 10px; cursor: pointer; }
-  .lib-list > div:hover { background: var(--panel-2); }
-  .lib-list .ico { width: 18px; height: 18px; flex: none; color: var(--muted); }
-  .lib-list .name { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-  .lib-list .meta { color: var(--muted); font-size: 12.5px; flex: none; }
-  .lib-list .acts { display: flex; gap: 6px; flex: none; }
-  .lib-list .acts button { padding: 4px 9px; font-size: 12px; }
-  .lib-folders { display: flex; flex-wrap: wrap; gap: 6px; margin-bottom: 12px; }
-  .lib-folders button { padding: 5px 10px; font-size: 12.5px; }
-  .lib-folders button i { font-style: normal; margin-left: 6px; color: var(--muted); }
   .albums { display: grid; grid-template-columns: repeat(auto-fill, minmax(150px, 1fr)); gap: 16px; }
   .albums .alb { cursor: pointer; min-width: 0; }
   .albums .alb img { width: 100%; aspect-ratio: 1; border-radius: 12px; object-fit: cover; background: var(--panel-2); display: block; }
   .albums .alb b, .albums .alb span { display: block; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; margin-top: 6px; }
   .albums .alb span { color: var(--muted); font-size: 12.5px; margin-top: 2px; }
-  .lib-head { display: flex; gap: 16px; align-items: flex-end; margin-bottom: 14px; flex-wrap: wrap; }
-  .lib-head img { width: 140px; height: 140px; border-radius: 12px; object-fit: cover; background: var(--panel-2); }
 </style>
 </head>
 <body>
@@ -235,7 +215,6 @@
     <div class="brand"><div class="logo"><svg viewBox="0 0 24 24" fill="none" stroke="var(--on-accent)" stroke-width="2.2" stroke-linecap="round"><path d="M4 13v-2M8 17V7M12 20V4M16 16V8M20 13v-2"/></svg></div><span>Cadenza</span></div>
     <nav class="nav" id="nav">
       <a data-view="now"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="9"/><path d="m10 8.5 5 3.5-5 3.5z"/></svg>Now playing</a>
-      <a data-view="library"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M4 4v16M9 4v16M14 4l5 16"/></svg>Library</a>
       <a data-view="guide"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="9"/><path d="M9.5 9a2.5 2.5 0 1 1 3.5 2.3c-.6.3-1 .9-1 1.6V14M12 17h.01"/></svg>Guide</a>
       <div class="nav-label">Engine</div>
       <a data-view="sound"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="M4 21v-7M4 10V3M12 21v-9M12 8V3M20 21v-5M20 12V3M1 14h6M9 8h6M17 16h6"/></svg>Sound</a>
@@ -271,40 +250,10 @@
           <h2>Signal path</h2>
           <div class="chain" id="chain"><span class="muted">Stopped.</span></div>
         </div>
-        <div class="card wide">
-          <h2>Queue</h2>
-          <div class="queue small" id="queue"><span class="muted">Empty. Play files with <code>cadenza play</code>, or send music from Encore.</span></div>
-        </div>
       </div>
     </section>
 
     <!-- Sound -->
-    <section class="view" data-view="library" hidden>
-      <div class="page-head"><div><h1>Library</h1><p>Your music folders and, once you sign in on the Encore page, your Encore library. Everything plays through this engine to your DAC.</p></div></div>
-      <div class="seg" id="lib-tabs" style="margin-bottom:14px"><button data-src="local" class="on">Local</button><button data-src="encore">Encore</button></div>
-      <div class="card" id="lib-local">
-        <div class="lib-folders" id="lib-folders"></div>
-        <div class="row"><input type="text" id="lib-path" placeholder="A folder, e.g. D:\Music or /home/me/Music" style="flex:1;min-width:200px"><button id="lib-go">Open</button><button id="lib-home" class="ghost">Drives</button></div>
-        <div class="row" id="lib-folder-acts" style="margin-top:10px" hidden><button class="primary" id="lib-play-folder">Play this folder</button><button id="lib-add-folder">Add to queue</button><button class="ghost" id="lib-save">Save folder</button></div>
-        <div class="small muted" id="lib-msg" style="margin-top:8px"></div>
-        <div class="lib-list" id="lib-list" style="margin-top:8px"></div>
-        <div class="hint" style="margin-top:12px">In the desktop app you can also drop files or folders onto the window to add them to the queue.</div>
-      </div>
-      <div class="card" id="lib-encore" hidden>
-        <div class="row"><input type="text" id="lib-q" placeholder="Search albums, artists and songs" style="flex:1;min-width:200px"><button id="lib-search">Search</button></div>
-        <div class="small muted" id="lib-emsg" style="margin-top:8px"></div>
-        <div id="lib-ebrowse" style="margin-top:12px">
-          <div class="lib-list" id="lib-etracks"></div>
-          <div class="albums" id="lib-albums"></div>
-          <div class="row" style="margin-top:14px"><button id="lib-more" hidden>More albums</button></div>
-        </div>
-        <div id="lib-ealbum" hidden style="margin-top:12px">
-          <button class="ghost" id="lib-back">← Albums</button>
-          <div class="lib-head" style="margin-top:10px"><img id="lib-acover" alt=""><div><h2 id="lib-atitle" style="margin:0"></h2><div class="muted" id="lib-aartist"></div><div class="row" style="margin-top:10px"><button class="primary" id="lib-aplay">Play album</button><button id="lib-aadd">Add to queue</button></div></div></div>
-          <div class="lib-list" id="lib-atracks"></div>
-        </div>
-      </div>
-    </section>
     <section class="view" data-view="sound" hidden>
       <div class="page-head"><div><h1>Sound</h1><p>Upsampling, dither, DSD and the processing before them.</p></div></div>
       <div class="grid">
@@ -612,15 +561,6 @@
       <div class="small err ellipsis" id="bar-error"></div>
     </div>
   </div>
-  <div class="ctrls">
-    <div class="row">
-      <button class="ghost icon" data-a="prev" title="Previous"><svg viewBox="0 0 24 24" fill="currentColor"><path d="M6 5h2v14H6zM20 5v14L9 12z"/></svg></button>
-      <button class="primary" data-a="toggle" id="toggle" title="Play / pause"></button>
-      <button class="ghost icon" data-a="next" title="Next"><svg viewBox="0 0 24 24" fill="currentColor"><path d="M16 5h2v14h-2zM4 5v14l11-7z"/></svg></button>
-      <button class="ghost icon" data-a="stop" title="Stop"><svg viewBox="0 0 24 24" fill="currentColor"><rect x="6" y="6" width="12" height="12" rx="1.5"/></svg></button>
-    </div>
-    <div class="seek"><span id="pos">0:00</span><input type="range" id="seek" min="0" max="1000" value="0"><span id="dur">0:00</span></div>
-  </div>
   <div class="vol">
     <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M11 5 6 9H2v6h4l5 4zM15.5 8.5a5 5 0 0 1 0 7M19 5a10 10 0 0 1 0 14"/></svg>
     <input type="range" id="vol" min="0" max="1" step="0.01" title="Volume">
@@ -629,9 +569,6 @@
 <script>
 const $ = (id) => document.getElementById(id);
 $('cover').onerror = () => { $('cover').dataset.bad = $('cover').getAttribute('src'); $('cover').hidden = true; $('cover-big').hidden = true; };
-const ICON_PLAY = '<svg viewBox="0 0 24 24" fill="currentColor"><path d="M8 5.5v13l11-6.5z"/></svg>';
-const ICON_PAUSE = '<svg viewBox="0 0 24 24" fill="currentColor"><rect x="6.5" y="5" width="4" height="14" rx="1"/><rect x="13.5" y="5" width="4" height="14" rx="1"/></svg>';
-$('toggle').innerHTML = ICON_PLAY;
 
 // Views: the sidebar picks one; the choice lives in the URL hash.
 const VIEWS = [...document.querySelectorAll('.view')].map(v => v.dataset.view);
@@ -655,7 +592,7 @@ const api = async (method, path, body) => {
   if (!r.ok) throw new Error(j.error || r.statusText);
   return j;
 };
-let status = null, dragging = false, eqBands = [], loaded = false;
+let status = null, eqBands = [], loaded = false;
 let options = null, filters = [], dithers = [], devices = [];
 const EQ_TYPES = ['peaking', 'low-shelf', 'high-shelf', 'low-pass', 'high-pass', 'notch'];
 const opts = (list, val = 'id', label = 'label') => list.map(o => `<option value="${esc(o[val])}">${esc(o[label] ?? o[val])}</option>`).join('');
@@ -768,16 +705,9 @@ function paint(s) {
   $('sub-big').textContent = $('sub').textContent;
   $('fmt').textContent = s.source_format || '';
   $('output').textContent = s.output ? `${s.output}${s.output_format ? ' · ' + formatLabel(s.output_format) : ''}${s.output_exclusive ? ' · exclusive' : ''}` : '';
-  $('toggle').innerHTML = s.state === 'playing' ? ICON_PAUSE : ICON_PLAY;
-  if (!dragging) {
-    $('seek').value = s.duration ? (s.position / s.duration) * 1000 : 0;
-    $('pos').textContent = dur(s.position);
-  }
-  $('dur').textContent = dur(s.duration);
   if (document.activeElement !== $('vol')) $('vol').value = s.volume_linear ?? 1;
   $('error').textContent = s.error || '';
   $('bar-error').textContent = s.error || ''; $('bar-error').title = s.error || '';
-  $('queue').innerHTML = s.queue?.length ? s.queue.map((q, i) => `<div data-i="${i}" class="${i === s.index ? 'cur' : ''}">${i + 1}. ${esc(q.title)}${q.artist ? ' – ' + esc(q.artist) : ''}</div>`).join('') : '<span class="muted">Empty. Play files with <code>cadenza play</code>, or send music from Encore.</span>';
   const p = s.signal_path;
   $('bp').className = 'badge ' + (p ? (p.bit_perfect ? 'ok' : 'warn') : '');
   $('bp').textContent = p ? (p.bit_perfect ? 'bit-perfect' : 'processed') : '';
@@ -1110,11 +1040,7 @@ async function control(action, value) {
 }
 const num = (id) => Number($(id).value);
 
-document.querySelectorAll('[data-a]').forEach(b => b.onclick = () => control(b.dataset.a));
-$('seek').oninput = () => { dragging = true; $('pos').textContent = dur((status?.duration || 0) * $('seek').value / 1000); };
-$('seek').onchange = () => { dragging = false; control('seek', (status?.duration || 0) * $('seek').value / 1000); };
 $('vol').onchange = () => control('volume', Number($('vol').value));
-$('queue').onclick = (e) => { const d = e.target.closest('[data-i]'); if (d) control('play_index', Number(d.dataset.i)); };
 $('bitperfect').onchange = () => { lockDsp(); save({ dsp: { bit_perfect: $('bitperfect').checked } }); };
 $('output_mode').onchange = () => { lockDsp(); fillDsdRates(); save({ dsp: { output_mode: $('output_mode').value } }); };
 $('filter').onchange = () => { filterInfo(); save({ dsp: { filter: $('filter').value } }); };
@@ -1277,131 +1203,6 @@ async function initEncore() {
   });
 }
 initEncore(); paintEncore(); setInterval(paintEncore, 5000);
-
-// Library: local folders and the Encore library, both played through this engine.
-const ICON_DIR = '<svg class="ico" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linejoin="round"><path d="M3 6h6l2 2h10v11H3z"/></svg>';
-const ICON_NOTE = '<svg class="ico" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="M9 18V5l12-2v13"/><circle cx="6" cy="18" r="3"/><circle cx="18" cy="16" r="3"/></svg>';
-const ICON_UP = '<svg class="ico" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="M12 19V5M5 12l7-7 7 7"/></svg>';
-const mmss = (s) => { s = Math.round(s || 0); return s ? `${Math.floor(s / 60)}:${String(s % 60).padStart(2, '0')}` : ''; };
-let libPath = '', libFiles = [], libSaved = [];
-const queuePaths = (paths, index = 0, mode = 'replace') => api('POST', '/api/queue', { items: paths.map(p => ({ path: p })), index, mode });
-async function libQueueFolder(path, mode) {
-  $('lib-msg').textContent = 'Reading the folder…';
-  try {
-    const j = await api('GET', '/api/library/scan?path=' + encodeURIComponent(path));
-    if (!j.files.length) { $('lib-msg').textContent = 'No music files in that folder.'; return; }
-    await queuePaths(j.files, 0, mode);
-    $('lib-msg').textContent = `${mode === 'append' ? 'Added' : 'Playing'} ${j.files.length} file${j.files.length === 1 ? '' : 's'}.`;
-  } catch (e) { $('lib-msg').textContent = e.message; }
-}
-async function libOpen(path) {
-  try {
-    const j = await api('GET', '/api/library/browse?path=' + encodeURIComponent(path || ''));
-    libPath = j.path; $('lib-path').value = j.path; libFiles = j.files.map(f => f.path);
-    const rows = [];
-    if (j.path) rows.push(`<div data-dir="${esc(j.parent)}">${ICON_UP}<span class="name">Up</span></div>`);
-    for (const d of j.dirs) rows.push(`<div data-dir="${esc(d.path)}">${ICON_DIR}<span class="name">${esc(d.name)}</span>${j.path ? `<span class="acts"><button data-play="${esc(d.path)}">Play</button><button data-add="${esc(d.path)}">Add</button></span>` : ''}</div>`);
-    j.files.forEach((f, i) => rows.push(`<div data-file="${i}">${ICON_NOTE}<span class="name">${esc(f.name)}</span><span class="acts"><button data-addfile="${i}">Add</button></span></div>`));
-    $('lib-list').innerHTML = rows.join('') || '<span class="muted">No folders or music files here.</span>';
-    $('lib-folder-acts').hidden = !j.path;
-    $('lib-save').hidden = !j.path || libSaved.includes(j.path);
-    $('lib-msg').textContent = '';
-  } catch (e) { $('lib-msg').textContent = e.message; }
-}
-function libPaintFolders() {
-  $('lib-folders').innerHTML = libSaved.map((f, i) => `<button data-open="${esc(f)}" title="${esc(f)}">${esc(f.split(/[\\/]/).filter(Boolean).pop() || f)}<i data-forget="${i}">×</i></button>`).join('');
-  $('lib-save').hidden = !libPath || libSaved.includes(libPath);
-}
-async function libSaveFolders(list) {
-  try { libSaved = (await api('POST', '/api/library/folders', { folders: list })).folders; } catch (e) { $('lib-msg').textContent = e.message; }
-  libPaintFolders();
-}
-$('lib-list').addEventListener('click', async (ev) => {
-  const b = ev.target.closest('button'), row = ev.target.closest('[data-dir],[data-file]');
-  if (b?.dataset.play) return libQueueFolder(b.dataset.play, 'replace');
-  if (b?.dataset.add) return libQueueFolder(b.dataset.add, 'append');
-  if (b?.dataset.addfile) { await queuePaths([libFiles[+b.dataset.addfile]], 0, 'append'); $('lib-msg').textContent = 'Added to the queue.'; return; }
-  if (!row) return;
-  if (row.dataset.dir !== undefined) return libOpen(row.dataset.dir);
-  try { await queuePaths(libFiles, +row.dataset.file); } catch (e) { $('lib-msg').textContent = e.message; }
-});
-$('lib-folders').addEventListener('click', (ev) => {
-  const x = ev.target.closest('[data-forget]');
-  if (x) { ev.stopPropagation(); return libSaveFolders(libSaved.filter((_, i) => i !== +x.dataset.forget)); }
-  const b = ev.target.closest('[data-open]'); if (b) libOpen(b.dataset.open);
-});
-$('lib-go').onclick = () => libOpen($('lib-path').value.trim());
-$('lib-path').addEventListener('keydown', (e) => { if (e.key === 'Enter') libOpen($('lib-path').value.trim()); });
-$('lib-home').onclick = () => libOpen('');
-$('lib-play-folder').onclick = () => libQueueFolder(libPath, 'replace');
-$('lib-add-folder').onclick = () => libQueueFolder(libPath, 'append');
-$('lib-save').onclick = () => libSaveFolders([...libSaved, libPath]);
-
-// Encore half.
-let encOffset = 0, encQuery = '', encAlbumTracks = [];
-const coverUrl = (id, s = 300) => `/api/encore/cover/${encodeURIComponent(id)}?s=${s}`;
-const albumCard = (a) => `<div class="alb" data-album="${esc(a.id)}"><img loading="lazy" src="${coverUrl(a.id)}" alt="" onerror="this.style.visibility='hidden'"><b>${esc(a.album || 'Unknown album')}</b><span>${esc(a.albumartist || '')}${a.year ? ' · ' + esc(a.year) : ''}</span></div>`;
-const trackRow = (t, i) => `<div data-track="${i}">${ICON_NOTE}<span class="name">${esc(t.title || 'Untitled')}<span class="muted"> — ${esc(t.artist || '')}</span></span><span class="meta">${esc((t.format || '').toUpperCase())} ${mmss(t.duration)}</span><span class="acts"><button data-qadd="${i}">Add</button></span></div>`;
-let encTracks = [];
-async function encLoad(more = false) {
-  const st = await api('GET', '/api/encore').catch(() => ({}));
-  if (!st.configured) { $('lib-emsg').innerHTML = 'Not signed in. Sign in on the <a href="#encore">Encore</a> page to browse your Encore library here.'; $('lib-albums').innerHTML = ''; $('lib-etracks').innerHTML = ''; $('lib-more').hidden = true; return; }
-  if (!more) encOffset = 0;
-  $('lib-emsg').textContent = 'Loading…';
-  try {
-    const [al, tr] = await Promise.all([
-      api('GET', `/api/encore/albums?q=${encodeURIComponent(encQuery)}&offset=${encOffset}&limit=60`),
-      encQuery && !more ? api('GET', `/api/encore/tracks?q=${encodeURIComponent(encQuery)}&limit=50`) : Promise.resolve(null),
-    ]);
-    const items = al.items || [];
-    const html = items.map(albumCard).join('');
-    $('lib-albums').innerHTML = more ? $('lib-albums').innerHTML + html : html;
-    if (tr) { encTracks = tr; $('lib-etracks').innerHTML = tr.length ? '<h2 style="font-size:14px">Songs</h2>' + tr.map(trackRow).join('') + '<h2 style="font-size:14px;margin-top:16px">Albums</h2>' : ''; }
-    else if (!more) { encTracks = []; $('lib-etracks').innerHTML = ''; }
-    encOffset += items.length;
-    $('lib-more').hidden = encOffset >= (al.total || 0);
-    $('lib-emsg').textContent = al.total ? `${al.total} album${al.total === 1 ? '' : 's'}${encQuery ? ' matching "' + encQuery + '"' : ''}` : (encQuery ? 'Nothing matches.' : 'Your Encore library is empty.');
-  } catch (e) { $('lib-emsg').textContent = e.message; }
-}
-async function encAlbum(id) {
-  try {
-    const a = await api('GET', '/api/encore/albums/' + encodeURIComponent(id));
-    encAlbumTracks = a.tracks || [];
-    $('lib-acover').src = coverUrl(id, 400);
-    $('lib-atitle').textContent = a.album || 'Unknown album';
-    $('lib-aartist').textContent = [a.albumartist, a.year].filter(Boolean).join(' · ');
-    $('lib-atracks').innerHTML = encAlbumTracks.map(trackRow).join('');
-    $('lib-ebrowse').hidden = true; $('lib-ealbum').hidden = false;
-  } catch (e) { $('lib-emsg').textContent = e.message; }
-}
-const encPlay = (items, index = 0, mode = 'replace') => api('POST', '/api/encore/play', { items, index, mode }).catch(e => { $('lib-emsg').textContent = e.message; });
-$('lib-albums').addEventListener('click', (ev) => { const a = ev.target.closest('[data-album]'); if (a) encAlbum(a.dataset.album); });
-for (const [list, src] of [['lib-atracks', () => encAlbumTracks], ['lib-etracks', () => encTracks]]) {
-  $(list).addEventListener('click', (ev) => {
-    const b = ev.target.closest('[data-qadd]');
-    if (b) return encPlay([src()[+b.dataset.qadd]], 0, 'append');
-    const r = ev.target.closest('[data-track]');
-    if (r) encPlay(src(), +r.dataset.track);
-  });
-}
-$('lib-aplay').onclick = () => encPlay(encAlbumTracks, 0);
-$('lib-aadd').onclick = () => encPlay(encAlbumTracks, 0, 'append');
-$('lib-back').onclick = () => { $('lib-ealbum').hidden = true; $('lib-ebrowse').hidden = false; };
-$('lib-more').onclick = () => encLoad(true);
-$('lib-search').onclick = () => { encQuery = $('lib-q').value.trim(); $('lib-ealbum').hidden = true; $('lib-ebrowse').hidden = false; encLoad(); };
-$('lib-q').addEventListener('keydown', (e) => { if (e.key === 'Enter') $('lib-search').click(); });
-let encLoaded = false;
-$('lib-tabs').addEventListener('click', (ev) => {
-  const b = ev.target.closest('[data-src]'); if (!b) return;
-  $('lib-tabs').querySelectorAll('button').forEach(x => x.classList.toggle('on', x === b));
-  $('lib-local').hidden = b.dataset.src !== 'local'; $('lib-encore').hidden = b.dataset.src !== 'encore';
-  if (b.dataset.src === 'encore' && !encLoaded) { encLoaded = true; encLoad(); }
-});
-(async () => {
-  try { libSaved = (await api('GET', '/api/library/folders')).folders; } catch (e) { libSaved = []; }
-  libPaintFolders();
-  libOpen(libSaved[0] || '');
-})();
 
 // Filter designer.
 const fdNum = (x) => Number(x).toFixed(4).replace(/0+$/, '').replace(/\.$/, '');

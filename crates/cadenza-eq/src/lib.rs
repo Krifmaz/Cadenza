@@ -1,8 +1,14 @@
 //! Parametric equaliser: up to 16 cascaded biquads with the Audio-EQ-Cookbook formulas
 //! (Robert Bristow-Johnson), computed and run in `f64`, transposed direct form II.
+//!
+//! Its own crate (only `serde`) so players that cannot take all of `cadenza-dsp`, such as
+//! a browser build, run the same bands; `cadenza-dsp` re-exports it as `cadenza_dsp::eq`.
 
 use serde::{Deserialize, Serialize};
 use std::f64::consts::PI;
+
+/// Filter states below this are flushed to zero (no subnormals during digital silence).
+const DENORMAL_FLOOR: f64 = 1e-290;
 
 /// Maximum number of bands a single [`Equalizer`] runs.
 pub const MAX_BANDS: usize = 16;
@@ -180,12 +186,13 @@ impl Coefficients {
 
     /// Magnitude response in dB at `freq` Hz for a filter running at `rate`.
     pub fn response_db(&self, freq: f64, rate: f64) -> f64 {
+        // H(z) at z = e^{jw}: |b0 + b1 z^-1 + b2 z^-2| / |1 + a1 z^-1 + a2 z^-2|
         let w = 2.0 * PI * freq / rate;
-        let z1 = rustfft::num_complex::Complex::new(w.cos(), -w.sin());
-        let z2 = z1 * z1;
-        let num = self.b0 + self.b1 * z1 + self.b2 * z2;
-        let den = 1.0 + self.a1 * z1 + self.a2 * z2;
-        20.0 * (num / den).norm().log10()
+        let (c1, s1) = (w.cos(), -w.sin());
+        let (c2, s2) = ((2.0 * w).cos(), -(2.0 * w).sin());
+        let num = (self.b0 + self.b1 * c1 + self.b2 * c2).hypot(self.b1 * s1 + self.b2 * s2);
+        let den = (1.0 + self.a1 * c1 + self.a2 * c2).hypot(self.a1 * s1 + self.a2 * s2);
+        20.0 * (num / den).log10()
     }
 }
 
@@ -206,10 +213,10 @@ impl Biquad {
         let mut z2 = self.c.b2 * x - self.c.a2 * y;
         // Denormal guard (see `matrix::crossover::Section::tick`): no subnormal states
         // during digital silence, so the per-sample cost stays constant.
-        if z1.abs() < crate::matrix::DENORMAL_FLOOR {
+        if z1.abs() < DENORMAL_FLOOR {
             z1 = 0.0;
         }
-        if z2.abs() < crate::matrix::DENORMAL_FLOOR {
+        if z2.abs() < DENORMAL_FLOOR {
             z2 = 0.0;
         }
         self.state[ch] = (z1, z2);

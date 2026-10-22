@@ -12,7 +12,7 @@ pub mod convolution;
 pub mod design;
 pub mod dither;
 pub mod dsd;
-pub mod eq;
+pub use cadenza_eq as eq;
 pub mod fft;
 pub mod fir;
 pub mod gpu;

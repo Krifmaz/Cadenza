@@ -1,13 +1,11 @@
 # Cadenza releases: on a `v*` tag (or a manual run with a version), build the `cadenza` binary for Linux x86_64
 # (alsa + cuda + wgpu) and aarch64 (alsa + wgpu) on Ubuntu 22.04 (glibc 2.35: runs on Debian bookworm / trixie and newer)
-# and publish a GitHub release with one tar.gz per architecture plus SHA256SUMS, together with the desktop app's
-# installers (Linux .deb / .AppImage, Windows .exe, macOS .dmg).
+# and publish a GitHub release with one tar.gz per architecture plus SHA256SUMS.
 # Encore's "Download tools" fetches the tar.gz files for server-side processing (`cadenza render`).
-# Hotfixes: hotfix.yml calls this file with channel = hotfix on every push to main. Version <crate version>.<run
-# number> (3.0.6.17; the desktop app shows it, the CLI keeps the crate version), the Linux tar.gz files and the Linux
-# and Windows installers (no macOS: its runner costs 10× minutes), a *prerelease* tagged hotfix-<version> that is never
-# "Latest" – Encore's tool download and the app's normal update check never see it; the app offers it with
-# Hotfixes on. Only the newest three hotfixes are kept.
+# Hotfixes: hotfix.yml calls this file with channel = hotfix on every push to main: the same tar.gz files as version
+# <crate version>.<run number> (3.0.6.17; the binary keeps reporting the crate version), published as a *prerelease*
+# tagged hotfix-<version> that is never "Latest", so Encore's tool download never picks it up by itself. Only the
+# newest three hotfixes are kept.
 name: Release
 
 on:
@@ -32,40 +30,8 @@ env:
   CARGO_TERM_COLOR: always
 
 jobs:
-  # the version and which desktop builds run (a hotfix leaves macOS out)
-  plan:
-    runs-on: ubuntu-22.04
-    outputs:
-      ver: ${{ steps.p.outputs.ver }}
-      tag: ${{ steps.p.outputs.tag }}
-      desktop: ${{ steps.p.outputs.desktop }}
-    steps:
-      - uses: actions/checkout@v4
-      - id: p
-        shell: bash
-        env:
-          CHANNEL: ${{ inputs.channel }}
-          WANT: ${{ inputs.version || github.ref_name }}
-        run: |
-          crate=$(sed -n '/^\[workspace.package\]/,/^\[/ s/^version *= *"\(.*\)"/\1/p' Cargo.toml)
-          # the desktop builds: os, runner, features, installer formats, the files they make
-          linux='{"os":"linux","runner":"ubuntu-22.04","features":"alsa,wgpu","formats":"deb,appimage","files":"target/release/bundle/*.deb\ntarget/release/bundle/*.AppImage"}'
-          windows='{"os":"windows","runner":"windows-latest","features":"wasapi,asio,loopback,wgpu","formats":"nsis","files":"target/release/bundle/*.exe"}'
-          macos='{"os":"macos","runner":"macos-latest","features":"coreaudio,tap,wgpu","formats":"dmg","files":"target/release/bundle/*.dmg"}'
-          if [ "$CHANNEL" = hotfix ]; then
-            ver="$crate.$GITHUB_RUN_NUMBER"; tag="hotfix-$ver"
-            desktop="[$linux,$windows]"
-          else
-            ver="${WANT#v}"; tag="v$ver"
-            [ "$ver" = "$crate" ] || { echo "version $ver does not match the crate version $crate" >&2; exit 1; }
-            desktop="[$linux,$windows,$macos]"
-          fi
-          echo "ver=$ver" >> "$GITHUB_OUTPUT"; echo "tag=$tag" >> "$GITHUB_OUTPUT"; echo "desktop=$desktop" >> "$GITHUB_OUTPUT"
-          echo "$tag"
-
   build:
     name: Build ${{ matrix.arch }}
-    needs: plan
     strategy:
       fail-fast: true
       matrix:
@@ -78,6 +44,10 @@ jobs:
             runner: ubuntu-22.04-arm
             features: alsa,wgpu
     runs-on: ${{ matrix.runner }}
+    # both architectures compute the same version and tag
+    outputs:
+      ver: ${{ steps.ver.outputs.ver }}
+      tag: ${{ steps.ver.outputs.tag }}
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
@@ -89,13 +59,24 @@ jobs:
       - name: Version
         id: ver
         shell: bash
+        env:
+          CHANNEL: ${{ inputs.channel }}
         run: |
-          ver="${{ needs.plan.outputs.ver }}"
           crate=$(cargo metadata --no-deps --format-version 1 | python3 -c 'import json,sys; print(next(p["version"] for p in json.load(sys.stdin)["packages"] if p["name"]=="cadenza"))')
-          # a hotfix (3.0.6.17) is built from the crate version 3.0.6, which the binary reports
-          case "$ver" in "$crate" | "$crate".*) ;; *) echo "version $ver does not match the crate version $crate" >&2; exit 1 ;; esac
+          if [ "$CHANNEL" = hotfix ]; then
+            # a hotfix: the crate version with the run number as a fourth part
+            ver="$crate.$GITHUB_RUN_NUMBER"
+          else
+            ver="${{ inputs.version || github.ref_name }}"
+            ver="${ver#v}"
+            if [ "$ver" != "$crate" ]; then
+              echo "version $ver does not match the crate version $crate" >&2
+              exit 1
+            fi
+          fi
           echo "ver=$ver" >> "$GITHUB_OUTPUT"
           echo "crate=$crate" >> "$GITHUB_OUTPUT"
+          if [ "$CHANNEL" = hotfix ]; then echo "tag=hotfix-$ver" >> "$GITHUB_OUTPUT"; else echo "tag=v$ver" >> "$GITHUB_OUTPUT"; fi
       - name: Build
         run: cargo build --release --locked -p cadenza --bin cadenza --features ${{ matrix.features }}
       - name: Check the binary
@@ -118,47 +99,9 @@ jobs:
           path: dist/*.tar.gz
           if-no-files-found: error
 
-  desktop:
-    name: Desktop app ${{ matrix.os }}
-    needs: plan
-    strategy:
-      fail-fast: true
-      matrix:
-        # from plan: linux, windows and macos (a hotfix has no macos)
-        include: ${{ fromJSON(needs.plan.outputs.desktop) }}
-    runs-on: ${{ matrix.runner }}
-    steps:
-      - uses: actions/checkout@v4
-      - uses: dtolnay/rust-toolchain@stable
-      - name: System libraries (GTK for the tray, ALSA)
-        if: matrix.os == 'linux'
-        run: >
-          sudo apt-get update && sudo apt-get install -y libasound2-dev pkg-config
-          libgtk-3-dev libayatana-appindicator3-dev libxdo-dev libxkbcommon-dev file
-      - uses: Swatinem/rust-cache@v2
-        with:
-          key: desktop-iced-${{ matrix.os }}
-      - name: Build the app
-        env:
-          # the version the app shows and compares updates with (a hotfix's 3.0.6.17)
-          CADENZA_VERSION: ${{ needs.plan.outputs.ver }}
-        run: cargo build --release --locked -p cadenza-desktop --features ${{ matrix.features }}
-      - name: cargo-packager
-        run: cargo install cargo-packager --version 0.11.8 --locked
-      - name: Build the installers
-        working-directory: crates/cadenza-desktop
-        env:
-          CADENZA_VERSION: ${{ needs.plan.outputs.ver }}
-        run: cargo packager --release --formats ${{ matrix.formats }}
-      - uses: actions/upload-artifact@v4
-        with:
-          name: desktop-${{ matrix.os }}
-          path: ${{ matrix.files }}
-          if-no-files-found: error
-
   release:
     name: Publish
-    needs: [plan, build, desktop]
+    needs: [build]
     runs-on: ubuntu-22.04
     steps:
       - uses: actions/download-artifact@v4
@@ -168,26 +111,19 @@ jobs:
       - name: SHA256SUMS
         working-directory: dist
         run: |
-          # The desktop installers arrive in per-format folders (deb/, msi/, …): flatten.
-          find . -mindepth 2 -type f -exec mv -t . {} +
-          find . -mindepth 1 -type d -empty -delete
           ls -la
           sha256sum * > SHA256SUMS
           cat SHA256SUMS
       - uses: softprops/action-gh-release@v2
         with:
-          tag_name: ${{ needs.plan.outputs.tag }}
+          tag_name: ${{ needs.build.outputs.tag }}
           target_commitish: ${{ github.sha }}
-          name: Cadenza ${{ inputs.channel == 'hotfix' && format('{0} (hotfix)', needs.plan.outputs.ver) || needs.plan.outputs.tag }}
+          name: Cadenza ${{ inputs.channel == 'hotfix' && format('{0} (hotfix)', needs.build.outputs.ver) || needs.build.outputs.tag }}
           generate_release_notes: true
           prerelease: ${{ inputs.channel == 'hotfix' }}
           make_latest: ${{ inputs.channel == 'hotfix' && 'false' || 'true' }}
           files: |
             dist/*.tar.gz
-            dist/*.deb
-            dist/*.AppImage
-            dist/*.exe
-            dist/*.dmg
             dist/SHA256SUMS
       # a hotfix: only the newest three hotfix releases (and their tags) stay
       - name: Keep only the newest three hotfixes

@@ -1,5 +1,5 @@
 # A hotfix build on every push to main: release.yml with channel = hotfix (its header says what that makes – a
-# prerelease hotfix-<version> with the Linux tar.gz files and the Linux and Windows installers, the newest three
+# prerelease hotfix-<version> with the Linux tar.gz files, the newest three
 # kept). Full releases are unchanged: push a v* tag or run Release by hand. A push that only touches docs makes
 # none, and neither does one whose head commit says [skip hotfix].
 name: Hotfix

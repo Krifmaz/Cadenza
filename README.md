@@ -8,8 +8,9 @@ room-correction convolution, parametric EQ, a multichannel pipeline matrix with
 crossovers, exclusive output on every OS, a network audio endpoint and optional CUDA
 offload – everything computed in 64-bit floating point.
 
-Cadenza is a standalone program (CLI, HTTP control API, built-in web UI) and can also
-register itself as a **playback device for the [Encore](https://github.com/Krifmaz/Encore)
+Cadenza does one job: it upsamples (and converts to DSD) on the way to your DAC. It is not
+a music player – no library, no AirPlay or UPnP, no desktop app of its own. It runs as a
+headless program (CLI, HTTP control API, a settings web UI) and registers itself as a **playback device for the [Encore](https://github.com/Krifmaz/Encore)
 music server**: your Encore library shows "Cadenza on <host>" next to your phone and
 browser tabs, and you can push a queue to it, control it and see its signal path from
 any Encore client.
@@ -166,8 +167,7 @@ implemented and tested here; the notes say where we differ.
 | Multi-room | none | Sync groups of endpoints (`endpoint://a+b+c`): the first is the clock, the others follow its DAC (PCM: adaptive resampling; DSD: word slips) | ahead: HQPlayer has none. In a simulation with DACs ±150 ppm off: within about 1.5 samples at 48 kHz once settled; not yet tried on real DACs over a real LAN |
 | GPU offload | CUDA only (64-bit) | CUDA (64-bit, driver only – no toolkit) **and wgpu: Vulkan / Metal / DX12 on AMD, Intel, Apple Silicon and NVIDIA** (64-bit where the card has it, double-f32 ≈48-bit elsewhere); also builds and runs without a GPU; the upsampler's FFT polyphase core, the time-domain 44.1 ↔ 48 kHz stage and the room convolution run on it, verified against the CPU engine (CUDA through a CPU model of the exact kernels; wgpu on real Vulkan in CI with Mesa's software driver: 1.2–2.4e-15 relative in f64, 1–3e-14 in double-f32) and benchmarked (`cadenza bench`, row `upsampling (GPU)`) | exceeded on hardware: HQPlayer has no AMD / Intel / Apple GPU support. Not yet measured on real AMD / Intel / Apple cards, and the CUDA kernels are not yet run on an NVIDIA card since the rational stage was added (none here) |
 | 64-bit processing | yes | yes everywhere | matched |
-| UPnP / Roon / control | UPnP renderer, Roon via NAA | UPnP/DLNA MediaRenderer (AVTransport, RenderingControl, ConnectionManager, gapless next URI, events) with OpenHome services, HTTP API, web UI, Encore device | matched: UPnP AV and OpenHome (Product, Playlist, Volume, Time, Info) – tested with scripted control points, not yet with BubbleUPnP / Kazoo / mconnect themselves; no Roon |
-| AirPlay | no | AirPlay 1 receiver (ALAC, encrypted, volume, title / artist / album, cover art, progress, play / pause / next / previous back to the phone) into the full engine | ahead: HQPlayer has none. Tested with a scripted sender, not yet with an iPhone or Mac; AirPlay 2 is not implemented |
+| Control | UPnP renderer, Roon via NAA | HTTP API, web UI, Encore device; Roon through Encore's Roon extension | different by design: Cadenza is only the upsampler, Encore is the player |
 | System-wide input | audio-device input (with a separately installed loopback driver) | Linux: a built-in virtual output device "Cadenza" (PipeWire) and one-app capture before the mixer, following the source rate; Windows: one app or all apps but Cadenza (process loopback); macOS 14.2+: the same through muted process taps, so the sound goes only through Cadenza | ahead on Linux and macOS (nothing extra to install); Windows has capture without a driver but no virtual device. Linux tested against a real headless PipeWire 1.0; the Windows and macOS code is built in CI but not yet run against real audio |
 | Loopback verification | none | Bit-perfect check (a random 24-bit pattern found and compared sample for sample in the recording) and THD+N / THD / harmonics / noise of a 997 Hz tone through the chain as configured, from the web UI | ahead: HQPlayer has none. Tested through a software digital loopback (the engine's own output read back); not yet with a real DAC, ADC or S/PDIF loop |
 | Licence / price | proprietary | MIT / Apache-2.0, free | – |
@@ -211,14 +211,9 @@ to do it:
    implements the real interface; it has **not yet run against a real ASIO driver or DAC** (no Windows
    machine here). The WASAPI native-DSD GUID stays opt-in (`CADENZA_WASAPI_DSD_GUID`): there is no
    standard one to ship.
-4. **UPnP / OpenHome renderer and AirPlay receiver** in the player and the endpoint, so Audirvana,
-   mconnect, BubbleUPnP and phones can play into Cadenza. Done: the UPnP/DLNA MediaRenderer, the OpenHome
-   services (`[upnp] enabled = true`) and an AirPlay 1 receiver (`[airplay] enabled = true`), see below.
-   They run in the player (`cadenza serve`), so everything they receive goes through the DSP; to play
-   them on a DAC box, point the player's output at a `cadenza endpoint`. The endpoint itself stays a
-   plain output with no receivers of its own. Roon talks to
-   HQPlayer only through the closed NAA protocol; Cadenza becomes a Roon zone through Encore's Roon
-   extension instead.
+4. **No player of its own** – by design. Cadenza is the upsampler; Encore (or the system input) is the
+   source. The UPnP/OpenHome renderer, AirPlay receiver, local library, `cadenza play` and the separate
+   desktop app were removed so the engine does one job.
 5. **DST-compressed DFF and SACD ISO** input, CUE sheets, gapless DSD. DST-compressed DFF is done:
    a DST decoder written from the standard, bit-exact, including the multi-segment frames FFmpeg's
    decoder refuses. It is checked against FFmpeg's decoder (an independent implementation): frames
@@ -284,12 +279,6 @@ cargo build --release --features tap      # + system input: one app, or all apps
 cadenza devices                           # output devices: rates, bits, channels, DSD, exclusive
 cadenza filters --in-rate 44100 --out-rate 705600   # taps, transition, stopband, latency
 cadenza dithers                           # dither / noise shapers
-cadenza play song.flac other.flac         # play files (gapless)
-cadenza play --bitperfect song.flac       # no DSP at all
-cadenza play --filter sinc-l-1m --rate 352800 --dither lns15 song.flac
-cadenza play --output-mode dsd --dsd-rate dsd256 --dsd-modulator asdm7 --dsd-packing dop song.flac
-cadenza play --matrix 2.1 --headroom -3 --gpu auto album.dsf
-cadenza play https://example.org/track.flac
 cadenza bench --filter sinc-l-1m --rate 705600          # realtime factors on this machine
 cadenza bench --dsd-upsampling                           # + the long filter feeding each DSD rate
 cadenza serve                             # control API + web UI on http://127.0.0.1:8777
@@ -364,18 +353,6 @@ password = "secret"     # or cookie = "encore_session=…", or token = "…" (an
 # device_name = ""      # empty = "Cadenza on <hostname>"
 # embedded = false      # true inside the Encore desktop app (reported to Encore)
 
-[upnp]                  # UPnP / DLNA renderer in `cadenza serve`
-enabled = false         # opens a port on the network, so off by default
-name = ""               # shown in control apps; empty = "Cadenza (<hostname>)"
-port = 49494            # descriptions, control and events (0 = any free port)
-
-[airplay]               # AirPlay 1 receiver in `cadenza serve`
-enabled = false         # opens ports on the network, so off by default
-name = ""               # shown on iPhones / Macs; empty = "Cadenza (<hostname>)"
-port = 5000             # RTSP (0 = any free port); audio uses three more UDP ports
-latency_ms = 2000       # buffered before playing (senders schedule 2 s ahead)
-volume = true           # follow the sender's volume slider
-
 [endpoint]              # `cadenza endpoint` on the DAC box
 name = ""               # advertised name; empty = "Cadenza endpoint on <hostname>"
 listen = "0.0.0.0:8778"
@@ -424,42 +401,10 @@ so it runs on Debian bookworm/trixie and newer), and publishes a GitHub release 
 just `cadenza`) and `SHA256SUMS`. Encore downloads the archive for its architecture, checks
 it against `SHA256SUMS` and runs `cadenza render --describe` before switching to it.
 
-## UPnP / DLNA renderer
-
-With `[upnp] enabled = true`, `cadenza serve` is a UPnP AV MediaRenderer: control apps
-(BubbleUPnP, mconnect, Audirvana, foobar2000, Kazoo in UPnP mode …) find it on the LAN by
-SSDP and play into it, and everything goes through the engine – upsampling, DSD, EQ,
-matrix, the signal path.
-
-- **AVTransport**: set URI, play, pause, stop, seek (time), next/previous, and
-  `SetNextAVTransportURI`, which is queued in the engine so the next track starts
-  gaplessly. Title, artist, album, cover and duration come from the DIDL-Lite metadata.
-- **RenderingControl**: volume 0–100 (the engine's volume curve) and mute.
-- **ConnectionManager**: every format the decoder plays, over HTTP.
-- **Events**: subscribers get `LastChange` notifications for transport state, track and
-  volume changes.
-- Only `http(s)` media URLs are played – never local paths – since anyone on the network
-  can send these commands. The renderer has its own port (`[upnp] port`); the control API
-  keeps its address.
-
-Tested: SSDP discovery against the running server, and a scripted control point that
-drives the whole session end to end – set URI, play, volume, mute, pause, seek, gapless
-next URI, events – through a real engine
-(`cargo test -p cadenza --test upnp`). Not yet tried with the control apps themselves.
-
-**OpenHome** (Linn's services, used by Kazoo, Lumin, BubbleUPnP's OpenHome mode) runs on
-the same device:
-
-- **Playlist**: insert, delete, read, id array with change token, play / pause / stop /
-  next / previous, seek by id, index or seconds, repeat and shuffle. The playlist lives
-  in Cadenza; the engine is given the current entry and the next, and the one after is
-  queued as each track starts – gapless, while the controller edits the list freely.
-  Deleting the playing entry plays on with the next one. Up to 1000 entries; `http(s)`
-  only.
-- **Product**: room name, two sources (Playlist and UPnP AV – whichever a controller uses
-  becomes the active one), standby.
-- **Volume** (0–100 with mute; no balance or fade), **Time** (track count, duration,
-  seconds) and **Info** (track, codec, bit depth, sample rate), all evented.
+Every push to `main` also builds a hotfix (`.github/workflows/hotfix.yml`): the same two archives as
+version `<crate version>.<n>` (e.g. `3.0.6.17`), published as a prerelease `hotfix-<version>` that is never
+"Latest", so Encore's download keeps taking full releases. Only the newest three hotfixes are kept. A push
+that only changes docs, or whose commit message says `[skip hotfix]`, makes none.
 
 ## Auto dither
 
@@ -580,15 +525,13 @@ in the left ear at 44.1, 48, 96 and 352.8 kHz; the impulse resampling keeps the 
 
 ## SACD images and CUE sheets
 
-- **SACD disc images** (`.iso` rips): `cadenza play album.iso` (or a path in the API's
-  queue) queues every track of the stereo area, titled from the disc text; `album.iso#3`
+- **SACD disc images** (`.iso` rips): `  queue) queues every track of the stereo area, titled from the disc text; `album.iso#3`
   is one track, `album.iso#m3` one from the multichannel area. DST and plain discs both
   play, bit-perfect to a DSD output or through the DSD → PCM path. Tracks are cut by the
   frames' time codes, so they join without a gap or an overlap. Images over HTTP work too
   (range requests). Disc text in the Japanese / Chinese / Korean character sets is not
   converted yet.
-- **CUE sheets**: `cadenza play album.cue` queues its tracks; `album.cue#3` is one. A
-  track runs from its `INDEX 01` to the next one's, cut to the exact sample (FLAC seeks
+- **CUE sheets**: `  track runs from its `INDEX 01` to the next one's, cut to the exact sample (FLAC seeks
   land on packet boundaries and are trimmed), so consecutive tracks join sample for
   sample. The audio file can be anything Cadenza plays, DSF/DFF included (cut on whole
   bytes). A sheet that still names the `.wav` it was made for finds the same file name
@@ -601,72 +544,6 @@ Tested: synthetic SACD images packed the way discs are (DST and plain, several t
 seeking anywhere in long tracks), CUE sheets over WAV, FLAC and DSF whose tracks
 concatenate to the whole file exactly, and two DSD files that are one recording cut in
 two playing to the very same samples as the whole. Not yet tried with real disc rips.
-
-## Desktop app
-
-Cadenza also comes as a desktop app (`crates/cadenza-desktop`): a native window built with
-[iced](https://iced.rs) in Rust, with the engine running in the same process. Every page
-calls the engine directly; no web view is involved.
-
-- **Tray icon**: what is playing, Play / Pause, Next, Previous, Show Cadenza, Quit. Closing
-  the window keeps the music playing; Quit ends it.
-- **Media keys and the OS media controls**: Windows (SMTC), macOS (Now Playing), Linux (MPRIS:
-  GNOME, KDE, `playerctl`).
-- **One instance**: opening it again brings the window forward. The window's size and
-  the look (Appearance page) are remembered.
-- It runs the same services as `cadenza serve` from the same config file (Encore link, UPnP,
-  AirPlay, system input, as configured), and also serves the web control page on
-  `[server] listen` when that is free, so a phone or Encore can still drive it.
-- **Library page**, two sources feeding the same queue:
-  - *Local*: browse drives and folders, play or queue a folder (sub-folders included, a CUE
-    sheet stands in for its single-file rip), save folders as shortcuts. Files and folders
-    dropped on the window are queued too (they start playing when nothing is).
-  - *Encore*: after signing in, browse and search your Encore albums and songs, with covers.
-    Tracks stream from Encore into this engine; the login stays in the engine.
-- **Encore page**: server address, username, password and device name. Signing in also makes
-  Cadenza a playback device in Encore. A blank password keeps the saved one.
-- **Parametric EQ** (Sound page): a response graph with a point per band to drag, boxes to
-  type frequency (1.2k works), gain and Q, bell / shelf / notch / low and high cut at 12–48
-  dB/oct. Changes play straight away without interrupting the music.
-- **Guide page**: what upsampling does, a four-step setup, recipes (USB DAC, Bluetooth,
-  shared mode), filter names and a glossary in plain words; short notes under the main
-  controls too.
-- **Find my limit** (Sound page): runs the playback chain for your device and settings with
-  ever longer filters, times each and offers the longest one this machine runs safely
-  (1.5× real time or faster, no single burst over 250 ms) at every rate the device takes.
-  The music pauses and the device is let go during the test.
-- **Devices that come and go**: Output → Refresh looks again; play reopens the device, so
-  one plugged in later is found; an unplugged one stops playback with a message and play
-  carries on from there once it is back.
-- **System input page**: on/off, whole system or one application (picked from the running
-  programs). No config file editing needed for any of these; changes are saved to it.
-
-Installers come with each release: `.exe` (Windows), `.dmg` (macOS), `.deb` and `.AppImage`
-(Linux). They are not code-signed, so Windows SmartScreen and macOS Gatekeeper ask before the
-first start (on macOS: right-click → Open). To update, close Cadenza (also from the tray) and
-run the new installer, or use *Update now* (Appearance → Updates; on Windows it installs and
-restarts by itself). Every push to `main` also builds a hotfix, a prerelease `hotfix-<version>.<n>`
-with the Linux and Windows installers and the Linux tar.gz files; switch on *Hotfixes* there to
-be offered them (a full release is still offered when it is newer). Only the newest three
-hotfixes are kept. To build it yourself:
-
-```sh
-cargo build --release -p cadenza-desktop --features alsa,wgpu             # Linux (needs libgtk-3-dev, libayatana-appindicator3-dev, libxdo-dev)
-cargo build --release -p cadenza-desktop --features wasapi,asio,loopback,wgpu  # Windows
-cargo build --release -p cadenza-desktop --features coreaudio,tap,wgpu    # macOS
-# installers:
-cargo install cargo-packager --version 0.11.8 --locked
-cd crates/cadenza-desktop && cargo packager --release --formats deb,appimage   # or nsis / dmg
-```
-
-`CADENZA_CONFIG=<file>` runs it on another config file, and `CADENZA_SHOT=<dir>` (with
-`CADENZA_SHOT_PAGES=now,sound:1,…`) saves a screenshot of each page and quits, which is how
-the pages were checked here (Linux, under Xvfb). Tested on Linux: every page draws, the EQ
-graph uses the engine's own filter maths, a second launch hands over to the first. Not
-tested here: clicking through the pages by hand, the tray menu on a real desktop, and
-anything on Windows or macOS (those builds come from CI). The web page's folder browser
-lists any folder the engine can read: keep `[server] listen` on `127.0.0.1` unless you
-trust everyone on your network.
 
 ## Loopback verification
 
@@ -735,7 +612,7 @@ latency_ms = 150     # buffered before playing
   record you started keeps playing. The live stream hands out silence when the system is
   quiet, so the DAC stays open. `GET /api/system` and the web UI show what is arriving.
 - Between the capture clock and the DAC clock the buffer absorbs drift by dropping or
-  bridging a block when it runs over or dry (as for AirPlay); there is no adaptive
+  bridging a block when it runs over or dry; there is no adaptive
   resampling yet.
 
 Tested against a real headless PipeWire 1.0 with WirePlumber (also in CI): a player sending
@@ -775,43 +652,6 @@ Audio process taps, no driver or plug-in.
 
 Not yet run against real audio either: CI builds it on macOS and checks the app matching and
 process naming, but the runners have no sound devices.
-
-## AirPlay receiver
-
-With `[airplay] enabled = true`, `cadenza serve` shows up as a speaker on iPhones, iPads,
-Macs and in iTunes / Music, and what they play goes through the engine like any other
-source: upsampling, DSD, EQ, matrix, the signal path.
-
-- **AirPlay 1** (RAOP): advertised as `_raop._tcp` over mDNS; RTSP on `[airplay] port`;
-  Apple Lossless (or 16-bit PCM) over RTP/UDP, 44.1 kHz / 16 bit stereo – that is what
-  AirPlay 1 carries.
-- **Encryption**: senders only play to receivers that answer their challenge with the
-  AirPort Express key, and they wrap each session's AES key with it. That key was pulled
-  from the device in 2011 and has been public since; shairport-sync and every other open
-  AirPlay 1 receiver embed it, and so does Cadenza. It protects nothing here.
-- **Network**: lost packets are asked for again once; one still missing after 250 ms is
-  played as silence. The buffer (`latency_ms`) absorbs Wi-Fi jitter. The sender's clock
-  and the DAC's drift apart slowly: when the buffer runs a second over, the oldest audio
-  is dropped, and an empty buffer is bridged with silence. There is no sample-accurate
-  clock sync to the sender yet, so a long session can click once in a while.
-- **Control**: the sender's volume slider sets the engine volume (−30…0 dB, and mute;
-  `volume = false` leaves it alone); title, artist, album, cover art, duration and
-  position show in the web UI and the API (the cover at `/api/live/<id>/cover`). Pause
-  and seek on the phone flush the buffer. Play, pause, stop, next and previous in
-  Cadenza (web UI, API, Encore) go back to the phone through its remote-control service
-  (DACP, found over mDNS), so the phone moves to the next song. A second sender takes
-  over from the first, as on an AirPort Express.
-- **AirPlay 2** (multi-room from the Home app, AAC, buffered audio) is a different, closed
-  protocol and is not implemented. Apple devices have kept playing to AirPlay 1 speakers
-  (shairport-sync still lists AirPlay 1 as supported); whether iOS 26 still does is not
-  confirmed here.
-
-Tested here: the key (the `Apple-Response` matches OpenSSL byte for byte), RSA-OAEP key
-unwrapping, AES-CBC packets, ALAC decoding, the reorder buffer and resend requests, and a
-scripted sender that runs a whole encrypted session against a real engine – challenge,
-SDP, setup, timing, a lost and resent packet, volume, metadata, cover art (fetched over
-the API), Cadenza's transport buttons reaching a stand-in for the phone's remote control,
-progress, flush, takeover by a second sender, teardown. **Not yet tried with a real iPhone or Mac** (none here).
 
 ## ASIO (Windows)
 
@@ -1027,8 +867,8 @@ SwiftShader, WARP) are slower than the CPU engine and are skipped unless
 ```
                    ┌────────────────────────────── cadenza (binary) ──────────────────────────────┐
                    │                                                                              │
- files / URLs ───▶ │  decode (symphonia · DSF/DFF reader · HTTP range)  ──▶  Player (queue,        │
- Encore stream ──▶ │                                                        gapless, settings)    │
+ Encore stream ──▶ │  decode (symphonia · DSF/DFF reader · HTTP range)  ──▶  Engine (queue,        │
+ system input ───▶ │                                                        gapless, settings)    │
                    │                                                             │                │
                    │                                                             ▼                │
                    │  ┌──────────────────────── cadenza-dsp Pipeline ───────────────────────────┐ │
@@ -1051,14 +891,12 @@ SwiftShader, WARP) are slower than the CPU engine and are skipped unless
   EQ, the matrix and crossovers, the DSD modulators / decimator / packing, volume, the
   `Pipeline`, the serialisable `SignalPath` and `bench`.
 - `crates/cadenza` — the program: decoding (Symphonia, DSF/DFF), outputs, the endpoint, the
-  player engine, config and CLI (`play`, `serve`, `devices`, `filters`, `dithers`,
+  engine, config and CLI (`serve`, `devices`, `filters`, `dithers`,
   `config`, `bench`, `endpoint`, `render`), the HTTP API and web UI, and the Encore client.
 
 ## Roadmap
 
 - [ ] ASIO output on Windows (native DSD without a driver GUID)
-- [x] UPnP/DLNA MediaRenderer and OpenHome services
-- [x] AirPlay 1 receiver
 - [x] DST-compressed DFF, SACD ISO, CUE sheets, gapless DSD
 - [x] Multi-room sync groups of endpoints
 - [x] Room measurement and correction from the web UI; headphone crossfeed and HRTF
