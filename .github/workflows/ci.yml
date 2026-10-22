@@ -34,7 +34,11 @@ jobs:
       - name: Clippy (cuda + wgpu)
         run: cargo clippy --workspace --all-targets --features alsa,pipewire,cuda,wgpu -- -D warnings
       - name: Test
-        run: cargo test --release --workspace --features alsa
+        # the filter speed tests (limit::) time the filters, so they run on their own below: next to the
+        # other tests on a 4-core runner the shortest filter measured "too slow" and the ladder test failed
+        run: "cargo test --release --workspace --features alsa -- --skip limit::"
+      - name: Test the filter speed checks (one at a time, nothing else running)
+        run: "cargo test --release -p cadenza --features alsa --lib limit:: -- --test-threads=1"
       - name: Test the system input against a real (headless) PipeWire
         run: |
           export XDG_RUNTIME_DIR=$(mktemp -d) && chmod 700 "$XDG_RUNTIME_DIR"
