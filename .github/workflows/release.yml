@@ -3,8 +3,9 @@
 # and publish a GitHub release with one tar.gz per architecture plus SHA256SUMS.
 # Encore's "Download tools" fetches the tar.gz files for server-side processing (`cadenza render`).
 # Hotfixes: hotfix.yml calls this file with channel = hotfix on every push to main: the same tar.gz files as version
-# <crate version>.<run number> (3.0.6.17; the binary keeps reporting the crate version), published as a *prerelease*
-# tagged hotfix-<version> that is never "Latest", so Encore's tool download never picks it up by itself. Only the
+# <crate version>.<run number> (3.0.6.17; the binary keeps reporting the crate version), published as a normal release
+# tagged hotfix-<version> that becomes "Latest" (Encore's plugin download only takes v<version> tags, so it keeps
+# taking full releases). Only the
 # newest three hotfixes are kept.
 name: Release
 
@@ -120,8 +121,8 @@ jobs:
           target_commitish: ${{ github.sha }}
           name: Cadenza ${{ inputs.channel == 'hotfix' && format('{0} (hotfix)', needs.build.outputs.ver) || needs.build.outputs.tag }}
           generate_release_notes: true
-          prerelease: ${{ inputs.channel == 'hotfix' }}
-          make_latest: ${{ inputs.channel == 'hotfix' && 'false' || 'true' }}
+          prerelease: false
+          make_latest: 'true'
           files: |
             dist/*.tar.gz
             dist/SHA256SUMS
