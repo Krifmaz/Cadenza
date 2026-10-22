@@ -138,6 +138,7 @@ pub fn process_names() -> Vec<String> {
     out
 }
 
+/// The process id of the first running program called `name` (with or without `.exe`).
 pub fn find_process(name: &str) -> Option<u32> {
     let want = exe_name(name);
     // SAFETY: a snapshot handle we close; entries are plain data.

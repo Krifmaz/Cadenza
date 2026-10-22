@@ -348,7 +348,7 @@ pub fn set_config(engine: Engine, cfg: &SystemConfig) {
 /// the web UI's picker. Empty where the platform has no cheap way to list them; the UI
 /// still accepts a typed name.
 pub fn apps() -> Vec<String> {
-    #[allow(unused_mut)]
+    #[allow(unused_mut, unused_assignments)]
     let mut v: Vec<String> = Vec::new();
     #[cfg(target_os = "linux")]
     {
