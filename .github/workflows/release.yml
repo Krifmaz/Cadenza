@@ -2,6 +2,10 @@
 # (alsa + cuda + wgpu) and aarch64 (alsa + wgpu) on Ubuntu 22.04 (glibc 2.35: runs on Debian bookworm / trixie and newer)
 # and publish a GitHub release with one tar.gz per architecture plus SHA256SUMS.
 # Encore's "Download tools" fetches the tar.gz files for server-side processing (`cadenza render`).
+# Hotfixes: hotfix.yml calls this file with channel = hotfix on every push to main: the same tar.gz files as version
+# <crate version>.<run number> (3.0.6.17; the binary keeps reporting the crate version), published as a *prerelease*
+# tagged hotfix-<version> that is never "Latest", so Encore's tool download never picks it up by itself. Only the
+# newest three hotfixes are kept.
 name: Release
 
 on:
@@ -12,6 +16,12 @@ on:
       version:
         description: "Version to release (must match the crate version, e.g. 2.2.0)"
         required: true
+  workflow_call:
+    inputs:
+      channel:
+        type: string
+        required: false
+        default: stable
 
 permissions:
   contents: write
@@ -34,6 +44,10 @@ jobs:
             runner: ubuntu-22.04-arm
             features: alsa,wgpu
     runs-on: ${{ matrix.runner }}
+    # both architectures compute the same version and tag
+    outputs:
+      ver: ${{ steps.ver.outputs.ver }}
+      tag: ${{ steps.ver.outputs.tag }}
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
@@ -45,22 +59,31 @@ jobs:
       - name: Version
         id: ver
         shell: bash
+        env:
+          CHANNEL: ${{ inputs.channel }}
         run: |
-          ver="${{ inputs.version || github.ref_name }}"
-          ver="${ver#v}"
           crate=$(cargo metadata --no-deps --format-version 1 | python3 -c 'import json,sys; print(next(p["version"] for p in json.load(sys.stdin)["packages"] if p["name"]=="cadenza"))')
-          if [ "$ver" != "$crate" ]; then
-            echo "version $ver does not match the crate version $crate" >&2
-            exit 1
+          if [ "$CHANNEL" = hotfix ]; then
+            # a hotfix: the crate version with the run number as a fourth part
+            ver="$crate.$GITHUB_RUN_NUMBER"
+          else
+            ver="${{ inputs.version || github.ref_name }}"
+            ver="${ver#v}"
+            if [ "$ver" != "$crate" ]; then
+              echo "version $ver does not match the crate version $crate" >&2
+              exit 1
+            fi
           fi
           echo "ver=$ver" >> "$GITHUB_OUTPUT"
+          echo "crate=$crate" >> "$GITHUB_OUTPUT"
+          if [ "$CHANNEL" = hotfix ]; then echo "tag=hotfix-$ver" >> "$GITHUB_OUTPUT"; else echo "tag=v$ver" >> "$GITHUB_OUTPUT"; fi
       - name: Build
         run: cargo build --release --locked -p cadenza --bin cadenza --features ${{ matrix.features }}
       - name: Check the binary
         shell: bash
         run: |
           ./target/release/cadenza render --describe
-          ./target/release/cadenza render --describe | python3 -c 'import json,sys; d=json.load(sys.stdin); assert d["protocol"]==1 and d["version"]=="${{ steps.ver.outputs.ver }}", d'
+          ./target/release/cadenza render --describe | python3 -c 'import json,sys; d=json.load(sys.stdin); assert d["protocol"]==1 and d["version"]=="${{ steps.ver.outputs.crate }}", d'
           objdump -T target/release/cadenza | grep -o 'GLIBC_[0-9.]*' | sort -uV | tail -1
       - name: Package
         shell: bash
@@ -93,10 +116,23 @@ jobs:
           cat SHA256SUMS
       - uses: softprops/action-gh-release@v2
         with:
-          tag_name: ${{ inputs.version && format('v{0}', inputs.version) || github.ref_name }}
+          tag_name: ${{ needs.build.outputs.tag }}
           target_commitish: ${{ github.sha }}
-          name: Cadenza ${{ inputs.version && format('v{0}', inputs.version) || github.ref_name }}
+          name: Cadenza ${{ inputs.channel == 'hotfix' && format('{0} (hotfix)', needs.build.outputs.ver) || needs.build.outputs.tag }}
           generate_release_notes: true
+          prerelease: ${{ inputs.channel == 'hotfix' }}
+          make_latest: ${{ inputs.channel == 'hotfix' && 'false' || 'true' }}
           files: |
             dist/*.tar.gz
             dist/SHA256SUMS
+      # a hotfix: only the newest three hotfix releases (and their tags) stay
+      - name: Keep only the newest three hotfixes
+        if: inputs.channel == 'hotfix'
+        continue-on-error: true
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          KEEP: 3
+        run: |
+          OLD=$(gh release list --repo "$GITHUB_REPOSITORY" --limit 200 --json tagName -q '.[].tagName' \
+                | sed -n 's/^hotfix-\([0-9]*\.[0-9]*\.[0-9]*\.[0-9]*\)$/\1/p' | sort -t. -k1,1n -k2,2n -k3,3n -k4,4n -r | tail -n +$((KEEP + 1)))
+          for v in $OLD; do echo "deleting hotfix-$v"; gh release delete "hotfix-$v" --repo "$GITHUB_REPOSITORY" --yes --cleanup-tag || true; done

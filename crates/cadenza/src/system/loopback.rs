@@ -104,8 +104,6 @@ impl Drop for Capture {
     }
 }
 
-/// The process id of a running program by its executable name (`firefox`, `firefox.exe`,
-/// any case); the lowest id wins (usually the parent of a process tree).
 /// The executable names (without `.exe`) of every running process, for the web UI's app
 /// picker.
 pub fn process_names() -> Vec<String> {
@@ -138,6 +136,8 @@ pub fn process_names() -> Vec<String> {
     out
 }
 
+/// The process id of a running program by its executable name (`firefox`, `firefox.exe`,
+/// any case); the lowest id wins (usually the parent of a process tree).
 pub fn find_process(name: &str) -> Option<u32> {
     let want = exe_name(name);
     // SAFETY: a snapshot handle we close; entries are plain data.

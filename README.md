@@ -401,6 +401,11 @@ so it runs on Debian bookworm/trixie and newer), and publishes a GitHub release 
 just `cadenza`) and `SHA256SUMS`. Encore downloads the archive for its architecture, checks
 it against `SHA256SUMS` and runs `cadenza render --describe` before switching to it.
 
+Every push to `main` also builds a hotfix (`.github/workflows/hotfix.yml`): the same two archives as
+version `<crate version>.<n>` (e.g. `3.0.6.17`), published as a prerelease `hotfix-<version>` that is never
+"Latest", so Encore's download keeps taking full releases. Only the newest three hotfixes are kept. A push
+that only changes docs, or whose commit message says `[skip hotfix]`, makes none.
+
 ## Auto dither
 
 Noise shaping trades noise in the band for noise above it. How much is worth it depends on
