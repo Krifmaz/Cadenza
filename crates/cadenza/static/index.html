@@ -161,24 +161,17 @@
   .arrow { display: grid; place-items: center; color: var(--faint); font-size: 16px; }
   .chain .summary { flex-basis: 100%; margin-top: 4px; }
   @media (max-width: 560px) { .arrow { display: none; } .stage { flex-basis: 100%; } }
-  .queue div { padding: 8px 10px; border-radius: 10px; cursor: pointer; display: flex; gap: 10px; }
-  .queue div:hover { background: var(--panel-2); }
-  .queue .cur { color: var(--text); background: rgba(var(--accent-rgb), .14); font-weight: 650; }
 
   /* player bar */
   .player { position: fixed; left: 0; right: 0; bottom: 0; height: var(--player-h); z-index: 20;
     background: color-mix(in srgb, var(--bg-2) 88%, transparent); backdrop-filter: blur(18px); -webkit-backdrop-filter: blur(18px);
-    border-top: 1px solid var(--border); display: grid; grid-template-columns: minmax(0, 1fr) minmax(0, 1.4fr) minmax(0, 1fr); align-items: center; gap: 18px; padding: 0 18px; }
+    border-top: 1px solid var(--border); display: grid; grid-template-columns: minmax(0, 1fr) minmax(0, 1fr); align-items: center; gap: 18px; padding: 0 18px; }
   .player .now { display: flex; align-items: center; gap: 12px; min-width: 0; }
   .player .thumb { width: 52px; height: 52px; border-radius: 8px; background: var(--grad); overflow: hidden; flex: none; display: grid; place-items: center; }
   .player .thumb img { width: 100%; height: 100%; object-fit: cover; }
   .player .thumb svg { width: 22px; height: 22px; }
   .thumb > *, .art > * { grid-area: 1 / 1; }
   .player .t { font-weight: 650; }
-  .player .ctrls { display: flex; flex-direction: column; align-items: center; gap: 4px; }
-  .player .ctrls .row { gap: 6px; flex-wrap: nowrap; }
-  .player #toggle { width: 40px; height: 40px; padding: 0; border-radius: 50%; }
-  .seek { display: flex; align-items: center; gap: 10px; width: 100%; max-width: 560px; font-size: 11px; color: var(--faint); font-variant-numeric: tabular-nums; }
   .player .vol { display: flex; align-items: center; justify-content: flex-end; gap: 10px; }
   .player .vol input { max-width: 140px; }
   .player .vol svg { width: 18px; height: 18px; color: var(--muted); flex: none; }
@@ -206,8 +199,7 @@
     .nav a.active { box-shadow: inset 0 -3px 0 var(--accent); }
     .main { padding: 18px 16px calc(var(--player-h) + 24px); }
     .player { grid-template-columns: minmax(0, 1fr) auto; grid-template-rows: auto auto; height: auto; padding: 10px 14px calc(10px + env(safe-area-inset-bottom)); gap: 8px 12px; }
-    .player .ctrls { grid-column: 1 / -1; grid-row: 2; }
-    .player .vol { grid-column: 2; grid-row: 1; }
+      .player .vol { grid-column: 2; grid-row: 1; }
     .player .vol input { width: 90px; }
   }
   .albums { display: grid; grid-template-columns: repeat(auto-fill, minmax(150px, 1fr)); gap: 16px; }
@@ -257,10 +249,6 @@
         <div class="card wide">
           <h2>Signal path</h2>
           <div class="chain" id="chain"><span class="muted">Stopped.</span></div>
-        </div>
-        <div class="card wide">
-          <h2>Queue</h2>
-          <div class="queue small" id="queue"><span class="muted">Empty. Send music from Encore.</span></div>
         </div>
       </div>
     </section>
@@ -573,15 +561,6 @@
       <div class="small err ellipsis" id="bar-error"></div>
     </div>
   </div>
-  <div class="ctrls">
-    <div class="row">
-      <button class="ghost icon" data-a="prev" title="Previous"><svg viewBox="0 0 24 24" fill="currentColor"><path d="M6 5h2v14H6zM20 5v14L9 12z"/></svg></button>
-      <button class="primary" data-a="toggle" id="toggle" title="Play / pause"></button>
-      <button class="ghost icon" data-a="next" title="Next"><svg viewBox="0 0 24 24" fill="currentColor"><path d="M16 5h2v14h-2zM4 5v14l11-7z"/></svg></button>
-      <button class="ghost icon" data-a="stop" title="Stop"><svg viewBox="0 0 24 24" fill="currentColor"><rect x="6" y="6" width="12" height="12" rx="1.5"/></svg></button>
-    </div>
-    <div class="seek"><span id="pos">0:00</span><input type="range" id="seek" min="0" max="1000" value="0"><span id="dur">0:00</span></div>
-  </div>
   <div class="vol">
     <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M11 5 6 9H2v6h4l5 4zM15.5 8.5a5 5 0 0 1 0 7M19 5a10 10 0 0 1 0 14"/></svg>
     <input type="range" id="vol" min="0" max="1" step="0.01" title="Volume">
@@ -590,9 +569,6 @@
 <script>
 const $ = (id) => document.getElementById(id);
 $('cover').onerror = () => { $('cover').dataset.bad = $('cover').getAttribute('src'); $('cover').hidden = true; $('cover-big').hidden = true; };
-const ICON_PLAY = '<svg viewBox="0 0 24 24" fill="currentColor"><path d="M8 5.5v13l11-6.5z"/></svg>';
-const ICON_PAUSE = '<svg viewBox="0 0 24 24" fill="currentColor"><rect x="6.5" y="5" width="4" height="14" rx="1"/><rect x="13.5" y="5" width="4" height="14" rx="1"/></svg>';
-$('toggle').innerHTML = ICON_PLAY;
 
 // Views: the sidebar picks one; the choice lives in the URL hash.
 const VIEWS = [...document.querySelectorAll('.view')].map(v => v.dataset.view);
@@ -616,7 +592,7 @@ const api = async (method, path, body) => {
   if (!r.ok) throw new Error(j.error || r.statusText);
   return j;
 };
-let status = null, dragging = false, eqBands = [], loaded = false;
+let status = null, eqBands = [], loaded = false;
 let options = null, filters = [], dithers = [], devices = [];
 const EQ_TYPES = ['peaking', 'low-shelf', 'high-shelf', 'low-pass', 'high-pass', 'notch'];
 const opts = (list, val = 'id', label = 'label') => list.map(o => `<option value="${esc(o[val])}">${esc(o[label] ?? o[val])}</option>`).join('');
@@ -729,16 +705,9 @@ function paint(s) {
   $('sub-big').textContent = $('sub').textContent;
   $('fmt').textContent = s.source_format || '';
   $('output').textContent = s.output ? `${s.output}${s.output_format ? ' · ' + formatLabel(s.output_format) : ''}${s.output_exclusive ? ' · exclusive' : ''}` : '';
-  $('toggle').innerHTML = s.state === 'playing' ? ICON_PAUSE : ICON_PLAY;
-  if (!dragging) {
-    $('seek').value = s.duration ? (s.position / s.duration) * 1000 : 0;
-    $('pos').textContent = dur(s.position);
-  }
-  $('dur').textContent = dur(s.duration);
   if (document.activeElement !== $('vol')) $('vol').value = s.volume_linear ?? 1;
   $('error').textContent = s.error || '';
   $('bar-error').textContent = s.error || ''; $('bar-error').title = s.error || '';
-  $('queue').innerHTML = s.queue?.length ? s.queue.map((q, i) => `<div data-i="${i}" class="${i === s.index ? 'cur' : ''}">${i + 1}. ${esc(q.title)}${q.artist ? ' – ' + esc(q.artist) : ''}</div>`).join('') : '<span class="muted">Empty. Send music from Encore.</span>';
   const p = s.signal_path;
   $('bp').className = 'badge ' + (p ? (p.bit_perfect ? 'ok' : 'warn') : '');
   $('bp').textContent = p ? (p.bit_perfect ? 'bit-perfect' : 'processed') : '';
@@ -1071,11 +1040,7 @@ async function control(action, value) {
 }
 const num = (id) => Number($(id).value);
 
-document.querySelectorAll('[data-a]').forEach(b => b.onclick = () => control(b.dataset.a));
-$('seek').oninput = () => { dragging = true; $('pos').textContent = dur((status?.duration || 0) * $('seek').value / 1000); };
-$('seek').onchange = () => { dragging = false; control('seek', (status?.duration || 0) * $('seek').value / 1000); };
 $('vol').onchange = () => control('volume', Number($('vol').value));
-$('queue').onclick = (e) => { const d = e.target.closest('[data-i]'); if (d) control('play_index', Number(d.dataset.i)); };
 $('bitperfect').onchange = () => { lockDsp(); save({ dsp: { bit_perfect: $('bitperfect').checked } }); };
 $('output_mode').onchange = () => { lockDsp(); fillDsdRates(); save({ dsp: { output_mode: $('output_mode').value } }); };
 $('filter').onchange = () => { filterInfo(); save({ dsp: { filter: $('filter').value } }); };

@@ -104,6 +104,8 @@ pub struct Overrides {
 
 /// Subcommands.
 #[derive(Subcommand, Debug)]
+// Parsed once at start-up: the size of `Serve` does not matter.
+#[allow(clippy::large_enum_variant)]
 pub enum Commands {
     /// Run the control API, the web UI and (if configured) the Encore device.
     Serve {

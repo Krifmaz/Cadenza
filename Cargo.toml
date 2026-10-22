@@ -1,9 +1,6 @@
 [workspace]
 resolver = "2"
-members = ["crates/cadenza-eq", "crates/cadenza-dsp", "crates/cadenza", "crates/cadenza-desktop"]
-# Plain `cargo build` / `cargo run` at the root: the engine and the CLI. The desktop app
-# (iced; needs GTK for the tray on Linux) builds with `-p cadenza-desktop` or `--workspace`.
-default-members = ["crates/cadenza-eq", "crates/cadenza-dsp", "crates/cadenza"]
+members = ["crates/cadenza-eq", "crates/cadenza-dsp", "crates/cadenza"]
 
 [workspace.package]
 version = "3.0.6"

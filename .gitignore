@@ -4,4 +4,3 @@ Cargo.lock.bak
 *.swp
 .DS_Store
 # Tauri generates these schemas at build time.
-crates/cadenza-desktop/gen/
