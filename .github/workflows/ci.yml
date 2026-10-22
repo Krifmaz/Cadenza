@@ -51,7 +51,8 @@ jobs:
         env:
           CADENZA_WGPU_SOFTWARE: "1"
         run: |
-          cargo test --release --workspace --features alsa,wgpu
+          # not the filter speed tests: on software Vulkan they time lavapipe, which is too slow by design
+          cargo test --release --workspace --features alsa,wgpu -- --skip limit::
           cargo test --release -p cadenza-dsp --features wgpu -- --ignored wgpu_backend
       - name: Build with CUDA feature (no toolkit needed)
         run: cargo build --release --features cuda
