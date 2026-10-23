@@ -116,6 +116,7 @@ pub const KEYS: [&str; 9] = [
     "gpu_precision",
 ];
 
+/// A command-line boolean: `1/true/on/yes` or `0/false/off/no`.
 fn parse_bool(v: &str) -> Option<bool> {
     match v.trim().to_ascii_lowercase().as_str() {
         "1" | "true" | "on" | "yes" => Some(true),

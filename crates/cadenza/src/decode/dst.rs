@@ -14,13 +14,19 @@
 /// DST frames per second.
 pub const FRAMES_PER_SECOND: u32 = 75;
 
+/// Most channels a DST stream carries.
 const MAX_CHANNELS: usize = 6;
+/// Most prediction-filter segments per channel.
 const MAX_FILTER_SEGMENTS: usize = 4;
+/// Most probability-table segments per channel.
 const MAX_PTABLE_SEGMENTS: usize = 8;
+/// Shortest filter segment in bits.
 const MIN_FILTER_SEGMENT_BITS: usize = 1024;
+/// Shortest probability-table segment in bits.
 const MIN_PTABLE_SEGMENT_BITS: usize = 32;
 /// Prediction of the coded filter coefficients / table entries from the previous ones.
 const FILTER_CODE_PRED: [&[i32]; 3] = [&[-8], &[-16, 8], &[-9, -5, 6]];
+/// Prediction of the coded probability-table entries from the previous ones.
 const PTABLE_CODE_PRED: [&[i32]; 3] = [&[-8], &[-16, 8], &[-24, 24, -8]];
 
 /// Why a frame did not decode.
@@ -42,16 +48,21 @@ pub fn bits_per_frame(rate: u32) -> usize {
     (rate / FRAMES_PER_SECOND) as usize
 }
 
+/// MSB-first bit reader over one frame.
 struct Bits<'a> {
+    /// The frame bytes.
     data: &'a [u8],
+    /// Next bit to read.
     pos: usize,
 }
 
 impl<'a> Bits<'a> {
+    /// A reader at the first bit of `data`.
     fn new(data: &'a [u8]) -> Self {
         Self { data, pos: 0 }
     }
 
+    /// Bits in the frame.
     fn total(&self) -> usize {
         self.data.len() * 8
     }
@@ -66,6 +77,7 @@ impl<'a> Bits<'a> {
         b as u32
     }
 
+    /// The next `n` bits as an unsigned value; [`DstError::Truncated`] past the end.
     fn get(&mut self, n: usize) -> Result<u32, DstError> {
         if self.pos + n > self.total() {
             return Err(DstError::Truncated);
@@ -77,15 +89,19 @@ impl<'a> Bits<'a> {
         Ok(v)
     }
 
+    /// One bit as a flag.
     fn flag(&mut self) -> Result<bool, DstError> {
         Ok(self.get(1)? == 1)
     }
 
+    /// The next `n` bits as a two's-complement value.
     fn signed(&mut self, n: usize) -> Result<i32, DstError> {
         let v = self.get(n)? as i32;
         Ok(if v >= 1 << (n - 1) { v - (1 << n) } else { v })
     }
 
+    /// A Rice code with parameter `m` (unary run, `m` low bits, then a sign bit when
+    /// non-zero).
     fn rice(&mut self, m: usize) -> Result<i32, DstError> {
         let mut run = 0i32;
         while !self.flag()? {
@@ -112,9 +128,12 @@ struct Segments {
     starts: Vec<Vec<usize>>,
     /// Per channel and segment, the table used.
     table: Vec<Vec<usize>>,
+    /// Number of distinct tables.
     tables: usize,
 }
 
+/// Read one segmentation (filters or probability tables): per channel the segment start
+/// bits, or one shared by every channel.
 fn read_segments(
     r: &mut Bits,
     channels: usize,
@@ -161,6 +180,7 @@ fn read_segments(
     Ok(starts)
 }
 
+/// Read which table each segment uses; returns the mapping and the table count.
 fn read_mapping(
     r: &mut Bits,
     starts: &[Vec<usize>],
@@ -206,6 +226,8 @@ fn read_mapping(
     Ok((table, count))
 }
 
+/// Read a predictively coded table of `len` entries: the first entries verbatim, the rest
+/// as Rice-coded residuals of `pred`, each checked against `range`.
 fn read_coded_table(
     r: &mut Bits,
     len: usize,
@@ -255,11 +277,14 @@ fn read_coded_table(
 
 /// The arithmetic decoder (12-bit, with the standard's "partial rounding").
 struct Arith {
+    /// Interval width.
     a: u32,
+    /// Code value.
     c: u32,
 }
 
 impl Arith {
+    /// A decoder primed with the first 12 bits.
     fn new(r: &mut Bits) -> Self {
         let mut c = 0;
         for _ in 0..12 {
@@ -268,6 +293,7 @@ impl Arith {
         Self { a: 4095, c }
     }
 
+    /// Decode one bit with probability `p` (of a 0, 8-bit) and renormalise.
     #[inline]
     fn bit(&mut self, r: &mut Bits, p: u32) -> u32 {
         let ap = ((self.a >> 8) | ((self.a >> 7) & 1)) * p;
@@ -291,6 +317,7 @@ impl Arith {
 /// Per-filter lookup: 16 tables of 256 partial sums, one per byte of history.
 type FilterTable = [[i16; 256]; 16];
 
+/// Precompute the partial sums of `coefs` for every byte of history.
 fn filter_table(coefs: &[i32]) -> Box<FilterTable> {
     let mut t = Box::new([[0i16; 256]; 16]);
     for (j, row) in t.iter_mut().enumerate() {
@@ -314,7 +341,9 @@ fn x_bit_probability(c: i32) -> u32 {
 
 /// A DST decoder for one stream.
 pub struct DstDecoder {
+    /// Channels in the stream.
     channels: usize,
+    /// Bits per channel in one frame.
     bits_per_ch: usize,
     /// Frames whose arithmetic code did not end where it should (decoded anyway).
     pub flush_warnings: u64,

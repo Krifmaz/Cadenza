@@ -9,10 +9,15 @@ use std::sync::Arc;
 ///
 /// The inverse is scaled by `1/len`, so `inverse(forward(x)) == x`.
 pub struct RealFft {
+    /// Transform length in real samples.
     len: usize,
+    /// Planned forward (real → half spectrum) transform.
     fwd: Arc<dyn RealToComplex<f64>>,
+    /// Planned inverse (half spectrum → real) transform.
     inv: Arc<dyn ComplexToReal<f64>>,
+    /// Scratch for the forward transform, sized once at planning time.
     scratch_fwd: Vec<Complex<f64>>,
+    /// Scratch for the inverse transform, sized once at planning time.
     scratch_inv: Vec<Complex<f64>>,
 }
 

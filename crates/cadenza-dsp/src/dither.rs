@@ -196,8 +196,10 @@ fn range_db_for(kind: DitherKind) -> f64 {
     }
 }
 
+/// Designed noise-shaping filters by kind and sample rate, computed once per process.
 type DesignCache = Mutex<HashMap<(DitherKind, u32), Arc<Vec<f64>>>>;
 
+/// The process-wide [`DesignCache`].
 fn design_cache() -> &'static DesignCache {
     static CACHE: OnceLock<DesignCache> = OnceLock::new();
     CACHE.get_or_init(|| Mutex::new(HashMap::new()))
@@ -374,6 +376,7 @@ impl DitherKind {
         c
     }
 
+    /// The kind whose shaper is designed: `ns-adaptive` scales the `ns9` shaper at run time.
     fn design_kind(self) -> DitherKind {
         match self {
             DitherKind::NsAdaptive => DitherKind::Ns9,
@@ -501,21 +504,31 @@ pub fn auto_choice(bits: u32, rate: u32, dac_floor_db: f64) -> DitherKind {
 /// Converts `f64` samples in `[-1, 1)` to integers of `bits` bits, per channel.
 #[derive(Clone, Debug)]
 pub struct Quantizer {
+    /// Output bit depth.
     bits: u32,
+    /// Dither and shaping actually applied (after `auto` resolved).
     kind: DitherKind,
+    /// Output rate the shaper was designed for.
     rate: u32,
+    /// Interleaved channel count (at least 1).
     channels: usize,
+    /// Full scale in output LSBs: `2^(bits − 1)`.
     scale: f64,
+    /// Lowest representable output value in LSBs.
     min: f64,
+    /// Highest representable output value in LSBs.
     max: f64,
+    /// Error-feedback coefficients of the shaper (empty for plain dither).
     coefs: Arc<Vec<f64>>,
     /// Per channel ring buffer of past errors (newest at `pos`).
     errors: Vec<Vec<f64>>,
+    /// Ring index shared by every channel's error history.
     pos: usize,
     /// Per channel adaptive step of `ns-adaptive` (1 = full shaping and dither).
     step: Vec<f64>,
     /// Samples whose error exceeded the clip-safe limit (the output clipped).
     clipped: u64,
+    /// Generator for the dither noise.
     rng: Rng,
     /// `Some(dac floor)` when `auto` chose the kind.
     auto: Option<f64>,
@@ -618,6 +631,7 @@ impl Quantizer {
         self.pos = 0;
     }
 
+    /// One dither sample in LSBs for the current kind (TPDF, rectangular, Gaussian or none).
     #[inline]
     fn dither(&mut self) -> f64 {
         match self.kind {

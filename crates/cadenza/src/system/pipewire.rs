@@ -26,7 +26,9 @@ use std::time::Duration;
 
 /// A running PipeWire capture; dropping it stops the loop.
 pub struct Capture {
+    /// Tells the PipeWire loop to quit.
     quit: Option<pw::channel::Sender<()>>,
+    /// The thread running the loop.
     thread: Option<std::thread::JoinHandle<()>>,
 }
 
@@ -95,6 +97,8 @@ pub fn matches_app(want: &str, props: &[(&str, &str)]) -> bool {
     })
 }
 
+/// The capture thread: connect to PipeWire, create the capture stream for `cfg` and feed
+/// every buffer into `feed` until told to quit; `ready` reports whether it started.
 fn run(
     cfg: &SystemConfig,
     feed: Arc<Feed>,
@@ -202,7 +206,9 @@ fn run(
 
 /// One capture stream and its listener.
 struct Capturing {
+    /// The PipeWire stream.
     stream: pw::stream::StreamRc,
+    /// Its listener, kept alive with the stream.
     _listener: pw::stream::StreamListener<u32>,
 }
 

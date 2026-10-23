@@ -6,6 +6,7 @@
 /// xoshiro256** by Blackman & Vigna (public domain reference implementation).
 #[derive(Clone, Debug)]
 pub struct Rng {
+    /// The xoshiro256** state words.
     s: [u64; 4],
 }
 

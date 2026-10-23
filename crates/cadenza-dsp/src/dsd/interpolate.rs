@@ -14,9 +14,13 @@ pub const ATTENUATION_DB: f64 = 150.0;
 /// Streaming ×L interpolator for `channels` planar channels.
 #[derive(Clone, Debug)]
 pub struct ShortInterpolator {
+    /// Input sample rate in Hz.
     in_rate: u32,
+    /// Upsampling factor `L`.
     l: usize,
+    /// Total taps of the prototype low-pass.
     taps: usize,
+    /// Upper edge of the flat passband in Hz (for reports).
     passband_hz: f64,
     /// `phases[p][k] = h[k·L + p] · L`.
     phases: Vec<Vec<f64>>,

@@ -30,11 +30,17 @@ pub fn codecs() -> &'static CodecRegistry {
     })
 }
 
+/// Opus decoder for symphonia (libopus through the `opus` crate).
 pub struct Opus {
+    /// The libopus decoder.
     dec: OpusDecoder,
+    /// Codec parameters of the stream.
     params: CodecParameters,
+    /// Channel count (1 or 2).
     channels: usize,
+    /// Decoded interleaved samples of one packet (up to [`MAX_FRAMES`] per channel).
     pcm: Vec<i16>,
+    /// The packet's audio in symphonia's planar buffer.
     buf: AudioBuffer<f32>,
 }
 

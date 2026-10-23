@@ -94,8 +94,11 @@ const DITHER_FADE_LEVEL: f64 = 0.6;
 /// One channel of 1-bit modulation.
 #[derive(Clone, Debug)]
 pub struct SigmaDelta {
+    /// Which modulator design this is.
     kind: DsdModulator,
+    /// The noise transfer function the loop realises (shared between channels).
     ntf: Arc<Ntf>,
+    /// Modulator (DSD) rate in Hz.
     rate: u32,
     /// `(A − B)[1..=N]`.
     c: Vec<f64>,
@@ -105,21 +108,32 @@ pub struct SigmaDelta {
     e_hist: Vec<f64>,
     /// Past feedback values, newest first.
     w_hist: Vec<f64>,
+    /// Input clip level that keeps this loop stable.
     input_limit: f64,
+    /// Input samples that had to be clipped to `input_limit`.
     clips: u64,
+    /// Loop-state resets after an overload.
     resets: u64,
+    /// Level-dependent dither, for the dithered modulator kinds.
     dither: Option<Dither>,
+    /// Look-ahead search state, for the error-correction modulator kinds.
     trellis: Option<Box<Trellis>>,
     /// Bits not yet emitted as a whole byte (MSB first).
     pending: u8,
+    /// How many bits of `pending` are filled (a byte is emitted at 8).
     pending_bits: u8,
+    /// Samples modulated so far.
     samples: u64,
 }
 
+/// Dither that fades out with the signal level, so it only decorrelates the idle loop.
 #[derive(Clone, Debug)]
 struct Dither {
+    /// Generator for the dither noise.
     rng: Rng,
+    /// Peak-hold envelope of the input level.
     env: f64,
+    /// Per-sample release factor of the envelope (about 2 ms).
     decay: f64,
 }
 
@@ -200,6 +214,7 @@ struct Path {
 }
 
 impl Path {
+    /// A path with a zero loop state, no cost and no bits (the start, and after a reset).
     const CLEAN: Path = Path {
         z: [0.0; MAX_ORDER],
         f: 0.0,
@@ -212,26 +227,38 @@ impl Path {
 /// (`near`, the sign of `v`) and the other one (`far`).
 #[derive(Clone, Copy, Debug, Default)]
 struct Extension {
+    /// Index in `cur` of the path this extends.
     parent: usize,
+    /// That path's next feedback value.
     w: f64,
+    /// Quantiser input `x − w`.
     v: f64,
+    /// Cost of extending with the plain quantiser's bit.
     near: f64,
+    /// Cost of extending with the other bit.
     far: f64,
 }
 
 /// The M-algorithm state of an error-correction modulator.
 #[derive(Clone, Debug)]
 struct Trellis {
+    /// Search size and depth.
     look: Lookahead,
     /// `(A − B)[1..=N]` and `A[1..=N]`, zero-padded to [`MAX_ORDER`].
     c: [f64; MAX_ORDER],
+    /// `A[1..=N]`, zero-padded to [`MAX_ORDER`].
     a: [f64; MAX_ORDER],
     /// Survivors, cheapest first (`count` of them are live).
     cur: Vec<Path>,
+    /// Survivors being built for the next step (swapped with `cur`).
     next: Vec<Path>,
+    /// Number of live paths in `cur`.
     count: usize,
+    /// Both extensions of every valid survivor this step.
     ext: Vec<Extension>,
+    /// Indices into `ext` sorted by `near` cost.
     near_order: Vec<usize>,
+    /// Indices into `ext` of the competitive far extensions, sorted by `far` cost.
     far_order: Vec<usize>,
     /// Extensions since the last reset, saturating at `depth` (bits are committed once
     /// the paths are `depth` bits long).
@@ -243,6 +270,8 @@ struct Trellis {
 }
 
 impl Trellis {
+    /// A trellis for `look` around the loop filter `c / a`, weighting in-band error for a
+    /// modulator running at `rate`.
     fn new(look: Lookahead, c: &[f64], a: &[f64], rate: u32) -> Self {
         let look = look.clamped();
         let n = look.paths;
@@ -276,6 +305,7 @@ impl Trellis {
         (e * e + self.weight * f * f, f)
     }
 
+    /// Back to a single clean path (no bits pending).
     fn reset(&mut self) {
         self.cur[0] = Path::CLEAN;
         self.count = 1;

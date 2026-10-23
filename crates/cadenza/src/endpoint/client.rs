@@ -30,9 +30,13 @@ const ACK_TIMEOUT: Duration = Duration::from_secs(5);
 /// endpoint (its clock, from the acks).
 #[derive(Debug, Clone)]
 pub struct Pacer {
+    /// Most frames allowed outstanding at the endpoint.
     high_water: u64,
+    /// Frames sent so far.
     sent: u64,
+    /// Frames the endpoint reports as played (from the last ack).
     played: u64,
+    /// Frames the endpoint reports as queued (jitter buffer + device).
     queued: u64,
 }
 
@@ -107,29 +111,47 @@ fn resolve(target: &str) -> Result<SocketAddr, OutputError> {
 
 /// What arrives from the endpoint.
 enum Incoming {
+    /// A block acknowledgement with the endpoint's clock.
     Ack(Ack),
+    /// The endpoint opened its device with this format.
     Opened(OutputFormat),
+    /// The endpoint played out a drain.
     Drained,
+    /// The endpoint reported an error.
     Error(String),
+    /// The connection closed or failed (the reason).
     Gone(String),
 }
 
 /// See the module documentation.
 pub struct EndpointOutput {
+    /// `cadenza://host:port/device` as the user gave it, for logs and the status.
     label: String,
+    /// Device name on the endpoint (empty for its default).
     remote_device: String,
+    /// What the endpoint said it supports.
     caps: Caps,
+    /// The device description reported to the engine.
     device: DeviceInfo,
+    /// Write half of the socket, shared with the sync pinger.
     writer: Arc<Mutex<BufWriter<TcpStream>>>,
     /// A handle on the socket to shut it down on drop (the reader thread holds a clone).
     socket: TcpStream,
+    /// Messages parsed by the reader thread.
     rx: Receiver<Incoming>,
+    /// The reader thread (ends when the socket closes).
     _reader: thread::JoinHandle<()>,
+    /// Format of the open stream, if any.
     format: Option<OutputFormat>,
+    /// Keeps the endpoint's buffer at about [`HIGH_WATER_SECONDS`].
     pacer: Pacer,
+    /// Sequence number of the next frames block.
     seq: u64,
+    /// Stream position of the next frame to be sent.
     position: u64,
+    /// Frames written since the stream opened.
     frames_written: u64,
+    /// The most recent ack.
     last_ack: Option<Ack>,
     /// Protocol version agreed with the endpoint.
     version: u32,
@@ -162,6 +184,8 @@ impl EndpointOutput {
         }
     }
 
+    /// Connect to `spec` and shake hands offering protocol `version`; `epoch` is the clock
+    /// the sync pings measure from.
     fn connect_version(spec: &str, epoch: Instant, version: u32) -> Result<Self, OutputError> {
         let (target, remote_device) = split_target(spec);
         let addr = resolve(target)?;
@@ -315,6 +339,7 @@ impl EndpointOutput {
         self.last_ack
     }
 
+    /// Send one message on the socket.
     fn send(&self, m: &Message) -> Result<(), OutputError> {
         m.write_to(&mut *self.writer.lock().unwrap())
             .map_err(io_err)
@@ -410,6 +435,7 @@ impl Drop for EndpointOutput {
     }
 }
 
+/// An I/O error as an output error.
 fn io_err(e: io::Error) -> OutputError {
     OutputError::Backend(e.to_string())
 }

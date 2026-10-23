@@ -40,6 +40,8 @@ pub struct AdapterInfo {
     pub software: bool,
 }
 
+/// The process-wide wgpu instance (Vulkan, Metal and DX12 only); `None` when this build
+/// has no usable backend.
 fn instance() -> Option<&'static wgpu::Instance> {
     static INSTANCE: OnceLock<Option<wgpu::Instance>> = OnceLock::new();
     INSTANCE
@@ -54,6 +56,7 @@ fn instance() -> Option<&'static wgpu::Instance> {
         .as_ref()
 }
 
+/// Display name of a wgpu backend.
 fn api_name(b: wgpu::Backend) -> &'static str {
     match b {
         wgpu::Backend::Vulkan => "Vulkan",
@@ -63,6 +66,7 @@ fn api_name(b: wgpu::Backend) -> &'static str {
     }
 }
 
+/// `true` when `CADENZA_WGPU_SOFTWARE=1` allows software adapters (tests, CI).
 fn allow_software() -> bool {
     std::env::var("CADENZA_WGPU_SOFTWARE").is_ok_and(|v| v == "1" || v == "true")
 }
@@ -165,24 +169,36 @@ pub fn probe(device: usize, precision: GpuPrecision) -> Result<Backend, GpuError
 
 /// What every core on one device shares.
 pub(crate) struct Shared {
+    /// The logical device.
     device: wgpu::Device,
+    /// Its command queue.
     queue: wgpu::Queue,
+    /// Compute pipelines of the polyphase program, one per kernel.
     pipelines: Vec<wgpu::ComputePipeline>,
+    /// Bind group layout of the polyphase program.
     layout: wgpu::BindGroupLayout,
+    /// Compute pipeline of the rational dot-product kernel.
     rational: wgpu::ComputePipeline,
+    /// Bind group layout of the rational kernel.
     rational_layout: wgpu::BindGroupLayout,
+    /// Adapter name for logs and the signal path.
     name: String,
+    /// Backend name (`Vulkan`, `Metal`, `DX12`).
     api: &'static str,
+    /// Native `f64` or double-f32 arithmetic.
     arith: Arith,
     /// Stride of the per-dispatch parameters in the uniform buffer.
     param_stride: u64,
+    /// Largest storage buffer binding the device allows, in bytes.
     max_binding: u64,
+    /// Largest buffer the device allows, in bytes.
     max_buffer: u64,
     /// The first device error reported asynchronously (lost device, validation).
     error: Arc<Mutex<Option<String>>>,
 }
 
 impl Shared {
+    /// The asynchronously reported device error, if any.
     fn take_error(&self) -> Option<String> {
         self.error.lock().unwrap_or_else(|e| e.into_inner()).clone()
     }
@@ -208,6 +224,8 @@ fn open(index: usize, precision: GpuPrecision) -> Result<Arc<Shared>, GpuError> 
     r
 }
 
+/// Open the device for `(index, precision)` without the cache: pick the adapter, request
+/// the features it needs and compile both programs.
 fn open_uncached(index: usize, precision: GpuPrecision) -> Result<Arc<Shared>, GpuError> {
     if instance().is_none() {
         return Err(GpuError::NoDriver(
@@ -498,14 +516,23 @@ fn submit_and_read(
 /// the sub-filters are shared): per call, upload the window and the parameters, one
 /// workgroup per output sample, read the outputs back.
 pub struct RationalEngine {
+    /// The device everything runs on.
     shared: Arc<Shared>,
+    /// Reversed sub-filters, shared by the stage's channels.
     sub: Arc<wgpu::Buffer>,
+    /// Number of phases `L`.
     l: usize,
+    /// Taps per sub-filter `S`.
     s: usize,
+    /// Uniform buffer of the call parameters.
     params: wgpu::Buffer,
+    /// Storage buffer for the input window.
     win: wgpu::Buffer,
+    /// Storage buffer for the outputs.
     out: wgpu::Buffer,
+    /// Mappable buffer the outputs are copied to for reading back.
     staging: wgpu::Buffer,
+    /// Bind group over the buffers above.
     bind: wgpu::BindGroup,
 }
 
@@ -531,6 +558,7 @@ impl RationalEngine {
         Self::for_channels_on(open(device, precision)?, sub, channels)
     }
 
+    /// Build the engines on an already opened device.
     fn for_channels_on(
         shared: Arc<Shared>,
         sub: &[Vec<f64>],
@@ -578,6 +606,7 @@ impl RationalEngine {
         Ok(out)
     }
 
+    /// An engine whose window and output buffers hold `win_cap` and `out_cap` values.
     fn with_capacity(
         shared: Arc<Shared>,
         sub: Arc<wgpu::Buffer>,
@@ -718,11 +747,17 @@ impl RationalDotEngine for RationalEngine {
 
 /// What the channels of one stage share: the packed sub-filter spectra and the twiddles.
 struct Stage {
+    /// The device everything runs on.
     shared: Arc<Shared>,
+    /// Paired sub-filter spectra.
     g: wgpu::Buffer,
+    /// FFT twiddle table.
     tw: wgpu::Buffer,
+    /// Input block size.
     block: usize,
+    /// Number of phases `L`.
     l: usize,
+    /// Partitions per sub-filter (FDL depth).
     parts: usize,
 }
 
@@ -731,18 +766,30 @@ struct Stage {
 /// program of [`block_program`] in one compute pass, copy the interleaved output to a
 /// mapped buffer and read it back.
 pub struct PolyphaseCore {
+    /// Spectra and device shared by the stage's channels.
     stage: Arc<Stage>,
+    /// Slot of the newest spectrum in the FDL.
     head: usize,
+    /// Spectra pushed so far, capped at `parts`.
     count: usize,
+    /// `[previous block | current block]` on the host.
     frame: Vec<f64>,
+    /// Input frame in, interleaved output out.
     io: wgpu::Buffer,
+    /// Uniform buffer of the per-dispatch parameters.
     params: wgpu::Buffer,
+    /// Mappable buffer the output is copied to for reading back.
     staging: wgpu::Buffer,
+    /// Bind group reading `a` and writing `b`.
     bg_ab: wgpu::BindGroup,
+    /// Bind group reading `b` and writing `a`.
     bg_ba: wgpu::BindGroup,
     // Held so the buffers the bind groups reference stay alive (and for clarity).
+    /// Transform buffer A.
     _a: wgpu::Buffer,
+    /// Transform buffer B.
     _b: wgpu::Buffer,
+    /// Frequency-domain delay line.
     _fdl: wgpu::Buffer,
 }
 
@@ -757,6 +804,7 @@ impl std::fmt::Debug for PolyphaseCore {
     }
 }
 
+/// Create a device buffer of at least `bytes` (16 minimum, copy aligned).
 fn buffer(
     device: &wgpu::Device,
     label: &str,
@@ -782,6 +830,7 @@ impl PolyphaseCore {
         Self::for_channels_on(open(device, precision)?, filters, channels)
     }
 
+    /// Build the cores on an already opened device.
     fn for_channels_on(
         shared: Arc<Shared>,
         filters: &[SpectralFilter],
@@ -909,6 +958,7 @@ impl PolyphaseCore {
         Ok(cores)
     }
 
+    /// Run one input block on the device and read back its `block × L` outputs.
     fn run_block(&mut self, input: &[f64], out: &mut [f64]) -> Result<(), GpuError> {
         let st = Arc::clone(&self.stage);
         let sh = &st.shared;

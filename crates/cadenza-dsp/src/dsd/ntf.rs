@@ -188,6 +188,8 @@ impl Ntf {
     }
 }
 
+/// Peak magnitude of `B(e^jw) / A(e^jw)` over `0..=π`, sampled at 1024 points plus Nyquist
+/// (the out-of-band gain that decides modulator stability).
 fn max_gain(b: &[f64], a: &[f64]) -> f64 {
     let mut best = eval(b, PI).norm() / eval(a, PI).norm();
     let n = 1024;

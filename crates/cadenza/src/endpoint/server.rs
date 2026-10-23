@@ -27,7 +27,9 @@ const CHUNK_MS: u64 = 10;
 /// data structure (no I/O) so the drift behaviour can be simulated in tests.
 #[derive(Debug)]
 pub struct JitterBuffer {
+    /// Buffered interleaved device words, oldest first.
     words: std::collections::VecDeque<i32>,
+    /// Interleaved channel count.
     channels: usize,
     /// Frames to hold before playback starts (and restarts after an underrun).
     prefill_frames: usize,
@@ -37,6 +39,7 @@ pub struct JitterBuffer {
     played: u64,
     /// Frames received.
     received: u64,
+    /// Times the buffer ran dry while playing.
     underruns: u64,
 }
 
@@ -147,24 +150,36 @@ pub struct EndpointStats {
     pub opens: u64,
 }
 
+/// Totals across every connection, for the endpoint's status.
 #[derive(Default)]
 struct Counters {
+    /// Senders accepted.
     connections: AtomicU64,
+    /// Frames written to the output.
     frames_played: AtomicU64,
+    /// Underruns of the jitter buffer.
     underruns: AtomicU64,
+    /// Streams opened by senders.
     opens: AtomicU64,
 }
 
 /// A running endpoint.
 pub struct EndpointServer {
+    /// The configuration the endpoint runs with.
     config: EndpointConfig,
+    /// Name advertised to senders.
     name: String,
+    /// Address the listener is bound to.
     addr: SocketAddr,
+    /// Set to stop the accept thread.
     stop: Arc<AtomicBool>,
+    /// Totals shown in the status.
     counters: Arc<Counters>,
+    /// The thread accepting connections, joined on shutdown.
     accept_thread: Option<thread::JoinHandle<()>>,
     /// Last format a sender opened, for the status line.
     last_format: Arc<Mutex<Option<OutputFormat>>>,
+    /// The mDNS advertisement; dropping it withdraws the endpoint.
     _mdns: Option<discovery::Advertisement>,
 }
 
@@ -367,20 +382,31 @@ type OpenStream = (
     OutputFormat,
 );
 
+/// One sender's connection: what its reader thread needs.
 struct Session {
+    /// The endpoint's configuration.
     config: EndpointConfig,
+    /// Name announced to the sender.
     name: String,
+    /// Totals shared with the server.
     counters: Arc<Counters>,
+    /// Last opened format, shared with the server's status.
     last_format: Arc<Mutex<Option<OutputFormat>>>,
 }
 
 /// State shared between the reader and the player thread of one open stream.
 struct Stream {
+    /// Received words waiting to be played.
     buffer: Mutex<JitterBuffer>,
+    /// Wakes the player when words arrive or a flag changes.
     cv: Condvar,
+    /// Set to end the player thread.
     stop: AtomicBool,
+    /// Set by the sender's `Drain`: play out what is buffered, then report.
     drain: AtomicBool,
+    /// Set by the player once a drain has played out.
     drained: AtomicBool,
+    /// Set while the sender has paused the stream.
     paused: AtomicBool,
     /// Frames the output reports as queued inside the device.
     device_queued: AtomicU64,
@@ -399,6 +425,8 @@ struct Stream {
 }
 
 impl Session {
+    /// Serve one sender until it disconnects: answer the handshake, then open, feed and close
+    /// streams, each with its own player thread.
     fn serve(&self, stream: TcpStream) -> io::Result<()> {
         let mut reader = BufReader::new(stream.try_clone()?);
         let writer = Arc::new(Mutex::new(BufWriter::new(stream)));
@@ -600,6 +628,7 @@ impl Session {
         }
     }
 
+    /// Open the local output for a stream (the configured backend and `device`).
     fn open_output(&self, device: &str) -> Result<Box<dyn Output>, OutputError> {
         let backend = if self.config.backend.is_empty() {
             output::default_backend().to_string()
@@ -790,12 +819,17 @@ fn play(
 
 /// The player's multi-room state for one stream.
 struct SyncPlayer {
+    /// Format of the stream as opened on the device.
     format: OutputFormat,
+    /// Interleaved channel count.
     channels: usize,
     /// DoP frames carry alternating markers: slips and silence come in pairs.
     dop: bool,
+    /// Whether the first frame has been scheduled on the timeline.
     started: bool,
+    /// The control loop that tracks the leader's clock.
     follower: Follower,
+    /// Fine rate correction while following (created on the first correction).
     resampler: Option<Resampler>,
     /// Input frames consumed outside the resampler (start trims, drops, DSD).
     consumed: u64,
@@ -811,6 +845,7 @@ struct SyncPlayer {
 }
 
 impl SyncPlayer {
+    /// Sync state for a stream opened as `format`.
     fn new(format: OutputFormat) -> Self {
         let dop = matches!(
             format.encoding,
@@ -858,6 +893,8 @@ impl SyncPlayer {
         self.dac.clear();
     }
 
+    /// Smallest number of frames that can be dropped or inserted (2 for DoP, so the markers
+    /// stay paired; 1 otherwise).
     fn unit(&self) -> usize {
         if self.dop {
             2
@@ -890,6 +927,7 @@ impl SyncPlayer {
         v
     }
 
+    /// `frames` rounded down to a whole number of units.
     fn round_unit(&self, frames: usize) -> usize {
         frames / self.unit() * self.unit()
     }

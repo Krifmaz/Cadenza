@@ -12,8 +12,11 @@ use std::collections::VecDeque;
 use std::sync::{Arc, Condvar, Mutex};
 use std::time::Duration;
 
+/// Samples shared between the writer and cpal's callback.
 struct Ring {
+    /// Interleaved `f32` samples waiting for the callback.
     queue: VecDeque<f32>,
+    /// While set, the callback plays silence and keeps the queue.
     paused: bool,
     /// Samples the callback had to invent because the queue ran dry.
     underruns: u64,
@@ -21,11 +24,17 @@ struct Ring {
 
 /// See the module documentation.
 pub struct CpalOutput {
+    /// The cpal device.
     device: cpal::Device,
+    /// Its name, for the status.
     device_name: String,
+    /// Format of the open stream, if any.
     format: Option<OutputFormat>,
+    /// The running stream, if open.
     stream: Option<Stream>,
+    /// The queue, with a condvar the writer waits on while it is full.
     ring: Arc<(Mutex<Ring>, Condvar)>,
+    /// `write` blocks while the queue holds more than this many samples (half a second).
     high_water: usize,
 }
 
@@ -69,6 +78,8 @@ impl CpalOutput {
         })
     }
 
+    /// The device's best config range covering `rate`: `f32` first, then the widest integer
+    /// format.
     fn supported(&self, rate: u32) -> Option<cpal::SupportedStreamConfigRange> {
         let mut best: Option<cpal::SupportedStreamConfigRange> = None;
         for cfg in self.device.supported_output_configs().ok()? {

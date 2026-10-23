@@ -31,16 +31,21 @@ pub const MAX_DSD_RATE: u32 = 49_152_000;
 
 /// See the module documentation.
 pub struct NullOutput {
+    /// Block in `write` to play at the stream's rate (otherwise return at once).
     realtime: bool,
+    /// Format of the open "device", if any.
     format: Option<OutputFormat>,
+    /// Frames written, shared with whoever inspects the output.
     written: Arc<AtomicU64>,
     /// When the frames written so far will have "played", for pacing.
     clock: Option<Instant>,
+    /// While set, writes still count but the clock stands still.
     paused: bool,
     /// Next expected DoP marker index (DoP only).
     dop_marker: usize,
     /// DoP frames whose marker byte was wrong.
     dop_errors: u64,
+    /// Where written words are recorded, when capturing to a file.
     capture: Option<std::io::BufWriter<std::fs::File>>,
     /// Simulated clock error of the "DAC", parts per million.
     ppm: f64,
@@ -72,6 +77,7 @@ impl NullOutput {
         }
     }
 
+    /// The rate this "DAC" really runs at, with its simulated clock error.
     fn real_rate(&self, rate: u32) -> f64 {
         rate as f64 * (1.0 + self.ppm * 1e-6)
     }

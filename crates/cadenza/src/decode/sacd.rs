@@ -19,6 +19,7 @@ use std::io::{self, Read, Seek, SeekFrom};
 
 /// Bytes per sector.
 pub const SECTOR: u64 = 2048;
+/// Sector number of the master TOC (`SACDMTOC`).
 const MASTER_TOC: u64 = 510;
 /// DSD rate of every SACD.
 pub const RATE: u32 = 2_822_400;
@@ -39,13 +40,16 @@ pub enum SacdError {
     NoTrack(String),
 }
 
+/// A format error with `m`.
 fn bad(m: impl Into<String>) -> SacdError {
     SacdError::Format(m.into())
 }
 
+/// Big-endian `u16` at byte `at`.
 fn be16(b: &[u8], at: usize) -> u16 {
     u16::from_be_bytes([b[at], b[at + 1]])
 }
+/// Big-endian `u32` at byte `at`.
 fn be32(b: &[u8], at: usize) -> u32 {
     u32::from_be_bytes([b[at], b[at + 1], b[at + 2], b[at + 3]])
 }
@@ -67,6 +71,7 @@ fn text(bytes: &[u8], charset: u8) -> String {
     s.trim().to_string()
 }
 
+/// Read `n` whole sectors starting at sector `lsn`.
 fn read_sectors<R: Read + Seek>(r: &mut R, lsn: u64, n: usize) -> io::Result<Vec<u8>> {
     r.seek(SeekFrom::Start(lsn * SECTOR))?;
     let mut buf = vec![0u8; n * SECTOR as usize];
@@ -171,6 +176,8 @@ pub fn read_disc<R: Read + Seek>(r: &mut R) -> Result<SacdDisc, SacdError> {
     Ok(disc)
 }
 
+/// Parse the area TOC at sector `lsn` (`TWOCHTOC` or `MULCHTOC`): format, channels,
+/// track list and the area's sector range.
 fn read_area<R: Read + Seek>(r: &mut R, lsn: u64, size: usize) -> Result<SacdArea, SacdError> {
     let d = read_sectors(r, lsn, size.min(96))?;
     let id = &d[0..8];
@@ -272,11 +279,17 @@ pub struct RawFrame {
 
 /// Reassembles frames from audio sectors.
 pub struct FrameScanner {
+    /// Whether the area's frames are DST-compressed.
     dst: bool,
+    /// Channels in the area.
     channels: usize,
+    /// Next sector to read.
     lsn: u64,
+    /// Last sector of the area.
     end_lsn: u64,
+    /// The frame being assembled from packets.
     current: Option<RawFrame>,
+    /// Frames complete and waiting to be taken.
     ready: std::collections::VecDeque<RawFrame>,
 }
 
@@ -346,6 +359,7 @@ impl FrameScanner {
         }
     }
 
+    /// Queue a completed frame (a plain frame only when whole).
     fn finish(&mut self, f: RawFrame) {
         // A plain frame must be whole; a DST frame decodes or is reported later.
         if self.dst || f.data.len() == self.channels * PLAIN_FRAME_BYTES {
@@ -377,9 +391,13 @@ impl FrameScanner {
 
 /// Plays one track: decoded DSD frames (byte-interleaved, MSB first), cut by time code.
 pub struct TrackReader {
+    /// The area the track belongs to.
     area: SacdArea,
+    /// The track's TOC entry (start, length).
     track: SacdTrack,
+    /// Reassembles frames from the area's sectors.
     scanner: FrameScanner,
+    /// DST decoder, when the area is compressed.
     dst: Option<dst::DstDecoder>,
     /// Track-relative index of the frame the scanner delivers next (`None`: unknown).
     next: Option<u32>,

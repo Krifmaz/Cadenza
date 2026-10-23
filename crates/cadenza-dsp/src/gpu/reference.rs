@@ -199,22 +199,37 @@ pub fn check_polyphase(filters: &[SpectralFilter]) -> Result<(usize, usize), Gpu
 /// kernels in the same order, executed one "thread" at a time.
 #[derive(Debug)]
 pub struct ReferencePolyphase {
+    /// Input block size.
     block: usize,
+    /// Transform length (`2 × block`).
     n: usize,
+    /// Number of phases `L`.
     l: usize,
+    /// Complex transforms per block: `ceil(L / 2)`, two phases packed per transform.
     pairs: usize,
+    /// Partitions per sub-filter (FDL depth).
     parts: usize,
+    /// Slot of the newest spectrum in `fdl`.
     head: usize,
+    /// Spectra pushed so far, capped at `parts`.
     count: usize,
+    /// `[previous block | current block]` input frame.
     frame: Vec<f64>,
+    /// Transform workspace (interleaved complex).
     a: Vec<f64>,
+    /// Second transform workspace (ping-pong buffer).
     b: Vec<f64>,
+    /// Input spectra, `parts × 2n` doubles.
     fdl: Vec<f64>,
+    /// Paired sub-filter spectra from [`pair_spectra`].
     g: Arc<Vec<f64>>,
+    /// Accumulated products, one transform per pair.
     acc: Vec<f64>,
+    /// Ping-pong buffer for the batched inverse transforms.
     acc2: Vec<f64>,
     /// Test hook: fail (like a lost device) when this many blocks have been processed.
     fail_at_block: Option<u64>,
+    /// Blocks processed so far (for the failure hook).
     blocks: u64,
 }
 
@@ -230,6 +245,7 @@ impl ReferencePolyphase {
         ))
     }
 
+    /// A core for already paired spectra `g`.
     fn with_spectra(g: Arc<Vec<f64>>, block: usize, parts: usize, l: usize) -> Self {
         let n = 2 * block;
         let pairs = l.div_ceil(2);
@@ -391,15 +407,25 @@ impl PolyphaseFactory for ReferenceFactory {
 /// The GPU data flow on the CPU (see the module docs).
 #[derive(Debug)]
 pub struct ReferenceConvolver {
+    /// Input block size.
     block: usize,
+    /// Transform length (`2 × block`).
     n: usize,
+    /// Partitions of the filter (FDL depth).
     depth: usize,
+    /// Slot of the newest spectrum in `fdl`.
     head: usize,
+    /// Spectra pushed so far, capped at `depth`.
     count: usize,
+    /// `[previous block | current block]` input frame.
     frame: Vec<f64>,
+    /// Transform workspace (interleaved complex).
     a: Vec<f64>,
+    /// Second transform workspace (ping-pong buffer).
     b: Vec<f64>,
+    /// Input spectra, `depth × 2n` doubles.
     fdl: Vec<f64>,
+    /// Filter spectra expanded to `n` bins, `depth × 2n` doubles.
     h: Vec<f64>,
 }
 

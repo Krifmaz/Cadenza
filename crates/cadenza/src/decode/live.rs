@@ -31,15 +31,20 @@ pub type ControlFn = Arc<dyn Fn(LiveControl) + Send + Sync>;
 /// Frames of silence handed out when the buffer is empty.
 const SILENCE_FRAMES: usize = 352;
 
+/// The buffer behind the stream's mutex.
 #[derive(Default)]
 struct Inner {
+    /// Pushed chunks, oldest first.
     chunks: VecDeque<Vec<f64>>,
     /// Frames in `chunks`.
     frames: usize,
     /// Playback waits until this many frames are buffered (after start and after a flush).
     primed: bool,
+    /// The sender closed the stream; the engine ends the track once the buffer is empty.
     closed: bool,
+    /// Times the engine found the buffer empty (silence was played).
     underruns: u64,
+    /// Chunks dropped because the buffer exceeded `max_frames`.
     dropped: u64,
 }
 
@@ -57,6 +62,7 @@ pub struct LiveStream {
     pub prebuffer_frames: usize,
     /// Above this the oldest audio is dropped (clock drift, a burst after a stall).
     pub max_frames: usize,
+    /// The buffer and its state.
     inner: Mutex<Inner>,
     /// Frames handed to the engine.
     pulled: AtomicU64,
@@ -64,6 +70,7 @@ pub struct LiveStream {
     mark: Mutex<Option<(u64, f64)>>,
     /// Cover art: MIME type and bytes.
     cover: Mutex<Option<(String, Arc<Vec<u8>>)>>,
+    /// Forwards transport commands to the sender (AirPlay, …), if it accepts them.
     control: Mutex<Option<ControlFn>>,
 }
 
@@ -216,6 +223,7 @@ impl LiveStream {
     }
 }
 
+/// Every live stream by id, process-wide.
 fn registry() -> &'static Mutex<HashMap<String, Arc<LiveStream>>> {
     static R: OnceLock<Mutex<HashMap<String, Arc<LiveStream>>>> = OnceLock::new();
     R.get_or_init(Default::default)
@@ -240,6 +248,7 @@ pub fn lookup(id: &str) -> Option<Arc<LiveStream>> {
 
 /// The engine side of a live stream.
 pub struct LiveDecoder {
+    /// The stream this decoder pulls from.
     stream: Arc<LiveStream>,
 }
 

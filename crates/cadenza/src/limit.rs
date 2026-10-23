@@ -35,6 +35,7 @@ const WARMUP_SECONDS: f64 = 0.5;
 const WORST_CALL: f64 = 0.25;
 /// Each filter is timed for this much audio, or this much wall time, whichever ends first.
 const MEASURE_SECONDS: f64 = 6.0;
+/// Longest wall time spent timing one filter.
 const MEASURE_WALL: Duration = Duration::from_secs(3);
 
 /// One filter tried.
@@ -203,6 +204,7 @@ fn target(settings: &Settings, device: &DeviceInfo) -> (OutputFormat, Option<Dsd
     (OutputFormat::pcm(rate, bits, channels), None)
 }
 
+/// A rate in kHz for labels: `48 kHz`, `44.1 kHz`.
 fn khz(rate: u32) -> String {
     let k = rate as f64 / 1000.0;
     if k.fract() == 0.0 {

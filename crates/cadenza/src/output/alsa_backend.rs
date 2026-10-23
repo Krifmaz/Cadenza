@@ -21,15 +21,21 @@ use cadenza_dsp::dsd::{DsdPacking, DsdRate, NativeFormat};
 
 /// See the module documentation.
 pub struct AlsaOutput {
+    /// ALSA device name, e.g. `hw:1,0`.
     device: String,
+    /// The open PCM, if any.
     pcm: Option<PCM>,
+    /// Format the PCM was opened with.
     format: Option<OutputFormat>,
+    /// ALSA sample format of the open PCM.
     alsa_format: Format,
     /// Native DSD layout in use (None for PCM and DoP).
     native: Option<NativeFormat>,
+    /// Size of the device buffer in frames.
     buffer_frames: usize,
 }
 
+/// An ALSA error as an output error.
 fn err(e: alsa::Error) -> OutputError {
     OutputError::Backend(e.to_string())
 }
@@ -106,6 +112,8 @@ impl AlsaOutput {
         })
     }
 
+    /// Set up `pcm` for interleaved `fmt` at `rate` with no resampling; returns the buffer
+    /// size in frames.
     fn configure(pcm: &PCM, rate: u32, channels: u32, fmt: Format) -> Result<usize, alsa::Error> {
         let hwp = HwParams::any(pcm)?;
         hwp.set_rate_resample(false)?;
@@ -196,6 +204,8 @@ fn dsd_caps(hwp: &HwParams) -> DsdCaps {
     }
 }
 
+/// Probe device `name` without opening it for playback: `(rates, bit depths, max
+/// channels, DSD formats)`.
 fn probe(name: &str) -> (Vec<u32>, Vec<u32>, Option<u32>, DsdCaps) {
     let Ok(pcm) = PCM::new(name, Direction::Playback, true) else {
         return (vec![], vec![], None, DsdCaps::NONE);

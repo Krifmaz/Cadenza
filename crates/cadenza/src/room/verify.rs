@@ -110,6 +110,8 @@ fn watch(
     (stop, h)
 }
 
+/// The bit-perfect pass: play the pattern and compare the recording sample for sample;
+/// returns the capture rate and the result.
 fn bit_pass(engine: &Engine, mic: &mut dyn Capture) -> Result<(u32, BitResult), String> {
     let rate = mic.start(48_000)?;
     let r = rate as usize;
@@ -163,6 +165,8 @@ fn bit_pass(engine: &Engine, mic: &mut dyn Capture) -> Result<(u32, BitResult), 
     ))
 }
 
+/// The THD+N pass: play a tone through the chain and analyse the recording; returns the
+/// capture rate and the result.
 fn thd_pass(
     engine: &Engine,
     mic: &mut dyn Capture,

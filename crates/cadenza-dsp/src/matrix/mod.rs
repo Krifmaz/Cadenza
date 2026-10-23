@@ -280,6 +280,7 @@ pub struct MatrixConfig {
     pub stereo: StereoUtility,
 }
 
+/// Serde default for the matrix preset name.
 fn default_preset() -> String {
     "stereo".into()
 }
@@ -523,11 +524,14 @@ pub fn channel_name(i: usize, n: usize) -> String {
 /// Fixed-length delay line.
 #[derive(Clone, Debug, Default)]
 struct DelayLine {
+    /// Ring of delayed samples (empty means no delay).
     buf: Vec<f64>,
+    /// Next slot to read and overwrite.
     pos: usize,
 }
 
 impl DelayLine {
+    /// A delay of `samples` samples.
     fn new(samples: usize) -> Self {
         Self {
             buf: vec![0.0; samples],
@@ -535,6 +539,7 @@ impl DelayLine {
         }
     }
 
+    /// Delay one sample (a pass-through when the delay is zero).
     #[inline]
     fn tick(&mut self, x: f64) -> f64 {
         if self.buf.is_empty() {
@@ -549,6 +554,7 @@ impl DelayLine {
         y
     }
 
+    /// Clear the delayed samples.
     fn reset(&mut self) {
         self.buf.fill(0.0);
         self.pos = 0;
@@ -559,12 +565,16 @@ impl DelayLine {
 struct OutputChain {
     /// `(input index, linear gain)` for connected cells, after the stereo utility.
     mix: Vec<(usize, f64)>,
+    /// IIR crossover sections, in order (including phase-alignment all-passes).
     iir: Vec<IirCrossover>,
     /// Crossover points of sibling outputs this band is phase-aligned to (`Pass::All` or
     /// `Pass::High` filters appended to `iir`), for the report.
     aligned: Vec<CrossoverFilter>,
+    /// Linear-phase FIR crossover of this output, if any.
     fir: Option<Convolver>,
+    /// Per-output parametric EQ, if any.
     eq: Option<Equalizer>,
+    /// Time alignment of this output.
     delay: DelayLine,
     /// User delay in samples.
     user_delay: usize,
@@ -579,6 +589,8 @@ struct OutputChain {
 }
 
 impl OutputChain {
+    /// Mix the connected inputs of `frames` interleaved frames into `buf`, then run the
+    /// crossovers, FIR, EQ and delay over it.
     fn run(&mut self, frames: usize, input: &[f64], n_in: usize) {
         self.buf.clear();
         self.buf.resize(frames, 0.0);
@@ -608,6 +620,7 @@ impl OutputChain {
         }
     }
 
+    /// Clear every filter and the delay of this output.
     fn reset(&mut self) {
         self.iir.iter_mut().for_each(IirCrossover::reset);
         if let Some(c) = &mut self.fir {
@@ -622,17 +635,27 @@ impl OutputChain {
 
 /// The running matrix for one stream format.
 pub struct MatrixStage {
+    /// Stream sample rate in Hz.
     rate: u32,
+    /// Input channel count.
     n_in: usize,
+    /// Output channel count.
     n_out: usize,
+    /// The configuration this stage was built from.
     config: MatrixConfig,
+    /// One processing chain per output channel.
     chains: Vec<OutputChain>,
     /// Set when any output has a linear-phase FIR: the stage then works in blocks.
     block: Option<usize>,
+    /// Longest FIR crossover in taps (0 when there is none).
     fir_taps: usize,
+    /// Whether the stereo utility (swap, balance, mono, M/S) is part of the mix.
     stereo_applied: bool,
+    /// Input not yet forming a whole block (block mode only).
     pending: Vec<f64>,
+    /// Output buffer, kept between calls to save an allocation.
     out: Vec<f64>,
+    /// `true` when the configuration cannot change a sample.
     identity: bool,
 }
 
@@ -942,6 +965,8 @@ impl MatrixStage {
         out
     }
 
+    /// Run `frames` input frames through every output chain (in parallel when they are FIR
+    /// blocks) and append the interleaved result to `out`.
     fn run_frames(&mut self, frames: usize, input: &[f64], out: &mut Vec<f64>) {
         if frames == 0 {
             return;
@@ -1043,6 +1068,7 @@ impl MatrixStage {
         stages
     }
 
+    /// One output's processing summarised for the signal path (sources, filters, EQ, delay).
     fn output_detail(&self, i: usize, o: &OutputChannel) -> String {
         let c = &self.chains[i];
         let mut parts: Vec<String> = Vec::new();
@@ -1104,6 +1130,7 @@ impl MatrixStage {
         parts.join(" · ")
     }
 
+    /// One output's processing as JSON for the API.
     fn output_params(&self, i: usize, o: &OutputChannel) -> serde_json::Value {
         let c = &self.chains[i];
         json!({

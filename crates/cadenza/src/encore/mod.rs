@@ -30,7 +30,9 @@ use std::time::Duration;
 /// A running connection to one Encore server: the heartbeat, event stream and play
 /// reporting threads. Dropping the handle does not stop them; [`EncoreLink::stop`] does.
 pub struct EncoreLink {
+    /// The HTTP client of this connection.
     client: Arc<Client>,
+    /// Set to stop the heartbeat and event threads.
     stop: Arc<AtomicBool>,
 }
 
@@ -76,11 +78,13 @@ impl EncoreLink {
 /// out while the process runs. The link's threads are not stopped by dropping it, so a
 /// replacement always calls [`EncoreLink::stop`] on the old one first.
 static LINK: Mutex<Option<EncoreLink>> = Mutex::new(None);
+/// The Encore configuration the current link was started with.
 static CONFIG: Mutex<Option<EncoreConfig>> = Mutex::new(None);
 
 /// A callback that writes the Encore configuration back to `config.toml`, registered by
 /// `cadenza::service::start`.
 type Persist = Box<dyn Fn(&EncoreConfig) + Send>;
+/// The registered persistence function, if any.
 static PERSIST: Mutex<Option<Persist>> = Mutex::new(None);
 
 /// Register the function that persists the Encore configuration (called once at startup).
@@ -88,6 +92,7 @@ pub fn set_persist(f: impl Fn(&EncoreConfig) + Send + 'static) {
     *PERSIST.lock().unwrap() = Some(Box::new(f));
 }
 
+/// Persist `cfg` through the registered function, if there is one.
 fn persist(cfg: &EncoreConfig) {
     if let Some(f) = PERSIST.lock().unwrap().as_ref() {
         f(cfg);
@@ -193,6 +198,8 @@ fn wait(stop: &AtomicBool, total: Duration) -> bool {
     stop.load(Ordering::SeqCst)
 }
 
+/// Every 2 s: report the player state with a heartbeat and run the commands it returns;
+/// backs off while the server cannot be reached, until `stop` is set.
 fn heartbeat_loop(client: Arc<Client>, engine: Engine, stop: Arc<AtomicBool>) {
     let mut failures = 0u32;
     while !stop.load(Ordering::SeqCst) {

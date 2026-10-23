@@ -117,29 +117,47 @@ fn cfg(items: usize) -> LaunchConfig {
 /// A partitioned convolver whose FFTs, multiply-accumulate and frequency-delay line live
 /// on a CUDA device, in `f64`. Implements [`BlockConvolver`] like the CPU engine.
 pub struct Convolver {
+    /// The CUDA stream every launch and copy of this convolver is queued on.
     stream: Arc<CudaStream>,
+    /// Keeps the compiled module (and so the kernel handles) alive.
     _module: Arc<CudaModule>,
+    /// Kernel: real input frame → interleaved complex.
     k_pack: CudaFunction,
+    /// Kernel: one radix-2 FFT pass.
     k_radix2: CudaFunction,
+    /// Kernel: one radix-4 FFT pass.
     k_radix4: CudaFunction,
+    /// Kernel: copy a spectrum into an FDL slot.
     k_copy: CudaFunction,
+    /// Kernel: multiply-accumulate the FDL against the filter partitions.
     k_mac: CudaFunction,
+    /// Kernel: scaled real part of the second half (overlap-save output).
     k_unpack: CudaFunction,
+    /// Input block size.
     block: usize,
     /// Transform size (`2 · block`).
     n: usize,
     /// Partitions = FDL slots.
     depth: usize,
+    /// Slot of the newest spectrum in the FDL.
     head: usize,
+    /// Spectra pushed so far, capped at `depth`.
     count: usize,
     /// `[previous block | current block]` on the host.
     frame: Vec<f64>,
+    /// Device copy of `frame`.
     d_in: CudaSlice<f64>,
+    /// Transform buffer (the result of an FFT ends here).
     d_a: CudaSlice<f64>,
+    /// Ping-pong buffer for the FFT passes.
     d_b: CudaSlice<f64>,
+    /// Frequency-domain delay line, `depth × 2n` doubles.
     d_fdl: CudaSlice<f64>,
+    /// Filter spectra, `depth × 2n` doubles.
     d_h: CudaSlice<f64>,
+    /// One output block.
     d_out: CudaSlice<f64>,
+    /// Device name for logs and the signal path.
     device_name: String,
 }
 
@@ -222,6 +240,7 @@ impl Convolver {
         8 * (self.n + 2 * 2 * self.n + 2 * self.depth * 2 * self.n + self.block)
     }
 
+    /// Launch configuration covering `items` threads.
     fn cfg(items: usize) -> LaunchConfig {
         cfg(items)
     }
@@ -262,6 +281,7 @@ impl Convolver {
         Ok(())
     }
 
+    /// Run one input block on the device and download its output block.
     fn run_block(&mut self, input: &[f64], out: &mut [f64]) -> Result<(), DriverError> {
         let (block, n) = (self.block, self.n);
         self.frame[block..].copy_from_slice(input);
@@ -362,22 +382,37 @@ impl BlockConvolver for Convolver {
 /// What the channels of one polyphase stage share on the device: the compiled kernels and
 /// the packed sub-filter spectra (uploaded once).
 struct PolyShared {
+    /// Keeps the compiled module (and so the kernel handles) alive.
     _module: Arc<CudaModule>,
+    /// Kernel: real input frame → interleaved complex.
     k_pack: CudaFunction,
+    /// Kernel: one radix-2 FFT pass.
     k_radix2: CudaFunction,
+    /// Kernel: one radix-4 FFT pass.
     k_radix4: CudaFunction,
+    /// Kernel: one radix-2 pass over a batch of transforms.
     k_radix2_batch: CudaFunction,
+    /// Kernel: one radix-4 pass over a batch of transforms.
     k_radix4_batch: CudaFunction,
+    /// Kernel: copy a spectrum into an FDL slot.
     k_copy: CudaFunction,
+    /// Kernel: multiply-accumulate the FDL against every sub-filter pair.
     k_mac: CudaFunction,
+    /// Kernel: scale and interleave the phases into the output.
     k_interleave: CudaFunction,
     /// `pairs × parts × 2n` doubles: see [`pair_spectra`].
     d_g: CudaSlice<f64>,
+    /// Input block size.
     block: usize,
+    /// Transform length (`2 × block`).
     n: usize,
+    /// Number of phases `L`.
     l: usize,
+    /// Sub-filter pairs, `ceil(L / 2)`.
     pairs: usize,
+    /// Partitions per sub-filter (FDL depth).
     parts: usize,
+    /// Device name for logs and the signal path.
     device_name: String,
 }
 
@@ -388,17 +423,29 @@ struct PolyShared {
 /// download of the `block × L` interleaved output. Mirrors
 /// [`super::reference::ReferencePolyphase`] kernel for kernel.
 pub struct PolyphaseConvolver {
+    /// Kernels and sub-filter spectra shared by the stage's channels.
     shared: Arc<PolyShared>,
+    /// This channel's own stream.
     stream: Arc<CudaStream>,
+    /// Slot of the newest spectrum in the FDL.
     head: usize,
+    /// Spectra pushed so far, capped at `parts`.
     count: usize,
+    /// `[previous block | current block]` on the host.
     frame: Vec<f64>,
+    /// Device copy of `frame`.
     d_in: CudaSlice<f64>,
+    /// Transform buffer.
     d_a: CudaSlice<f64>,
+    /// Ping-pong buffer for the FFT passes.
     d_b: CudaSlice<f64>,
+    /// Frequency-domain delay line, `parts × 2n` doubles.
     d_fdl: CudaSlice<f64>,
+    /// Accumulated products, one transform per pair.
     d_acc: CudaSlice<f64>,
+    /// Ping-pong buffer for the batched inverse transforms.
     d_acc2: CudaSlice<f64>,
+    /// `block × L` interleaved output.
     d_out: CudaSlice<f64>,
 }
 
@@ -486,6 +533,7 @@ impl PolyphaseConvolver {
         8 * (n + 2 * 2 * n + s.parts * 2 * n + 2 * s.pairs * 2 * n + s.block * s.l)
     }
 
+    /// Run one input block on the device and download its `block × L` outputs.
     fn run_block(&mut self, input: &[f64], out: &mut [f64]) -> Result<(), DriverError> {
         let s = Arc::clone(&self.shared);
         let (block, n) = (s.block, s.n);
@@ -652,12 +700,17 @@ impl PolyphaseBlockConvolver for PolyphaseConvolver {
 
 /// What the channels of one rational stage share: the kernel and the sub-filters.
 struct RationalShared {
+    /// Keeps the compiled module (and so the kernel handle) alive.
     _module: Arc<CudaModule>,
+    /// The dot-product kernel.
     kernel: CudaFunction,
     /// `l × s` doubles, the reversed sub-filters one after another.
     d_sub: CudaSlice<f64>,
+    /// Number of phases `L`.
     l: usize,
+    /// Taps per sub-filter `S`.
     s: usize,
+    /// Device name for logs and the signal path.
     device_name: String,
 }
 
@@ -666,9 +719,13 @@ struct RationalShared {
 /// one block of 256 threads per output sample, download the outputs. Mirrors
 /// [`super::wgsl::rational_dot`].
 pub struct RationalEngine {
+    /// Kernel and sub-filters shared by the stage's channels.
     shared: Arc<RationalShared>,
+    /// This channel's own stream.
     stream: Arc<CudaStream>,
+    /// Device buffer for the input window (grown as needed).
     d_win: CudaSlice<f64>,
+    /// Device buffer for the outputs (grown as needed).
     d_out: CudaSlice<f64>,
 }
 
@@ -715,6 +772,7 @@ impl RationalEngine {
             .collect()
     }
 
+    /// Upload `window`, run one dot product per output and download the results.
     fn run_on_device(
         &mut self,
         window: &[f64],

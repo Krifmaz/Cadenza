@@ -10,11 +10,13 @@ use std::fs;
 use std::io::{self, Read, Write};
 use std::path::{Path, PathBuf};
 
+/// File signature at the start of every cache file (format version 1).
 const MAGIC: &[u8; 8] = b"CADENZA1";
 
 /// Where designed coefficients are stored. `None` directory means "never touch the disk".
 #[derive(Clone, Debug, Default)]
 pub struct CoefficientCache {
+    /// Cache directory; `None` keeps everything in memory.
     dir: Option<PathBuf>,
 }
 
@@ -72,6 +74,9 @@ impl CoefficientCache {
     }
 }
 
+/// Read a cache file: `Ok(None)` when it does not exist, an error when the header is
+/// wrong or the tap count differs from `expected_taps`. Layout: magic, `u64` LE tap
+/// count, then the taps as `f64` LE.
 fn read_coefficients(path: &Path, expected_taps: usize) -> io::Result<Option<Vec<f64>>> {
     let mut f = match fs::File::open(path) {
         Ok(f) => f,
@@ -100,6 +105,7 @@ fn read_coefficients(path: &Path, expected_taps: usize) -> io::Result<Option<Vec
     ))
 }
 
+/// Write `h` in the format [`read_coefficients`] reads, atomically (temp file + rename).
 fn write_coefficients(path: &Path, h: &[f64]) -> io::Result<()> {
     if let Some(parent) = path.parent() {
         fs::create_dir_all(parent)?;

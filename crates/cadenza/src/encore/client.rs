@@ -9,13 +9,21 @@ use std::time::Duration;
 
 /// See the module documentation.
 pub struct Client {
+    /// Server URL, credentials and device settings.
     config: Arc<EncoreConfig>,
+    /// Server URL without a trailing slash.
     base: String,
+    /// HTTP agent (connection pool, timeouts).
     agent: ureq::Agent,
+    /// Session cookie: configured, or from the last login.
     cookie: Mutex<Option<String>>,
+    /// Bearer token, when configured (wins over the cookie).
     token: Option<String>,
+    /// Stable id this player registers as.
     device_id: String,
+    /// Name shown in Encore's device list.
     device_name: String,
+    /// Last request error, for the status.
     last_error: Mutex<Option<String>>,
 }
 
@@ -90,6 +98,7 @@ impl Client {
         self.last_error.lock().unwrap().clone()
     }
 
+    /// Record the last request's error (`None` after a success).
     fn set_error(&self, e: Option<String>) {
         *self.last_error.lock().unwrap() = e;
     }
@@ -152,6 +161,7 @@ impl Client {
         Ok(cookie)
     }
 
+    /// Drop a login-derived session cookie so the next request logs in again.
     fn forget_cookie(&self) {
         // Only a login-derived cookie can be refreshed; a configured one is kept.
         if self.config.cookie.trim().is_empty() {
@@ -170,6 +180,8 @@ impl Client {
         r
     }
 
+    /// POST `body` as JSON to `path`; on a 401 the cookie is refreshed and the request is
+    /// retried once.
     fn post_json_inner(&self, path: &str, body: &Value) -> Result<Value, String> {
         for attempt in 0..2 {
             let (header, value) = self.auth_header()?;
@@ -237,6 +249,8 @@ impl Client {
         Ok((kind, body))
     }
 
+    /// GET `path` with `query`; on a 401 the cookie is refreshed and the request is retried
+    /// once.
     fn get(&self, path: &str, query: &[(&str, &str)]) -> Result<ureq::Response, String> {
         for attempt in 0..2 {
             let (header, value) = self.auth_header()?;

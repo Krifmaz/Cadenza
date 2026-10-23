@@ -100,6 +100,7 @@ pub struct CrossoverFilter {
     pub slope_db: u32,
 }
 
+/// Serde default for the crossover slope: Linkwitz–Riley 24 dB/octave.
 fn default_slope() -> u32 {
     24
 }
@@ -232,16 +233,24 @@ pub(crate) const DENORMAL_FLOOR: f64 = 1e-290;
 /// One first- or second-order section (transposed direct form II).
 #[derive(Clone, Copy, Debug, PartialEq)]
 struct Section {
+    /// Feed-forward coefficient.
     b0: f64,
+    /// Feed-forward coefficient.
     b1: f64,
+    /// Feed-forward coefficient.
     b2: f64,
+    /// Feedback coefficient.
     a1: f64,
+    /// Feedback coefficient.
     a2: f64,
+    /// First state (transposed direct form II).
     z1: f64,
+    /// Second state.
     z2: f64,
 }
 
 impl Section {
+    /// A section with the given coefficients and cleared state.
     fn from_coefficients(c: Coefficients) -> Self {
         Self {
             b0: c.b0,
@@ -274,6 +283,7 @@ impl Section {
         }
     }
 
+    /// Filter one sample.
     #[inline]
     fn tick(&mut self, x: f64) -> f64 {
         let y = self.b0 * x + self.z1;
@@ -291,6 +301,7 @@ impl Section {
         y
     }
 
+    /// Complex frequency response at `freq` Hz for a stream at `rate`.
     fn response(&self, freq: f64, rate: f64) -> Complex<f64> {
         let w = 2.0 * PI * freq / rate;
         let z1 = Complex::new(w.cos(), -w.sin());
@@ -330,11 +341,13 @@ fn butterworth_sections(order: usize, pass: Pass, freq: f64, rate: f64) -> Vec<S
 /// An IIR crossover (one side) for one channel.
 #[derive(Clone, Debug, PartialEq)]
 pub struct IirCrossover {
+    /// The biquad cascade of this side.
     sections: Vec<Section>,
     /// `-1.0` when this side is inverted so that LR12/LR36 sum flat.
     sign: f64,
     /// `Pass::All`: the high-pass branch summed with `sections` (the low-pass).
     all: Option<(Vec<Section>, f64)>,
+    /// Which side of the crossover this is.
     pass: Pass,
 }
 

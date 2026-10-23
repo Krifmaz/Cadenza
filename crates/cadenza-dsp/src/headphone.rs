@@ -94,15 +94,22 @@ impl HeadphoneMode {
 #[derive(Clone, Debug)]
 struct Crossfeed {
     // Low-pass of the opposite channel: y = a0·x + b1·y₋₁
+    /// Low-pass feed-forward gain.
     lo_a0: f64,
+    /// Low-pass feedback coefficient.
     lo_b1: f64,
     // High boost of the own channel: y = a0·x + a1·x₋₁ + b1·y₋₁
+    /// High-boost gain on the current input.
     hi_a0: f64,
+    /// High-boost gain on the previous input.
     hi_a1: f64,
+    /// High-boost feedback coefficient.
     hi_b1: f64,
     /// Per channel: low-pass state, high-boost input and output state.
     lo: [f64; 2],
+    /// Per channel: previous input of the high boost.
     hi_x: [f64; 2],
+    /// Per channel: previous output of the high boost.
     hi_y: [f64; 2],
 }
 
@@ -131,6 +138,8 @@ impl Crossfeed {
         }
     }
 
+    /// Filter interleaved stereo in place: each ear gets its own channel (high-boosted to keep
+    /// the level) plus a low-passed copy of the other.
     fn process(&mut self, buf: &mut [f64]) {
         for f in buf.chunks_exact_mut(2) {
             let input = [f[0], f[1]];
@@ -146,6 +155,7 @@ impl Crossfeed {
         }
     }
 
+    /// Clear the filter state.
     fn reset(&mut self) {
         self.lo = [0.0; 2];
         self.hi_x = [0.0; 2];
@@ -235,6 +245,8 @@ struct Hrtf {
 }
 
 impl Hrtf {
+    /// The four convolutions for a virtual speaker pair at ±`azimuth` degrees, with the 44.1 kHz
+    /// KEMAR responses resampled to `fs`.
     fn new(azimuth: u32, fs: f64) -> Self {
         let (ipsi, contra) = kemar_pair(azimuth);
         let to = |v: &[i16]| -> Vec<f64> {
@@ -262,6 +274,8 @@ impl Hrtf {
         }
     }
 
+    /// Convolve interleaved stereo and return the binaural mix; with `flush` the filter tails
+    /// are pushed out too.
     fn run(&mut self, buf: &[f64], flush: bool) -> Vec<f64> {
         let frames = buf.len() / 2;
         let l: Vec<f64> = buf.iter().step_by(2).copied().collect();
@@ -284,6 +298,7 @@ impl Hrtf {
         out
     }
 
+    /// Clear the convolution history.
     fn reset(&mut self) {
         for c in &mut self.conv {
             c.reset();
@@ -294,8 +309,11 @@ impl Hrtf {
 /// The running stage.
 #[derive(Debug)]
 pub struct HeadphoneStage {
+    /// The configured mode.
     mode: HeadphoneMode,
+    /// Crossfeed state, when the mode is crossfeed.
     crossfeed: Option<Box<CrossfeedState>>,
+    /// Binaural convolver, when the mode is HRTF.
     hrtf: Option<Hrtf>,
 }
 

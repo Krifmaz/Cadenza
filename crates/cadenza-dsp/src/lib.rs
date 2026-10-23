@@ -18,6 +18,7 @@ pub mod fir;
 pub mod gpu;
 pub mod headphone;
 pub mod headroom;
+/// Built-in MIT KEMAR head-related impulse responses for the headphone crossfeed.
 mod kemar;
 pub mod matrix;
 pub mod pipeline;

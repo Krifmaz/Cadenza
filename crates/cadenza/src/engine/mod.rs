@@ -241,16 +241,22 @@ impl Default for EngineOptions {
     }
 }
 
+/// State shared between the engine handle and its playback thread.
 pub(crate) struct Shared {
+    /// The latest published status.
     pub status: Mutex<Arc<Status>>,
+    /// Status and track events for subscribers.
     pub events: broadcast::Sender<Event>,
+    /// Where designed filter coefficients are cached.
     pub cache: CoefficientCache,
 }
 
 /// Handle to the player.
 #[derive(Clone)]
 pub struct Engine {
+    /// Commands to the playback thread.
     tx: Sender<Command>,
+    /// State shared with the playback thread.
     shared: Arc<Shared>,
 }
 

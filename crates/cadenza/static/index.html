@@ -567,11 +567,14 @@
   </div>
 </footer>
 <script>
+/** Shorthand for `document.getElementById`. */
 const $ = (id) => document.getElementById(id);
+/** A cover that fails to load is remembered as bad and hidden (not retried on every status). */
 $('cover').onerror = () => { $('cover').dataset.bad = $('cover').getAttribute('src'); $('cover').hidden = true; $('cover-big').hidden = true; };
 
 // Views: the sidebar picks one; the choice lives in the URL hash.
 const VIEWS = [...document.querySelectorAll('.view')].map(v => v.dataset.view);
+/** Show the view named in the URL hash (`now` when unknown) and highlight its sidebar link. */
 function showView() {
   const want = location.hash.slice(1);
   const v = VIEWS.includes(want) ? want : 'now';
@@ -583,21 +586,30 @@ window.addEventListener('hashchange', () => { showView(); window.scrollTo(0, 0);
 showView();
 
 
+/** Escape text for safe use inside HTML. */
 const esc = (s) => String(s ?? '').replace(/[&<>"']/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
+/** Seconds as `m:ss`. */
 const dur = (s) => { s = Math.max(0, Math.round(s || 0)); return `${Math.floor(s / 60)}:${String(s % 60).padStart(2, '0')}`; };
+/** A sample rate as `44.1 kHz` or `2.8224 MHz`. */
 const khz = (r) => r >= 1e6 ? (r / 1e6).toFixed(4).replace(/0+$/, '').replace(/\.$/, '') + ' MHz' : (r / 1000) + ' kHz';
+/** Call the Cadenza API: JSON in and out; throws with the server's error message on failure. */
 const api = async (method, path, body) => {
   const r = await fetch(path, { method, headers: body ? { 'Content-Type': 'application/json' } : {}, body: body ? JSON.stringify(body) : undefined });
   const j = await r.json().catch(() => ({}));
   if (!r.ok) throw new Error(j.error || r.statusText);
   return j;
 };
+/** Latest status from the engine, the EQ bands being edited, and whether the settings form was filled. */
 let status = null, eqBands = [], loaded = false;
+/** Choices loaded once at start: settings options, filter and dither catalogues, devices. */
 let options = null, filters = [], dithers = [], devices = [];
+/** EQ band shapes the engine knows. */
 const EQ_TYPES = ['peaking', 'low-shelf', 'high-shelf', 'low-pass', 'high-pass', 'notch'];
+/** `<option>` elements for `list`, using the `val` and `label` keys. */
 const opts = (list, val = 'id', label = 'label') => list.map(o => `<option value="${esc(o[val])}">${esc(o[label] ?? o[val])}</option>`).join('');
 
 // Appearance, as in Encore (same accents, looks and defaults); remembered in this browser only.
+/** Accent colour pairs (gradient start and end), as in Encore. */
 const ACCENTS = [
   { id: 'logo', name: 'Logo', a: '#f0ead6', b: '#d6c49a' },
   { id: 'violet', name: 'Violet', a: '#8b5cf6', b: '#ec4899' },
@@ -610,6 +622,7 @@ const ACCENTS = [
   { id: 'amber', name: 'Amber', a: '#f59e0b', b: '#ef4444' },
   { id: 'red', name: 'Red', a: '#ef4444', b: '#ec4899' },
 ];
+/** Ready-made combinations of theme, accent and background. */
 const LOOKS = [
   { id: 'encore', name: 'Encore', theme: 'encore', accent: 'logo', background: 'solid', sw: ['#161617', '#f0ead6'] },
   { id: 'default', name: 'Violet dark', theme: 'dark', accent: 'violet', background: 'fade', sw: ['#0b0b12', '#8b5cf6', '#ec4899'] },
@@ -618,11 +631,17 @@ const LOOKS = [
   { id: 'light', name: 'Daylight', theme: 'light', accent: 'sky', background: 'fade', sw: ['#f6f6fb', '#0ea5e9', '#8b5cf6'] },
   { id: 'mono', name: 'Mono', theme: 'oled', accent: 'custom', custom: '#e5e5e5', background: 'solid', sw: ['#000', '#e5e5e5'] },
 ];
+/** Appearance used until the viewer picks one. */
 const AP_DEFAULTS = { theme: 'encore', accent: 'logo', custom: '#f0ead6', background: 'solid' };
+/** localStorage key of the saved appearance. */
 const AP_KEY = 'cadenza.appearance';
+/** `#rgb` or `#rrggbb` as `[r, g, b]`. */
 const rgbOf = (hex) => { const h = hex.replace('#', ''); const n = parseInt(h.length === 3 ? h.split('').map(c => c + c).join('') : h, 16); return [(n >> 16) & 255, (n >> 8) & 255, n & 255]; };
+/** `[r, g, b]` (clamped to 0–255) as `#rrggbb`. */
 const toHex = (r, g, b) => '#' + [r, g, b].map(v => Math.max(0, Math.min(255, Math.round(v))).toString(16).padStart(2, '0')).join('');
+/** Relative luminance (WCAG) of a hex colour, 0 to 1. */
 const luminance = (hex) => rgbOf(hex).map(v => { v /= 255; return v <= 0.03928 ? v / 12.92 : ((v + 0.055) / 1.055) ** 2.4; }).reduce((s, v, i) => s + v * [0.2126, 0.7152, 0.0722][i], 0);
+/** A second gradient colour for a custom accent: the same colour with its hue turned by 36°. */
 function partner(hex) {
   let [r, g, b] = rgbOf(hex).map(v => v / 255);
   const max = Math.max(r, g, b), min = Math.min(r, g, b), l = (max + min) / 2;
@@ -638,10 +657,13 @@ function partner(hex) {
   const f = (t) => { t = (t + 1) % 1; return t < 1 / 6 ? p + (q - p) * 6 * t : t < 1 / 2 ? q : t < 2 / 3 ? p + (q - p) * (2 / 3 - t) * 6 : p; };
   return toHex(f(h + 1 / 3) * 255, f(h) * 255, f(h - 1 / 3) * 255);
 }
+/** The saved appearance merged over the defaults (defaults when storage is unavailable). */
 function apCurrent() {
   try { return { ...AP_DEFAULTS, ...JSON.parse(localStorage.getItem(AP_KEY) || '{}') }; } catch { return { ...AP_DEFAULTS }; }
 }
+/** Media query watched while the theme follows the system. */
 let apMq;
+/** Apply appearance `p`: theme, accent CSS variables, readable text on the accent, background. */
 function apApply(p) {
   const root = document.documentElement;
   const dark = p.theme === 'system' ? matchMedia('(prefers-color-scheme: dark)').matches : p.theme !== 'light';
@@ -658,11 +680,13 @@ function apApply(p) {
   document.querySelector('meta[name=theme-color]')?.setAttribute('content', getComputedStyle(root).getPropertyValue('--bg').trim() || '#161617');
   paintAppearance(p);
 }
+/** Merge `change` into the saved appearance, store it and apply it. */
 function apSave(change) {
   const p = { ...apCurrent(), ...change };
   try { localStorage.setItem(AP_KEY, JSON.stringify(p)); } catch { /* storage may be off */ }
   apApply(p);
 }
+/** Render the appearance controls with `p` selected. */
 function paintAppearance(p) {
   const same = (l) => l.theme === p.theme && l.accent === p.accent && l.background === p.background && (l.accent !== 'custom' || l.custom === p.custom);
   $('ap-presets').innerHTML = LOOKS.map(l => `<button class="preset ${same(l) ? 'on' : ''}" data-look="${l.id}"><i style="background:linear-gradient(135deg,${l.sw[0]} 50%,${l.sw.slice(1).join(',')})"></i>${esc(l.name)}</button>`).join('');
@@ -678,6 +702,7 @@ $('ap-accents').onclick = (e) => { const b = e.target.closest('[data-accent]'); 
 $('ap-custom').oninput = () => apSave({ accent: 'custom', custom: $('ap-custom').value });
 apApply(apCurrent());
 
+/** An output format as text: `96 kHz / 24-bit · 2 ch`, or the DSD rate and packing. */
 function formatLabel(f) {
   if (!f) return '';
   if (f.encoding && f.encoding.kind === 'dsd') {
@@ -687,6 +712,10 @@ function formatLabel(f) {
   return `${khz(f.rate)} / ${f.bits}-bit · ${f.channels} ch`;
 }
 
+/**
+ * Render status `s`: now playing, cover, output, volume, errors and the signal path chain.
+ * Fills the settings form the first time a status arrives.
+ */
 function paint(s) {
   status = s;
   const t = s.track;
@@ -722,6 +751,7 @@ function paint(s) {
   if (!loaded) loadSettings(s.settings);
 }
 
+/** Plain-language description of the selected output backend. */
 function devicePlain() {
   const v = $('device').value || '', b = v.split('|')[0];
   const t = {
@@ -735,6 +765,7 @@ function devicePlain() {
   }[b] || '';
   $('device-plain').textContent = v.endsWith('not connected') ? '' : t;
 }
+/** Summarise what the open device supports (mode, PCM ceiling, DSD) and refresh the DSD rates. */
 function paintDeviceCaps() {
   const d = status?.output_dsd;
   if (!status?.output) { $('device-caps').textContent = ''; return; }
@@ -748,8 +779,13 @@ function paintDeviceCaps() {
   $('device-caps').textContent = parts.join(' · ');
   fillDsdRates();
 }
+/** A DSD rate as its name (`DSD128`), or in kHz when unknown. */
 function dsdLabel(hz) { const r = (options?.dsd_rates || []).find(x => x.hz_44 === hz || x.hz_48 === hz); return r ? r.label : khz(hz); }
 
+/**
+ * Rebuild the DSD rate list, disabling rates the device or the packing cannot carry, and
+ * explain how the chosen rate is reached.
+ */
 function fillDsdRates() {
   if (!options) return;
   const d = status?.output_dsd, want = $('dsd_rate').dataset.want || $('dsd_rate').value;
@@ -773,6 +809,7 @@ function fillDsdRates() {
     : `staged: long filter to ${khz(r.hz_44 / (r.multiple <= 256 ? 8 : 16))} / ${khz(r.hz_48 / (r.multiple <= 256 ? 8 : 16))}, then a ×${r.multiple <= 256 ? 8 : 16} polyphase stage, then the ${$('dsd_modulator').selectedOptions[0]?.textContent || ''}.`) : '';
 }
 
+/** Plain-language description of a catalogue filter id (family, phase, length). */
 function filterPlain(id) {
   const m = /^(poly-sinc-gauss|poly-sinc-ext3|closed-form|sinc-xtr|sinc-mx|sinc|custom)-?(la|ma|l|m)?-?(.*)$/.exec(id || '');
   if (!m) return '';
@@ -782,12 +819,14 @@ function filterPlain(id) {
   const len = m[3].toLowerCase(), big = /m$/.test(len) || /long|xla/.test(len);
   return `In plain words: ${fam}, ${ph}. ${big ? 'Very long: needs a capable PC.' : 'Light on the PC.'} Run "Find my limit" to see how long a filter yours handles. More in the Guide.`;
 }
+/** Show the selected filter's description and its technical figures. */
 function filterInfo() {
   $('filter-plain').textContent = filterPlain($('filter').value);
   const f = filters.find(x => x.id === $('filter').value);
   if (!f && $('filter').value.startsWith('custom-')) { $('filter-info').textContent = 'A filter from the filter designer (below).'; return; }
   $('filter-info').textContent = f ? `${f.family} · ${f.taps_at_rate?.toLocaleString()} taps at ×${Math.round(f.out_rate / f.in_rate)} · transition ${Math.round(f.transition_hz)} Hz (${(f.transition_percent ?? 0).toFixed(3)} %) · stopband ${Math.round(f.stopband_db)} dB · latency ${((f.latency_seconds || 0) * 1000).toFixed(1)} ms · ${f.window} window` : '';
 }
+/** Show the selected dither's description and details (the live choice for `auto`). */
 function ditherInfo() {
   const v = $('dither').value;
   $('dither-plain').textContent = v === 'none' ? 'In plain words: no dither. Rounding to the bit depth can leave faint distortion on quiet passages; only for testing.'
@@ -798,11 +837,13 @@ function ditherInfo() {
   const d = dithers.find(x => x.id === $('dither').value);
   $('dither-info').textContent = d ? [d.order ? `order ${d.order}` : '', d.designed_per_rate ? 'designed for the actual output rate (44.1 and 48 families)' : (d.design_rate ? `designed for ${khz(d.design_rate)}` : '')].filter(Boolean).join(' · ') : '';
 }
+/** Show the selected matrix preset's description and open the custom editor for `custom`. */
 function matrixInfo() {
   const p = (options?.matrix_presets || []).find(x => x.id === $('matrix_preset').value);
   $('matrix-info').textContent = p ? `${p.description} (${p.input_channels} → ${p.output_channels} ch)` : ($('matrix_preset').value === 'custom' ? 'custom: define the outputs below' : '');
   $('matrix-custom').open = $('matrix_preset').value === 'custom';
 }
+/** Show the detected GPU, its precision and whether this build supports one. */
 function gpuInfo() {
   const g = options?.gpu;
   if (!g) return;
@@ -812,6 +853,7 @@ function gpuInfo() {
 }
 // The badge is green only when a stage of the *current* chain actually runs on the GPU
 // (signal path stage `gpu` active); a detected but idle card shows the label in grey.
+/** Update the GPU badge from the current signal path. */
 function paintGpuBadge() {
   const g = options?.gpu;
   if (!g) return;
@@ -819,11 +861,13 @@ function paintGpuBadge() {
   $('gpu-badge').textContent = st ? st.detail : g.label;
   $('gpu-badge').className = 'badge ' + (st?.active ? 'ok' : '');
 }
+/** List the endpoints found on the network, each with a button to use it. */
 function paintEndpoints() {
   const eps = devices.filter(d => d.backend === 'endpoint');
   $('endpoints').innerHTML = eps.length ? eps.map(d => `<div class="ep"><span><b>${esc(d.name)}</b> <span class="muted">${esc(d.id)}${d.dsd?.dop || d.dsd?.native?.length ? ' · DSD' : ''}</span></span><button data-ep="${esc(d.id)}">Use as output</button></div>`).join('') : '<span class="muted">No endpoint found on the network yet.</span>';
 }
 
+/** Fill every settings control from `set` (done once, from the first status). */
 function loadSettings(set) {
   loaded = true;
   const d = set.dsp, o = set.output, m = set.matrix || {};
@@ -852,6 +896,7 @@ function loadSettings(set) {
   if ($('device').dataset.want !== `${o.backend}|${o.device}`) { $('device').dataset.want = `${o.backend}|${o.device}`; fillDevices(); }
   lockDsp();
 }
+/** Disable the controls that do not apply in bit-perfect, PCM or DSD mode. */
 function lockDsp() {
   const bp = $('bitperfect').checked, dsd = $('output_mode').value === 'dsd';
   for (const id of ['filter', 'convolution', 'headphones', 'headroom_db', 'soft_clip', 'output_mode', 'matrix_enabled', 'matrix_preset', 'gpu', 'gpu_device', 'gpu_precision']) $(id).disabled = bp;
@@ -873,6 +918,7 @@ function fillDevices() {
   if (want) $('device').value = want;
   devicePlain();
 }
+/** Probe the devices again; with `reconnect`, also ask the engine to reopen its output. */
 async function refreshDevices(reconnect) {
   const b = $('dev-refresh'); b.disabled = true; b.textContent = 'Looking…';
   try {
@@ -888,6 +934,7 @@ $('dev-refresh').onclick = () => refreshDevices(true);
 window.addEventListener('hashchange', () => { if (location.hash === '#output') refreshDevices(false); });
 window.addEventListener('focus', () => { if (location.hash === '#output' && devices.length) refreshDevices(false); });
 
+/** Rebuild the PCM rate list (device-unsupported rates disabled) and select `cur`. */
 function fillRates(cur) {
   const rates = [...new Set([...(options?.pcm_rates || [44100, 48000, 88200, 96000, 176400, 192000, 352800, 384000, 705600, 768000]), ...(status?.output_rates || [])])].sort((a, b) => a - b);
   const sup = new Set(status?.output_rates || []);
@@ -898,17 +945,32 @@ function fillRates(cur) {
 // ----- EQ: graph + band strip --------------------------------------------------------
 // The response is drawn with the same Audio-EQ-Cookbook formulas the engine runs
 // (cadenza-dsp eq.rs), at 48 kHz.
+/** Graph geometry: sample rate of the drawn response, frequency span and SVG size. */
 const EQ_RATE = 48000, EQ_FMIN = 20, EQ_FMAX = 20000, EQ_W = 1000, EQ_H = 300;
+/** Band colours, reused in order. */
 const EQ_COLORS = ['#f97316', '#eab308', '#22c55e', '#06b6d4', '#3b82f6', '#a855f7', '#ec4899', '#ef4444'];
+/** Band shapes with their names in the band strip. */
 const EQ_KINDS = [['high-pass', 'Low cut'], ['low-shelf', 'Low shelf'], ['peaking', 'Bell'], ['notch', 'Notch'], ['high-shelf', 'High shelf'], ['low-pass', 'High cut']];
+/** Shapes that have a gain control. */
 const EQ_HAS_GAIN = { peaking: 1, 'low-shelf': 1, 'high-shelf': 1 };
+/** Index of the selected band (-1 for none). */
 let eqSel = -1;
+/** Colour of band `i`. */
 const eqColor = (i) => EQ_COLORS[i % EQ_COLORS.length];
+/** The graph's gain range in dB (±). */
 const eqRange = () => Number($('eq-range').value);
+/** Frequency → x on the logarithmic axis. */
 const fx = (f) => Math.log(f / EQ_FMIN) / Math.log(EQ_FMAX / EQ_FMIN) * EQ_W;
+/** x → frequency (clamped to the axis). */
 const xf = (x) => EQ_FMIN * Math.pow(EQ_FMAX / EQ_FMIN, Math.min(Math.max(x / EQ_W, 0), 1));
+/** Gain in dB → y. */
 const gy = (g) => EQ_H / 2 - g / eqRange() * (EQ_H / 2 - 14);
+/** y → gain in dB. */
 const yg = (y) => (EQ_H / 2 - y) / (EQ_H / 2 - 14) * eqRange();
+/**
+ * Normalised biquad `[b0, b1, b2, 1, a1, a2]` for one band (Audio-EQ-Cookbook), or `null`
+ * for an unknown kind.
+ */
 function biquad(kind, f, g, q) {
   f = Math.min(Math.max(f, 1), EQ_RATE * 0.499); q = Math.max(q, 0.01);
   const a = Math.pow(10, g / 40), w0 = 2 * Math.PI * f / EQ_RATE, sn = Math.sin(w0), cs = Math.cos(w0), al = sn / (2 * q), s2 = 2 * Math.sqrt(a) * al;
@@ -922,6 +984,10 @@ function biquad(kind, f, g, q) {
   }[kind];
   return c ? c.map(v => v / c[3]) : null;
 }
+/**
+ * The biquads band `b` runs as: one, or a Butterworth cascade for a steep low/high-pass (as
+ * the engine's `Band::sections`).
+ */
 function sections(b) {
   const n = (b.kind === 'low-pass' || b.kind === 'high-pass') ? Math.min(Math.max(Math.floor((b.slope_db || 12) / 12), 1), 4) : 1;
   if (n === 1) return [biquad(b.kind, b.freq, b.gain_db || 0, b.q ?? 0.707)];
@@ -929,14 +995,19 @@ function sections(b) {
   for (let k = 1; k <= n; k++) { let q = 1 / (2 * Math.cos((2 * k - 1) * Math.PI / (4 * n))); if (k === n) q *= shape; out.push(biquad(b.kind, b.freq, 0, q)); }
   return out;
 }
+/** Magnitude in dB of biquad `c` at `f`. */
 function respDb(c, f) {
   const w = 2 * Math.PI * f / EQ_RATE, cr = Math.cos(w), ci = -Math.sin(w), c2r = Math.cos(2 * w), c2i = -Math.sin(2 * w);
   const nr = c[0] + c[1] * cr + c[2] * c2r, ni = c[1] * ci + c[2] * c2i, dr = 1 + c[4] * cr + c[5] * c2r, di = c[4] * ci + c[5] * c2i;
   return 10 * Math.log10((nr * nr + ni * ni) / (dr * dr + di * di));
 }
+/** Magnitude in dB of band `b` at `f` (all its sections). */
 const bandDb = (b, f) => sections(b).reduce((s, c) => s + (c ? respDb(c, f) : 0), 0);
+/** Parse `1000`, `1k`, `1.5 kHz`… into Hz (`null` when not a number). */
 function parseHz(v) { v = String(v).trim().toLowerCase().replace(/hz$/, '').trim(); const k = v.endsWith('k'); const n = parseFloat(k ? v.slice(0, -1) : v); return isFinite(n) ? (k ? n * 1000 : n) : null; }
+/** A frequency as a short label: `250`, `1.25k`, `12.5k`. */
 const hzLabel = (f) => f >= 1000 ? `${+(f / 1000).toFixed(f >= 10000 ? 1 : 2)}k` : `${Math.round(f)}`;
+/** Draw the EQ graph: grid, each band's curve, the combined response and the band handles. */
 function paintEqGraph() {
   const svg = $('eq-svg'), on = $('eq_enabled').checked, r = eqRange();
   const N = 400, pts = [];
@@ -959,6 +1030,7 @@ function paintEqGraph() {
   });
   svg.innerHTML = h;
 }
+/** Render the band strip and redraw the graph. */
 function paintEq() {
   $('eq').innerHTML = eqBands.map((b, i) => `<div class="eq-band${i === eqSel ? ' sel' : ''}${b.enabled === false ? ' off' : ''}" data-i="${i}" style="--c:${eqColor(i)}">
     <div class="top"><input type="checkbox" data-k="enabled" ${b.enabled === false ? '' : 'checked'} title="On/off"><b class="small">${i + 1}</b><button data-rm="${i}" title="Remove">✕</button></div>
@@ -970,13 +1042,16 @@ function paintEq() {
   </div>`).join('') || '<div class="small muted">No bands yet. Press + Band, or double-click the graph.</div>';
   paintEqGraph();
 }
+/** Pending trailing save and when the EQ was last saved (for throttling). */
 let eqSaveTimer = null, eqLastSave = 0;
+/** Save the EQ: at once when `now`, otherwise throttled to about 8 saves a second. */
 function eqChanged(now) {
   clearTimeout(eqSaveTimer);
   const go = () => { eqLastSave = Date.now(); save({ dsp: { eq: eqBands, eq_enabled: $('eq_enabled').checked } }); };
   // While dragging: at most ~8 updates a second, and the last position always lands.
   if (now || Date.now() - eqLastSave > 120) go(); else eqSaveTimer = setTimeout(go, 120);
 }
+/** Add a band (at most 16) with defaults overridden by `b`, select it and save. */
 function eqAdd(b) {
   if (eqBands.length >= 16) return;
   eqBands.push({ kind: 'peaking', freq: 1000, gain_db: 0, q: 0.707, enabled: true, slope_db: 12, ...b });
@@ -984,9 +1059,13 @@ function eqAdd(b) {
 }
 
 // ----- Find my limit -----------------------------------------------------------------
+/** Badge class and text per limit-test verdict. */
 const VERDICT = { safe: ['ok', 'safe'], tight: ['warn', 'tight'], too_slow: ['bad', 'too slow'], skipped: ['bad', 'too slow'], error: ['bad', 'error'] };
+/** A tap count as `64k` or `2M`. */
 const tapsLabel = (t) => t >= 1 << 20 ? (t / (1 << 20)) + 'M' : (t / 1024) + 'k';
+/** Timer polling the limit test while it runs. */
 let limTimer = null;
+/** Render limit-test progress `p` and, per rate, the longest filter that runs safely. */
 function paintLimit(p) {
   const running = p.state === 'running';
   $('lim-start').disabled = running; $('lim-cancel').hidden = !running;
@@ -1013,6 +1092,7 @@ function paintLimit(p) {
   clearTimeout(limTimer);
   if (running) limTimer = setTimeout(pollLimit, 700);
 }
+/** Fetch and render the limit test's progress. */
 const pollLimit = () => api('GET', '/api/limit').then(paintLimit).catch(() => {});
 $('lim-start').onclick = async () => {
   $('lim-summary').textContent = '';
@@ -1032,12 +1112,15 @@ $('lim-table').onclick = async (e) => {
 };
 pollLimit();
 
+/** Send a partial settings change; errors show in the error line. */
 async function save(patch) {
   try { $('error').textContent = ''; await api('PUT', '/api/settings', patch); } catch (e) { $('error').textContent = e.message; }
 }
+/** Run a transport or volume action and render the status it returns. */
 async function control(action, value) {
   try { paint(await api('POST', '/api/control', value === undefined ? { action } : { action, value })); } catch (e) { $('error').textContent = e.message; }
 }
+/** The numeric value of input `id`. */
 const num = (id) => Number($(id).value);
 
 $('vol').onchange = () => control('volume', Number($('vol').value));
@@ -1075,6 +1158,7 @@ $('gpu_precision').onchange = () => save({ dsp: { gpu_precision: $('gpu_precisio
 $('matrix_enabled').onchange = () => { lockDsp(); save({ matrix: { enabled: $('matrix_enabled').checked } }); };
 $('headphones').onchange = () => save({ dsp: { headphones: $('headphones').value } });
 $('matrix_preset').onchange = () => { matrixInfo(); save({ matrix: { preset: $('matrix_preset').value } }); };
+/** The stereo utility settings from their controls. */
 const stereo = () => ({ mono: $('m_mono').checked, swap: $('m_swap').checked, balance_db: num('m_balance'), mid_side: $('m_mid_side').value });
 for (const id of ['m_mono', 'm_swap', 'm_balance', 'm_mid_side']) $(id).onchange = () => save({ matrix: { stereo: stereo() } });
 $('matrix-save').onclick = () => { try { save({ matrix: { preset: 'custom', outputs: JSON.parse($('matrix_outputs').value || '[]') } }); $('matrix_preset').value = 'custom'; } catch (e) { $('error').textContent = 'matrix outputs: ' + e.message; } };
@@ -1133,6 +1217,7 @@ $('eq-range').onchange = paintEqGraph;
 }
 
 // System input.
+/** Render the system input's state (polled every 2 s). */
 async function paintSystem() {
   try {
     const j = await api('GET', '/api/system');
@@ -1147,13 +1232,17 @@ async function paintSystem() {
 paintSystem(); setInterval(paintSystem, 2000);
 
 // System-input controls.
+/** Device name and latency of the system input, kept from its config when saving. */
 let sysName = 'Cadenza', sysLatency = 150;
+/** Show the application field only in app-capture mode. */
 const sysAppField = () => { $('sys-app-field').style.display = $('sys-mode').value === 'app' ? '' : 'none'; };
+/** Save the system input form and refresh its state. */
 async function sysApply() {
   const cfg = { enabled: $('sys-enabled').checked, mode: $('sys-mode').value, app: $('sys-app').value.trim(), name: sysName, latency_ms: sysLatency };
   try { await api('POST', '/api/system', cfg); } catch (e) { $('sys-info').textContent = e.message; }
   paintSystem();
 }
+/** Fill the system input form, list capturable applications and wire up the controls. */
 async function initSystem() {
   try {
     const j = await api('GET', '/api/system');
@@ -1174,6 +1263,7 @@ async function initSystem() {
 initSystem();
 
 // Encore login.
+/** Render the Encore connection state (polled every 5 s). */
 async function paintEncore() {
   try {
     const j = await api('GET', '/api/encore');
@@ -1184,6 +1274,7 @@ async function paintEncore() {
       : `Signed in as "${j.device_name}" → ${j.server}. You can now pick Cadenza in Encore, or browse your library here.`;
   } catch (e) { $('enc-info').textContent = e.message; }
 }
+/** Fill the Encore sign-in form and wire up sign-in and sign-out. */
 async function initEncore() {
   try {
     const j = await api('GET', '/api/encore');
@@ -1205,14 +1296,21 @@ async function initEncore() {
 initEncore(); paintEncore(); setInterval(paintEncore, 5000);
 
 // Filter designer.
+/** A number with up to 4 decimals and no trailing zeros (for filter ids). */
 const fdNum = (x) => Number(x).toFixed(4).replace(/0+$/, '').replace(/\.$/, '');
+/** The designer's current settings as a `custom-…` filter id. */
 const fdId = () => `custom-${$('fd_window').value}-${$('fd_phase').value}-c${fdNum(num('fd_cutoff'))}-t${fdNum(num('fd_transition'))}-s${fdNum(num('fd_stopband'))}`;
+/** Make sure a designed filter id is selectable in the filter list. */
 function ensureFilterOption(id) {
   if (!id || !id.startsWith('custom-') || [...$('filter').options].some(o => o.value === id)) return;
   let g = $('filter').querySelector('optgroup[label="designed"]');
   if (!g) { g = document.createElement('optgroup'); g.label = 'designed'; $('filter').appendChild(g); }
   g.innerHTML = `<option value="${esc(id)}">${esc(id)}</option>`;
 }
+/**
+ * Draw line `series` into `svg` (`W × H`) with axes and grid from `o` (`x0`, `x1`, `y0`, `y1`,
+ * tick lists `gx` / `gy`, label formatters `fx` / `fy`, markers `vx`, `title`).
+ */
 function plotXY(svg, W, H, series, o) {
   const x = (v) => 30 + (v - o.x0) / (o.x1 - o.x0) * (W - 34);
   const y = (v) => 20 + (1 - (Math.max(o.y0, Math.min(o.y1, v)) - o.y0) / (o.y1 - o.y0)) * (H - 36);
@@ -1224,8 +1322,14 @@ function plotXY(svg, W, H, series, o) {
   if (o.title) g += `<text x="30" y="12" font-size="10" fill="#888">${esc(o.title)}</text>`;
   svg.innerHTML = g;
 }
+/** About `n` round tick values from `a` to `b` (steps of 1, 2 or 5 × 10^k). */
 const ticks = (a, b, n) => { const st = Math.pow(10, Math.floor(Math.log10((b - a) / n))); const m = [1, 2, 5, 10].find(k => (b - a) / (st * k) <= n) * st; const out = []; for (let v = Math.ceil(a / m) * m; v <= b + 1e-12; v += m) out.push(+v.toPrecision(12)); return out; };
+/** Id of the filter whose plots are shown. */
 let fdShown = null;
+/**
+ * Fetch and plot filter `id`'s response for the chosen conversion: transition band,
+ * passband ripple and impulse.
+ */
 async function fdPlot(id) {
   const [ir, or] = $('fd_rates').value.split(',');
   $('fd-info').textContent = 'Designing…';
@@ -1264,8 +1368,11 @@ $('vf-run').onclick = async () => {
 };
 
 // Room correction.
+/** Room-correction options with their own inputs (`room_<name>`). */
 const ROOM_OPTS = ['high_hz', 'max_boost_db', 'max_cut_db', 'tilt_db_per_octave'];
+/** The latest room-correction report. */
 let room = null;
+/** Render room report `r`: input list, options, and the measured, corrected and target curves. */
 function paintRoom(r) {
   room = r;
   const cur = $('room_input').value;
@@ -1289,6 +1396,7 @@ function paintRoom(r) {
     ? 'Solid: measured · dashed: corrected · gray: target. ' + chans.map(c => `<span style="color:${colors[c.channel]}">${c.channel}</span> peak ${c.peak_dbfs ?? '?'} dBFS at ${khz(c.rate)}`).join(' · ')
     : 'No measurements yet.';
 }
+/** Call a room endpoint with the buttons disabled, showing `busy` meanwhile, and render the report. */
 async function roomCall(method, path, body, busy) {
   const btns = document.querySelectorAll('#room-left,#room-right,#room-apply,#room-remove,[data-forget]');
   btns.forEach(b => b.disabled = true);
@@ -1297,6 +1405,7 @@ async function roomCall(method, path, body, busy) {
   catch (e) { $('room-status').textContent = e.message; }
   finally { btns.forEach(b => b.disabled = false); }
 }
+/** Measure one channel with the chosen input, level and length. */
 const measure = (channel) => roomCall('POST', '/api/room/measure', { channel, input: $('room_input').value, level_db: num('room_level'), seconds: num('room_seconds') }, `Measuring ${channel}… keep quiet.`);
 $('room-left').onclick = () => measure('left');
 $('room-right').onclick = () => measure('right');
@@ -1306,6 +1415,8 @@ $('room-apply').onclick = () => roomCall('POST', '/api/room/apply', null, 'Writi
 $('room-remove').onclick = () => roomCall('POST', '/api/room/remove', null, 'Removed.');
 api('GET', '/api/room').then(paintRoom).catch(e => { $('room-status').textContent = e.message; });
 
+// Start-up: load the catalogues and options, fill the selects, render the status, then
+// follow status changes over server-sent events.
 (async () => {
   try {
     [filters, dithers, devices, options] = await Promise.all([api('GET', '/api/filters'), api('GET', '/api/dithers'), api('GET', '/api/devices'), api('GET', '/api/options')]);

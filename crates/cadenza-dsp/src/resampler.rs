@@ -197,6 +197,7 @@ pub struct StageInfo {
     pub device: Option<String>,
 }
 
+/// Greatest common divisor (Euclid), used to reduce `out_rate / in_rate` to `L / M`.
 fn gcd(a: u32, b: u32) -> u32 {
     if b == 0 {
         a
@@ -225,16 +226,21 @@ fn polyphase(h: &[f64], l: usize, reversed: bool) -> Vec<Vec<f64>> {
 
 /// Per-channel state of the FFT engine.
 struct FftCore {
+    /// Partitioned frequency-domain delay line shared by every phase of this channel.
     engine: BlockEngine,
+    /// The `L` polyphase sub-filters in the frequency domain (shared across channels).
     filters: Arc<Vec<SpectralFilter>>,
     /// One inverse-FFT scratch per parallel worker (`phase_out` is split into that many chunks).
     scratch: Vec<OutputScratch>,
+    /// Evaluate the phases on the rayon pool (see [`PARALLEL_PHASES_THRESHOLD`]).
     parallel: bool,
+    /// Decimation factor `M`: keep one upsampled sample in `m`.
     m: usize,
     /// Index at the `l × fs_in` rate of the next upsampled sample the engine will produce.
     u: u64,
     /// The upsampled index of the next sample to keep (decimation by `m`, offset by the delay).
     next_take: u64,
+    /// One output buffer per phase for the current block (`block` samples each).
     phase_out: Vec<Vec<f64>>,
 }
 
@@ -255,6 +261,8 @@ impl FftCore {
         }
     }
 
+    /// Push one channel's input samples; every completed block appends its decimated,
+    /// delay-compensated output to `out`.
     fn push(&mut self, input: &[f64], out: &mut Vec<f64>) {
         let Self {
             engine,
@@ -312,6 +320,7 @@ impl FftCore {
         });
     }
 
+    /// Clear the filter history and restart the output clock with `delay` samples to skip.
     fn reset(&mut self, delay: u64) {
         self.engine.reset();
         self.u = 0;
@@ -322,7 +331,9 @@ impl FftCore {
 /// How the CPU core spreads the `L` phases over the rayon pool.
 #[derive(Clone, Copy, Debug)]
 struct Parallelism {
+    /// Whether the phases are spread over the pool at all.
     parallel: bool,
+    /// Number of parallel chunks (and inverse-FFT scratches) the phases are split into.
     workers: usize,
 }
 
@@ -332,11 +343,15 @@ struct Parallelism {
 /// `depth` input blocks, so a failing device can be replaced by a CPU core mid-stream
 /// without losing a sample.
 struct GpuCore {
+    /// The device engine doing the forward FFT, sub-filter MACs and inverse FFTs.
     engine: Box<dyn PolyphaseBlockConvolver + Send>,
     /// For the CPU core that takes over after a device error.
     filters: Arc<Vec<SpectralFilter>>,
+    /// How a replacement CPU core parallelises its phases.
     par: Parallelism,
+    /// Input block size in frames (fixed by the device engine).
     block: usize,
+    /// Decimation factor `M`.
     m: usize,
     /// FDL depth: blocks of history needed to rebuild the CPU core's state.
     depth: usize,
@@ -346,7 +361,9 @@ struct GpuCore {
     history: VecDeque<Vec<f64>>,
     /// The engine's output for one block.
     out_block: Vec<f64>,
+    /// Index at the `l × fs_in` rate of the next upsampled sample the engine produces.
     u: u64,
+    /// The upsampled index of the next sample to keep.
     next_take: u64,
     /// Shared by the channels of one stage, so a lost device is logged once, not once per
     /// channel.
@@ -354,6 +371,7 @@ struct GpuCore {
 }
 
 impl GpuCore {
+    /// A device core for one channel; `reported` is shared by the stage's channels.
     fn new(
         engine: Box<dyn PolyphaseBlockConvolver + Send>,
         filters: &Arc<Vec<SpectralFilter>>,
@@ -463,6 +481,7 @@ impl GpuCore {
         cpu
     }
 
+    /// Clear the device state and the replay history; restart the output clock at `delay`.
     fn reset(&mut self, delay: u64) {
         self.engine.reset();
         self.pending.clear();
@@ -479,11 +498,15 @@ impl GpuCore {
 struct TimeCore {
     /// Reversed sub-filters: `sub[p][k'] = h[(S−1−k')·l + p] · l`.
     sub: Arc<Vec<Vec<f64>>>,
+    /// Upsampling factor `L`.
     l: u64,
+    /// Decimation factor `M`.
     m: u64,
+    /// Taps per sub-filter (`S`).
     sub_len: usize,
     /// Input history; `buf[i]` is input sample `base + i`. Starts with `S−1` zeros.
     buf: Vec<f64>,
+    /// Input index of `buf[0]` (negative while the leading zeros are still in the buffer).
     base: i64,
     /// Upsampled-rate index of the next output sample.
     t: u64,
@@ -491,10 +514,12 @@ struct TimeCore {
     engine: Option<Box<dyn RationalDotEngine + Send>>,
     /// Shared by the channels of one stage: a lost device is logged once.
     reported: Arc<AtomicBool>,
+    /// Output buffer for one GPU engine call (reused across calls).
     scratch: Vec<f64>,
 }
 
 impl TimeCore {
+    /// A CPU core for one channel; the first `delay` upsampled outputs are skipped.
     fn new(sub: Arc<Vec<Vec<f64>>>, l: usize, m: usize, delay: u64) -> Self {
         let sub_len = sub[0].len();
         Self {
@@ -511,6 +536,7 @@ impl TimeCore {
         }
     }
 
+    /// Run the dot products on `engine` instead of the CPU (falls back on the first error).
     fn with_engine(
         mut self,
         engine: Box<dyn RationalDotEngine + Send>,
@@ -565,6 +591,7 @@ impl TimeCore {
         }
     }
 
+    /// Push one channel's input samples and append every output sample they make possible.
     fn push(&mut self, input: &[f64], out: &mut Vec<f64>) {
         self.buf.extend_from_slice(input);
         if !self.push_on_engine(out) {
@@ -586,6 +613,7 @@ impl TimeCore {
         self.trim();
     }
 
+    /// Drop input history older than the window of the next output sample.
     fn trim(&mut self) {
         let s = self.sub_len;
         // Keep only the history the next output can still reach.
@@ -598,6 +626,7 @@ impl TimeCore {
         }
     }
 
+    /// Clear the history (back to `S−1` leading zeros) and restart the output clock at `delay`.
     fn reset(&mut self, delay: u64) {
         self.buf.clear();
         self.buf.resize(self.sub_len - 1, 0.0);
@@ -628,13 +657,19 @@ fn dot(a: &[f64], b: &[f64]) -> f64 {
     (acc[0] + acc[1]) + (acc[2] + acc[3]) + tail
 }
 
+/// The engine running one channel of a [`Stage`].
 enum Core {
+    /// Partitioned FFT polyphase on the CPU.
     Fft(Box<FftCore>),
+    /// FFT polyphase on a GPU; becomes [`Core::Fft`] after a device error.
     Gpu(Box<GpuCore>),
+    /// Time-domain polyphase bank (CPU, or GPU dot products).
     Time(TimeCore),
 }
 
 impl Core {
+    /// Push one channel's input; a GPU core that fails mid-call is swapped for its CPU
+    /// replacement, which finishes the rest of `input`.
     fn push(&mut self, input: &[f64], out: &mut Vec<f64>) {
         match self {
             Core::Fft(c) => c.push(input, out),
@@ -647,6 +682,7 @@ impl Core {
             }
         }
     }
+    /// Clear the channel's history; `delay` is the stage's group delay in upsampled samples.
     fn reset(&mut self, delay: u64) {
         match self {
             Core::Fft(c) => c.reset(delay),
@@ -654,6 +690,7 @@ impl Core {
             Core::Time(c) => c.reset(delay),
         }
     }
+    /// The device this channel runs on, if not the CPU.
     fn device(&self) -> Option<String> {
         match self {
             Core::Gpu(c) => Some(c.engine.device_label()),
@@ -661,6 +698,7 @@ impl Core {
             Core::Fft(_) => None,
         }
     }
+    /// `true` while this channel's heavy work is actually on a GPU.
     fn on_gpu(&self) -> bool {
         match self {
             Core::Gpu(c) => c.engine.on_gpu(),
@@ -672,23 +710,38 @@ impl Core {
 
 /// One `L/M` conversion with one filter.
 struct Stage {
+    /// Stage input rate in Hz.
     in_rate: u32,
+    /// Stage output rate in Hz.
     out_rate: u32,
+    /// Interleaved channel count.
     channels: usize,
+    /// Upsampling factor `L` (`out_rate / gcd`).
     l: usize,
+    /// Decimation factor `M` (`in_rate / gcd`).
     m: usize,
+    /// The filter design this stage was built from (for reports).
     spec: FirSpec,
+    /// Which engine family the cores use.
     engine: Engine,
     /// Group delay of the filter in upsampled samples (`(N−1)/2` for linear phase, 0 otherwise).
     delay: u64,
+    /// One core per channel.
     cores: Vec<Core>,
+    /// Input frames pushed since the last reset (to know how many outputs `flush` owes).
     input_frames: u64,
+    /// Output frames produced since the last reset.
     output_frames: u64,
+    /// De-interleaved input, one buffer per channel (reused across calls).
     split: Vec<Vec<f64>>,
+    /// Per-channel output before re-interleaving (reused across calls).
     joined: Vec<Vec<f64>>,
 }
 
 impl Stage {
+    /// Build the stage for `in_rate → out_rate` around the low-pass `h` (designed at
+    /// `L × in_rate`). The FFT engine is used for integer and small-`L` ratios, the time-domain
+    /// bank otherwise; `gpu`, when given, is tried first and the CPU is the fallback.
     fn new(
         in_rate: u32,
         out_rate: u32,
@@ -809,6 +862,7 @@ impl Stage {
         }
     }
 
+    /// Latency in this stage's input frames: the filter look-ahead plus one FFT block.
     fn latency_input_frames(&self) -> usize {
         let look_ahead = (self.delay as usize).div_ceil(self.l);
         let block = match self.engine {
@@ -818,6 +872,7 @@ impl Stage {
         look_ahead + block
     }
 
+    /// A report of this stage for the signal path.
     fn info(&self) -> StageInfo {
         StageInfo {
             in_rate: self.in_rate,
@@ -840,10 +895,13 @@ impl Stage {
             .then_some(first)
     }
 
+    /// `true` when every channel of this stage runs on a GPU.
     fn on_gpu(&self) -> bool {
         !self.cores.is_empty() && self.cores.iter().all(Core::on_gpu)
     }
 
+    /// Convert interleaved input and return the interleaved output it makes available.
+    /// Channels are processed in parallel when there are several.
     fn push(&mut self, interleaved: &[f64]) -> Vec<f64> {
         let ch = self.channels;
         let frames = interleaved.len() / ch;
@@ -868,6 +926,8 @@ impl Stage {
         self.interleave()
     }
 
+    /// Push zeros until every output owed for the input so far has come out, drop the
+    /// surplus, and reset the stage for the next stream.
     fn flush(&mut self) -> Vec<f64> {
         let expected = (self.input_frames * self.l as u64).div_ceil(self.m as u64);
         let step = match self.engine {
@@ -890,6 +950,7 @@ impl Stage {
         out
     }
 
+    /// Clear every channel's history and the frame counters.
     fn reset(&mut self) {
         for c in &mut self.cores {
             c.reset(self.delay);
@@ -898,6 +959,7 @@ impl Stage {
         self.output_frames = 0;
     }
 
+    /// Re-interleave the per-channel outputs into one new buffer.
     fn interleave(&mut self) -> Vec<f64> {
         let n = self.joined[0].len();
         debug_assert!(self.joined.iter().all(|j| j.len() == n));
@@ -912,6 +974,8 @@ impl Stage {
     }
 }
 
+/// `true` when the FFT polyphase engine suits `L/M`: plain upsampling, or a small `L` where
+/// evaluating every phase wastes little.
 fn use_fft(l: usize, m: usize) -> bool {
     m == 1 || l <= 4
 }
@@ -971,13 +1035,21 @@ pub(crate) fn plan(in_rate: u32, out_rate: u32, spec: StageSpec) -> Vec<(u32, u3
 
 /// A streaming, gapless, multi-channel sample-rate converter.
 pub struct Resampler {
+    /// Source rate in Hz.
     in_rate: u32,
+    /// Target rate in Hz.
     out_rate: u32,
+    /// Interleaved channel count.
     channels: usize,
+    /// Overall upsampling factor `L`.
     l: usize,
+    /// Overall decimation factor `M`.
     m: usize,
+    /// The conversion stages, run in order (one, or two for a cascade).
     stages: Vec<Stage>,
+    /// Input frames pushed since the last flush.
     input_frames: u64,
+    /// Output frames produced since the last flush.
     output_frames: u64,
 }
 
@@ -1044,6 +1116,8 @@ impl Resampler {
         Self::build(in_rate, out_rate, channels, &spec, cache, gpu)
     }
 
+    /// Shared constructor: validate the parameters, plan the stages and build each one
+    /// with coefficients from `cache`.
     fn build(
         in_rate: u32,
         out_rate: u32,

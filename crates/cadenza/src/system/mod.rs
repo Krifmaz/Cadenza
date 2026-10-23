@@ -102,14 +102,23 @@ type Current = (u32, u32, Arc<LiveStream>, String);
 
 /// Where a capture backend delivers PCM.
 pub struct Feed {
+    /// The engine the live track plays on.
     engine: Engine,
+    /// Title of the live track.
     title: String,
+    /// Source format label (e.g. `PipeWire`).
     codec: String,
+    /// Buffering latency of the live stream in milliseconds.
     latency_ms: u32,
+    /// The live stream of the current format, if one is open.
     current: Mutex<Option<Current>>,
+    /// Frames captured so far.
     frames: AtomicU64,
+    /// Format changes seen (numbers the live tracks).
     formats: AtomicU64,
+    /// Peak level and the frame count when it was set (held for about a second).
     peak: Mutex<(f64, u64)>,
+    /// Name of the capture backend.
     backend: String,
 }
 
@@ -245,6 +254,7 @@ pub fn interleave_planar(planes: &[&[f32]]) -> Vec<f32> {
     out
 }
 
+/// A rate as a short label: `48k`, `44.1k`.
 fn rate_label(rate: u32) -> String {
     if rate % 1000 == 0 {
         format!("{}k", rate / 1000)
@@ -255,7 +265,9 @@ fn rate_label(rate: u32) -> String {
 
 /// A running system input; dropping it stops the capture.
 pub struct SystemInput {
+    /// Where the captured audio goes.
     feed: Arc<Feed>,
+    /// The capture backend; dropping it stops the capture.
     _backend: Box<dyn Send>,
 }
 
@@ -278,12 +290,17 @@ pub const AVAILABLE: bool = cfg!(any(
     all(target_os = "macos", feature = "tap")
 ));
 
+/// The one system input of the process and its configuration.
 struct Global {
+    /// The configuration in effect.
     config: Option<SystemConfig>,
+    /// The running input, if enabled and started.
     input: Option<SystemInput>,
+    /// Why the input last failed to start, if it did.
     error: Option<String>,
 }
 
+/// The process-wide system input state.
 static GLOBAL: Mutex<Global> = Mutex::new(Global {
     config: None,
     input: None,
@@ -312,6 +329,7 @@ pub fn start_global(engine: Engine, cfg: &SystemConfig) {
 /// A callback that writes the system configuration back to `config.toml`, registered by
 /// `cadenza::service::start`. The web UI changes the config live; this makes it stick.
 type Persist = Box<dyn Fn(&SystemConfig) + Send>;
+/// The registered persistence function, if any.
 static PERSIST: Mutex<Option<Persist>> = Mutex::new(None);
 
 /// Register the function that persists the system configuration (called once at startup).
@@ -319,6 +337,7 @@ pub fn set_persist(f: impl Fn(&SystemConfig) + Send + 'static) {
     *PERSIST.lock().unwrap() = Some(Box::new(f));
 }
 
+/// Persist `cfg` through the registered function, if there is one.
 fn persist(cfg: &SystemConfig) {
     if let Some(f) = PERSIST.lock().unwrap().as_ref() {
         f(cfg);

@@ -26,17 +26,23 @@ use tokio_stream::wrappers::BroadcastStream;
 /// The embedded web UI.
 pub const INDEX_HTML: &str = include_str!("../../static/index.html");
 
+/// State shared by every handler.
 #[derive(Clone)]
 struct AppState {
+    /// Handle to the playback engine.
     engine: Engine,
+    /// Room correction state (measurements, the applied filter).
     room: Arc<Mutex<crate::room::Room>>,
+    /// The limit test, one at a time.
     limit: Arc<LimitTest>,
 }
 
 /// The limit test: one at a time, run on its own thread.
 #[derive(Default)]
 struct LimitTest {
+    /// Where the running (or last) test is.
     progress: Mutex<crate::limit::Progress>,
+    /// Set to ask the running test to stop.
     cancel: std::sync::atomic::AtomicBool,
 }
 
@@ -49,6 +55,7 @@ impl IntoResponse for ApiError {
     }
 }
 
+/// A `400 Bad Request` error with `msg`.
 fn bad(msg: impl Into<String>) -> ApiError {
     ApiError(StatusCode::BAD_REQUEST, msg.into())
 }
@@ -126,6 +133,7 @@ pub async fn serve_on(listener: tokio::net::TcpListener, engine: Engine) -> anyh
     Ok(())
 }
 
+/// `GET /`: the built-in web UI.
 async fn index() -> Html<&'static str> {
     Html(INDEX_HTML)
 }
@@ -145,6 +153,7 @@ async fn with_room<T: Send + 'static>(
     .map_err(bad)
 }
 
+/// `GET /api/room`: the room correction report.
 async fn room_report(State(st): State<AppState>) -> Result<Json<Value>, ApiError> {
     with_room(&st, |r, e| Ok(r.report(e))).await.map(Json)
 }
@@ -173,6 +182,7 @@ async fn room_options(
     .map(Json)
 }
 
+/// `POST /api/room/measure`: run a sweep measurement on the device and return the report.
 async fn room_measure(
     State(st): State<AppState>,
     Json(req): Json<crate::room::MeasureRequest>,
@@ -185,6 +195,7 @@ async fn room_measure(
     .map(Json)
 }
 
+/// `POST /api/room/apply`: build and apply the correction filter from the measurements.
 async fn room_apply(State(st): State<AppState>) -> Result<Json<Value>, ApiError> {
     with_room(&st, |r, e| {
         r.apply(e)?;
@@ -194,6 +205,7 @@ async fn room_apply(State(st): State<AppState>) -> Result<Json<Value>, ApiError>
     .map(Json)
 }
 
+/// `POST /api/room/remove`: stop using the correction filter.
 async fn room_remove(State(st): State<AppState>) -> Result<Json<Value>, ApiError> {
     with_room(&st, |r, e| {
         r.remove(e);
@@ -203,11 +215,14 @@ async fn room_remove(State(st): State<AppState>) -> Result<Json<Value>, ApiError
     .map(Json)
 }
 
+/// Body naming one measured channel.
 #[derive(Deserialize)]
 struct ChannelBody {
+    /// Channel name, e.g. `left`.
     channel: String,
 }
 
+/// `POST /api/room/forget`: drop one channel's measurement.
 async fn room_forget(
     State(st): State<AppState>,
     Json(b): Json<ChannelBody>,
@@ -220,9 +235,11 @@ async fn room_forget(
     .map(Json)
 }
 
+/// Body naming an input (capture) device; empty means the default one.
 #[derive(Deserialize, Default)]
 #[serde(default)]
 struct InputBody {
+    /// Input device name.
     input: String,
 }
 
@@ -273,10 +290,12 @@ async fn live_cover(Path(id): Path<String>) -> Response {
     }
 }
 
+/// `GET /api/status`: the engine's current status.
 async fn status(State(st): State<AppState>) -> Json<Value> {
     Json(serde_json::to_value(&*st.engine.status()).unwrap_or(Value::Null))
 }
 
+/// `GET /api/settings`: the current settings.
 async fn get_settings(State(st): State<AppState>) -> Json<Value> {
     Json(serde_json::to_value(st.engine.settings()).unwrap_or(Value::Null))
 }
@@ -401,6 +420,7 @@ pub fn merge(into: &mut Value, patch: &Value) {
     }
 }
 
+/// `GET /api/limit`: progress of the limit test (`idle` when none ran).
 async fn limit_status(State(st): State<AppState>) -> Json<Value> {
     let mut p = st.limit.progress.lock().unwrap().clone();
     if p.state.is_empty() {
@@ -458,6 +478,7 @@ async fn limit_start(State(st): State<AppState>) -> Result<Json<Value>, ApiError
     Ok(limit_status(State(st)).await)
 }
 
+/// `POST /api/limit/cancel`: ask the running limit test to stop.
 async fn limit_cancel(State(st): State<AppState>) -> Json<Value> {
     st.limit
         .cancel
@@ -465,6 +486,8 @@ async fn limit_cancel(State(st): State<AppState>) -> Json<Value> {
     limit_status(State(st)).await
 }
 
+/// `GET /api/devices`: output and input devices on every backend (probed off the async
+/// threads).
 async fn devices() -> Json<Value> {
     // Device probing opens devices; keep it off the async threads.
     let list = tokio::task::spawn_blocking(list_devices)
@@ -488,8 +511,11 @@ pub struct FilterQuery {
 /// `?id=…&in_rate=…&out_rate=…` for `/api/filters/response`.
 #[derive(Deserialize)]
 struct ResponseQuery {
+    /// Filter id (catalogue name or designer string).
     id: String,
+    /// Conversion source rate, if any.
     in_rate: Option<u32>,
+    /// Conversion target rate, if any.
     out_rate: Option<u32>,
 }
 
@@ -553,10 +579,12 @@ pub fn filter_list(q: &FilterQuery) -> Vec<Value> {
         .collect()
 }
 
+/// `GET /api/filters`: the filter catalogue, with the designs that fit a conversion.
 async fn filters(Query(q): Query<FilterQuery>) -> Json<Value> {
     Json(json!(filter_list(&q)))
 }
 
+/// `GET /api/dithers`: every dither kind with its shaper coefficients.
 async fn dithers() -> Json<Value> {
     Json(json!(DitherKind::catalog()
         .iter()
@@ -647,6 +675,7 @@ pub fn options(settings: &crate::config::Settings) -> Value {
     })
 }
 
+/// `GET /api/options`: everything a settings UI offers to choose from.
 async fn options_route(State(st): State<AppState>) -> Json<Value> {
     Json(options(&st.engine.settings()))
 }
@@ -654,29 +683,44 @@ async fn options_route(State(st): State<AppState>) -> Json<Value> {
 /// One item of a `POST /api/queue` body.
 #[derive(Deserialize)]
 struct QueueItem {
+    /// Stream URL to play (wins over `path`).
     url: Option<String>,
+    /// Local file to play.
     path: Option<String>,
+    /// HTTP headers to send with `url` (e.g. authentication).
     #[serde(default)]
     headers: Vec<(String, String)>,
+    /// Caller's track id (string or number), echoed in the status.
     id: Option<Value>,
+    /// Display title (defaults to the file name).
     #[serde(default)]
     title: String,
+    /// Display artist.
     #[serde(default)]
     artist: String,
+    /// Display album.
     #[serde(default)]
     album: String,
+    /// Caller's album id (string or number).
     album_id: Option<Value>,
+    /// Duration in seconds, if known ahead of decoding.
     duration: Option<f64>,
+    /// Source format hint, e.g. `flac`.
     format: Option<String>,
+    /// Cover art URL.
     cover: Option<String>,
 }
 
+/// Body of `POST /api/queue`.
 #[derive(Deserialize)]
 struct QueueBody {
+    /// Tracks to queue.
     #[serde(default)]
     items: Vec<QueueItem>,
+    /// Queue index to start at (`replace` mode).
     #[serde(default)]
     index: usize,
+    /// Start position in seconds (`replace` mode).
     #[serde(default)]
     position: f64,
     /// `replace` (default, and play), `append`, `next`.
@@ -685,6 +729,8 @@ struct QueueBody {
 }
 
 impl QueueItem {
+    /// Turn the item into an engine track; ids become strings and a missing title falls back
+    /// to the file name.
     fn into_track(self) -> Result<Track, ApiError> {
         let source = match (self.url, self.path) {
             (Some(u), _) => crate::decode::Source::Url {
@@ -726,6 +772,8 @@ impl QueueItem {
     }
 }
 
+/// `POST /api/queue`: replace (and play), append to or insert after the current track;
+/// disc images and CUE sheets expand into their tracks.
 async fn queue(
     State(st): State<AppState>,
     Json(body): Json<QueueBody>,
@@ -748,9 +796,12 @@ async fn queue(
     Ok(Json(json!({ "ok": true })))
 }
 
+/// Body of `POST /api/control`.
 #[derive(Deserialize)]
 struct ControlBody {
+    /// `play`, `pause`, `next`, `seek`, `volume`, …
     action: String,
+    /// The action's argument (seconds, dB, …), if it takes one.
     #[serde(default)]
     value: Option<Value>,
 }
@@ -786,6 +837,7 @@ pub fn control_command(action: &str, value: Option<&Value>) -> Result<Command, S
     })
 }
 
+/// `POST /api/control`: run one transport or volume action.
 async fn control(
     State(st): State<AppState>,
     Json(body): Json<ControlBody>,
@@ -799,6 +851,8 @@ async fn control(
     ))
 }
 
+/// `GET /api/events`: server-sent events, the current status first, then every status and
+/// track change, with a keep-alive ping every 15 s.
 async fn events(
     State(st): State<AppState>,
 ) -> Sse<impl Stream<Item = Result<SseEvent, Infallible>>> {

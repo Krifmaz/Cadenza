@@ -93,12 +93,19 @@ impl Source {
 
 /// A seekable, blocking HTTP reader.
 pub struct HttpSource {
+    /// The URL being read.
     url: String,
+    /// Extra request headers (e.g. authentication).
     headers: Vec<(String, String)>,
+    /// HTTP agent shared across reconnects.
     agent: ureq::Agent,
+    /// Total length, once a response told it.
     len: Option<u64>,
+    /// Whether the server honours `Range` requests (seeking needs it).
     ranges: bool,
+    /// Current read position.
     pos: u64,
+    /// The open response body, if connected.
     body: Option<Box<dyn Read + Send + Sync>>,
     /// The `Content-Type` of the first response, to hint the container.
     pub content_type: Option<String>,
@@ -125,6 +132,8 @@ impl HttpSource {
         Ok(src)
     }
 
+    /// (Re)open the connection at `pos` with a `Range` request, learning the length and
+    /// whether ranges are honoured from the response.
     fn connect(&mut self) -> io::Result<()> {
         let mut req = self
             .agent

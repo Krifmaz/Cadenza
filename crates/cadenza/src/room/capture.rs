@@ -51,6 +51,7 @@ pub fn system() -> CaptureFactory {
     })
 }
 
+/// Capture from a real input device through cpal.
 #[cfg(feature = "cpal")]
 mod cpal_capture {
     use super::Capture;
@@ -62,13 +63,18 @@ mod cpal_capture {
     /// A cpal input stream, run on a thread of its own (streams are not `Send` on every
     /// platform).
     pub struct CpalCapture {
+        /// Input device name (empty for the default one).
         name: String,
+        /// Tells the capture thread to stop.
         stop: Option<mpsc::Sender<()>>,
+        /// The capture thread.
         thread: Option<std::thread::JoinHandle<()>>,
+        /// Mono samples recorded so far (the first channel).
         samples: Arc<Mutex<Vec<f64>>>,
     }
 
     impl CpalCapture {
+        /// A capture from input device `name`; nothing is opened until it starts.
         pub fn new(name: &str) -> Self {
             Self {
                 name: name.to_string(),
@@ -178,8 +184,11 @@ mod cpal_capture {
 /// and right speakers' impulse responses, plus a little noise and some latency.
 #[derive(Clone)]
 pub struct SimulatedRoom {
+    /// Sample rate of the impulse responses.
     rate: u32,
+    /// Left speaker to microphone impulse response.
     left: Arc<Vec<f64>>,
+    /// Right speaker to microphone impulse response.
     right: Arc<Vec<f64>>,
 }
 
@@ -205,8 +214,11 @@ impl SimulatedRoom {
     }
 }
 
+/// A capture that "records" what the simulated room makes of the played signal.
 struct SimCapture {
+    /// The room being simulated.
     room: SimulatedRoom,
+    /// The recording so far.
     rec: Arc<Mutex<Vec<f64>>>,
 }
 

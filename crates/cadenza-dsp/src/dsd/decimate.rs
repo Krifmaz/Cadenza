@@ -34,21 +34,31 @@ pub const STOPBAND: f64 = 0.1077;
 /// Stopband attenuation of the final FIR, dB.
 pub const ATTENUATION_DB: f64 = 155.0;
 
+/// One channel of the CIC decimator that takes the 1-bit stream down to the FIR's rate.
 #[derive(Clone, Debug, Default)]
 struct Cic {
+    /// Integrator state, one per order, run at the DSD rate.
     integrators: [i64; CIC_ORDER],
+    /// Comb (differentiator) delays, one per order, run at the decimated rate.
     combs: [i64; CIC_ORDER],
+    /// DSD samples since the last CIC output (wraps at the CIC decimation factor).
     phase: usize,
 }
 
 /// Streaming DSD → PCM converter for `channels` planar 1-bit streams.
 #[derive(Clone, Debug)]
 pub struct DsdToPcm {
+    /// Input DSD bit rate in Hz.
     dsd_rate: u32,
+    /// Output PCM rate in Hz.
     pcm_rate: u32,
+    /// Planar channel count.
     channels: usize,
+    /// Decimation factor of the CIC stage (the FIR does the rest).
     r_cic: usize,
+    /// One CIC per channel.
     cic: Vec<Cic>,
+    /// `1 / r_cic^order`: brings the CIC's DC gain back to unity.
     cic_scale: f64,
     /// Compensated decimation filter at the CIC output rate.
     h: Vec<f64>,
@@ -56,9 +66,13 @@ pub struct DsdToPcm {
     fifo: Vec<Vec<f64>>,
     /// Zero CIC samples the FIFO starts with (group-delay alignment, see [`Self::prime`]).
     prime: usize,
+    /// Linear output gain (from the configured dB).
     gain: f64,
+    /// DSD frames pushed since the last reset.
     input_frames: u64,
+    /// PCM frames produced since the last reset.
     output_frames: u64,
+    /// Per-channel PCM output of the current call, before interleaving (reused).
     pcm: Vec<Vec<f64>>,
 }
 
@@ -199,6 +213,8 @@ impl DsdToPcm {
         self.run_fir(out);
     }
 
+    /// Run the decimating FIR over every channel's FIFO and append the interleaved PCM to
+    /// `out`; consumed CIC samples are dropped from the FIFOs.
     fn run_fir(&mut self, out: &mut Vec<f64>) {
         let taps = self.h.len();
         let mut produced = usize::MAX;

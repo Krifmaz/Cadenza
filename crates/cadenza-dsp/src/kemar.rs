@@ -1,8 +1,9 @@
-// MIT KEMAR HRTF measurements (Bill Gardner and Keith Martin, MIT Media Lab, 1994),
-// diffuse-field equalized "compact" set, 128 taps at 44.1 kHz, elevation 0. Taken from
-// mit-hrtf-lib (Aristotel Digenis, MIT licence). The data is free to use with credit to
-// the authors. For a source at +azimuth (to the right): left ear, right ear.
+//! MIT KEMAR HRTF measurements (Bill Gardner and Keith Martin, MIT Media Lab, 1994),
+//! diffuse-field equalized "compact" set, 128 taps at 44.1 kHz, elevation 0. Taken from
+//! mit-hrtf-lib (Aristotel Digenis, MIT licence). The data is free to use with credit to
+//! the authors. For a source at +azimuth (to the right): left ear, right ear.
 
+/// Left-ear response for a source 30° to the right (Q15 fixed point).
 pub(crate) const KEMAR_30_LEFT: [i16; 128] = [
     0, 0, -1, 3, -1, 0, 1, 0, 0, 4, -7, 15, -25, 40, -59, 67, -60, 94, 162, 3251, 1503, -3301,
     2250, -1109, -1405, 4828, 1350, 2441, 6915, 4128, -2235, 887, 2440, -3002, -2605, 71, -954,
@@ -13,6 +14,7 @@ pub(crate) const KEMAR_30_LEFT: [i16; 128] = [
     -127, -115, -98, -98, -90, -95, -100, -101, -89, -51, -34, -58, -78, -39, -39, -51, -48, -28,
     4, 6, 5, 10, -1, -28, -40, -21, -12,
 ];
+/// Right-ear response for a source 30° to the right (Q15 fixed point).
 pub(crate) const KEMAR_30_RIGHT: [i16; 128] = [
     110, -147, 163, -203, 201, -202, 211, -271, 5538, 12339, -11607, -4285, 1527, -4550, 14504,
     950, 6818, 22847, 1901, -12201, 2957, 2203, -11984, -3820, -2174, -2124, -2415, -1777, 1396,
@@ -23,6 +25,7 @@ pub(crate) const KEMAR_30_RIGHT: [i16; 128] = [
     -50, -69, -13, -8, 9, 18, -146, -210, -70, 25, 58, 37, -8, -55, -61, -73, 0, 18, -48, 5, 56,
     90, 112, 167, 120, 75, 72, 99, 174, 209, 166, 156, 120,
 ];
+/// Left-ear response for a source 45° to the right (Q15 fixed point).
 pub(crate) const KEMAR_45_LEFT: [i16; 128] = [
     3, 2, 2, 1, 1, 0, 2, 2, 0, 3, 2, -4, 11, -7, 12, -12, 24, -22, 29, -7, 30, 20, 1370, 2235,
     -1598, 334, 1063, -1722, 1989, 2020, 1061, 4024, 4846, 550, -113, 2359, -268, -1987, -289,
@@ -33,6 +36,7 @@ pub(crate) const KEMAR_45_LEFT: [i16; 128] = [
     -156, -150, -119, -116, -114, -107, -84, -98, -122, -99, -95, -83, -103, -83, -60, -42, -19,
     -19, 1, -2, 12, -7, -4, 5, -7,
 ];
+/// Right-ear response for a source 45° to the right (Q15 fixed point).
 pub(crate) const KEMAR_45_RIGHT: [i16; 128] = [
     147, -184, 192, -194, 205, -318, 4576, 14077, -7822, -10389, 241, 1908, 9356, 314, 15805,
     19883, -5155, -5083, 4367, -3938, -6123, -2690, -8067, -807, -2407, -3051, 2001, -567, 673,
@@ -43,6 +47,7 @@ pub(crate) const KEMAR_45_RIGHT: [i16; 128] = [
     -148, -84, -37, 65, 57, -120, -190, -96, 40, 93, 47, -4, -65, -57, -27, 18, 0, -46, -26, 6,
     103, 137, 136, 119, 99, 136, 141, 148, 147, 123, 135, 117, 119, 176,
 ];
+/// Left-ear response for a source 60° to the right (Q15 fixed point).
 pub(crate) const KEMAR_60_LEFT: [i16; 128] = [
     -2, -2, -1, -1, 0, -1, 0, -2, -2, -3, -2, -1, -2, -1, -2, -2, -2, -4, 5, -3, 3, -14, 36, -24,
     17, 194, 1603, 576, -751, 1458, -660, -520, 1976, 816, 1832, 4151, 3030, 246, 1399, 1804, -655,
@@ -53,6 +58,7 @@ pub(crate) const KEMAR_60_LEFT: [i16; 128] = [
     -159, -114, -96, -106, -94, -102, -87, -100, -113, -104, -104, -69, -71, -78, -72, -71, -46,
     -43, -22, -13, 2, 0,
 ];
+/// Right-ear response for a source 60° to the right (Q15 fixed point).
 pub(crate) const KEMAR_60_RIGHT: [i16; 128] = [
     -268, 341, -446, 555, -403, 11542, 9537, -18983, -4928, 6271, 3951, 2574, 11173, 24241, -1736,
     -6664, 4598, -955, -3342, -2813, -7471, -2846, -826, -5380, 1940, -1021, -3482, -419, -1181,

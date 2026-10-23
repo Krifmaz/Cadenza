@@ -18,10 +18,15 @@ pub const TONE_HZ: f64 = 997.0;
 /// Test tone level (dBFS, sine-referenced).
 pub const TONE_DBFS: f64 = -20.0;
 
+/// Silence before the tone, in seconds (lets the input settle).
 const PRE_S: f64 = 0.5;
+/// Length of the tone, in seconds.
 const TONE_S: f64 = 2.0;
+/// Gap between the tone and the measured silence, in seconds.
 const GAP_S: f64 = 1.0;
+/// Length of the measured silence, in seconds.
 const QUIET_S: f64 = 3.0;
+/// Silence after the measurement, in seconds.
 const POST_S: f64 = 0.5;
 
 /// A noise-floor measurement.

@@ -64,7 +64,9 @@ pub struct Measurement {
 
 /// The room-correction state behind the API.
 pub struct Room {
+    /// Where measurements and the correction filter are stored.
     dir: PathBuf,
+    /// Opens the microphone for a measurement.
     capture: CaptureFactory,
     /// Left and right.
     measurements: [Option<Measurement>; 2],
@@ -72,8 +74,10 @@ pub struct Room {
     pub options: DesignOptions,
 }
 
+/// Channel names, by index.
 const CHANNELS: [&str; 2] = ["left", "right"];
 
+/// Index of channel `name` (`left` or `right`, case-insensitive).
 fn channel_index(name: &str) -> Result<usize, String> {
     CHANNELS
         .iter()
@@ -91,6 +95,7 @@ pub(crate) fn set_and_wait(engine: &Engine, s: crate::config::Settings) {
     }
 }
 
+/// Write planar `channels` as a 32-bit float WAV file at `path`.
 fn write_wav(path: &Path, rate: u32, channels: &[Vec<f64>]) -> Result<(), String> {
     let spec = hound::WavSpec {
         channels: channels.len() as u16,
@@ -183,6 +188,8 @@ impl Room {
         Ok(())
     }
 
+    /// Play a sweep on channel `ch` while recording it, and turn the recording into an
+    /// impulse response.
     fn run_measurement(
         &self,
         engine: &Engine,

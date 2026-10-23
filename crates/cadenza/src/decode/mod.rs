@@ -85,14 +85,21 @@ pub enum DecodeError {
 
 /// A streaming decoder for one track.
 pub struct Decoder {
+    /// The container reader.
     reader: Box<dyn FormatReader>,
+    /// The codec decoder of the chosen track.
     decoder: Box<dyn symphonia::core::codecs::Decoder>,
+    /// Id of the decoded track in the container.
     track_id: u32,
+    /// Format and tags of the track.
     info: TrackInfo,
+    /// Time base of the track's timestamps, if known.
     time_base: Option<TimeBase>,
+    /// Conversion buffer from the codec's samples to interleaved `f64` (grown as needed).
     buf: Option<SampleBuffer<f64>>,
     /// Timestamp (in `time_base` units) of the next frame to be delivered.
     next_ts: u64,
+    /// The decoder reached the end of the track (or of its range).
     finished: bool,
     /// Play only frames `start..end` (a CUE track).
     range: (u64, Option<u64>),

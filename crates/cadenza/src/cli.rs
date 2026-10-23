@@ -15,6 +15,7 @@ pub struct Cli {
     #[arg(long, global = true, default_value = "info")]
     pub log: String,
 
+    /// The subcommand to run.
     #[command(subcommand)]
     pub command: Commands,
 }
@@ -122,6 +123,7 @@ pub enum Commands {
         #[arg(long, value_name = "sink|app:NAME")]
         system: Option<String>,
 
+        /// Settings that override `config.toml` for this run.
         #[command(flatten)]
         overrides: Overrides,
     },

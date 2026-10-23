@@ -11,7 +11,9 @@ use std::time::{Duration, Instant};
 
 /// A registered advertisement; unregistered when dropped.
 pub struct Advertisement {
+    /// The mDNS daemon the service is registered with.
     daemon: ServiceDaemon,
+    /// Full service name, to unregister it.
     fullname: String,
 }
 
@@ -43,12 +45,15 @@ impl Drop for Advertisement {
     }
 }
 
+/// The process-wide browser for endpoints.
 struct Browser {
     /// Instance name → address.
     found: Mutex<BTreeMap<String, SocketAddr>>,
+    /// When browsing started (lookups wait a grace period after it).
     started: Instant,
 }
 
+/// The browser, started on first use.
 static BROWSER: OnceLock<Arc<Browser>> = OnceLock::new();
 
 /// Instance name from `Name._cadenza-endpoint._tcp.local.`.
@@ -60,6 +65,7 @@ fn instance_name(fullname: &str) -> String {
         .to_string()
 }
 
+/// The address to connect to: IPv4 first, then any non-link-local IPv6.
 fn pick_addr(info: &ServiceInfo) -> Option<SocketAddr> {
     let mut addrs: Vec<&IpAddr> = info.get_addresses().iter().collect();
     // Prefer IPv4, then anything that is not link-local v6.
@@ -71,6 +77,7 @@ fn pick_addr(info: &ServiceInfo) -> Option<SocketAddr> {
     addrs.first().map(|a| SocketAddr::new(**a, info.get_port()))
 }
 
+/// The browser, starting it (and its listener thread) on first use.
 fn browser() -> Arc<Browser> {
     Arc::clone(BROWSER.get_or_init(|| {
         let b = Arc::new(Browser {

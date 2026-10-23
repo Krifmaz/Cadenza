@@ -15,6 +15,7 @@ use std::sync::Mutex;
 /// Sequence numbers already executed (a command can arrive pushed *and* with a heartbeat).
 static SEEN: Mutex<VecDeque<u64>> = Mutex::new(VecDeque::new());
 
+/// `true` when command `seq` has already run; otherwise remember it (the last 200).
 fn seen_before(seq: u64) -> bool {
     let mut seen = SEEN.lock().unwrap();
     if seen.contains(&seq) {
@@ -60,6 +61,7 @@ pub fn track_from_encore(client: &Client, v: &Value) -> Option<Track> {
     })
 }
 
+/// The tracks in a command's `tracks` array, as engine tracks.
 fn tracks(client: &Client, v: &Value) -> Vec<Track> {
     v.get("tracks")
         .and_then(Value::as_array)
@@ -116,6 +118,7 @@ fn exclusive_backend() -> Option<&'static str> {
         .find(|b| matches!(*b, "wasapi" | "coreaudio" | "alsa"))
 }
 
+/// A boolean from JSON: `true`/`false`, or a string like `on`, `1`, `yes`.
 fn as_bool(v: &Value) -> Option<bool> {
     v.as_bool()
         .or_else(|| match v.as_str()?.trim().to_ascii_lowercase().as_str() {
@@ -125,6 +128,7 @@ fn as_bool(v: &Value) -> Option<bool> {
         })
 }
 
+/// A number from JSON, or a string holding one.
 fn as_f64(v: &Value) -> Option<f64> {
     v.as_f64()
         .or_else(|| v.as_str().and_then(|t| t.trim().parse().ok()))

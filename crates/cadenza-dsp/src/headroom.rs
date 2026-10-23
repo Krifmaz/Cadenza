@@ -69,15 +69,21 @@ pub fn gain_to_db(g: f64) -> f64 {
 /// unity gain.
 #[derive(Clone, Debug)]
 pub struct TruePeakMeter {
+    /// Interleaved channel count.
     channels: usize,
+    /// 4× oversampling polyphase filter (one row per phase).
     phases: [[f64; TP_TAPS]; 4],
     /// Per channel ring of the last `TP_TAPS` samples.
     history: Vec<[f64; TP_TAPS]>,
+    /// Ring position shared by every channel's history.
     pos: usize,
+    /// Highest true (inter-sample) peak seen, linear.
     peak: f64,
+    /// Highest sample peak seen, linear.
     sample_peak: f64,
 }
 
+/// Taps per oversampling phase of the true-peak filter.
 const TP_TAPS: usize = 12;
 
 impl TruePeakMeter {
@@ -167,13 +173,19 @@ impl TruePeakMeter {
 /// The headroom stage: gain → true-peak meter → soft clipper, on interleaved `f64`.
 #[derive(Clone, Debug)]
 pub struct Headroom {
+    /// The configured gain in dB.
     gain_db: f64,
+    /// The same gain, linear.
     gain: f64,
+    /// Whether the soft clipper is engaged.
     soft_clip: bool,
+    /// True-peak meter of the output.
     meter: TruePeakMeter,
+    /// Samples the clipper had to limit.
     clipped: u64,
     /// Highest level that went into the clipper (after the gain), linear.
     worst_in: f64,
+    /// Samples processed (for the clip ratio).
     samples: u64,
 }
 

@@ -106,8 +106,11 @@ pub trait RationalDotEngine {
 /// The spectra of one impulse response cut into partitions of `block` samples.
 #[derive(Clone, Debug)]
 pub struct SpectralFilter {
+    /// Block size in samples each partition covers (the FFT is twice this).
     block: usize,
+    /// Length of the original impulse response.
     taps: usize,
+    /// Spectrum of each `block`-sample slice of `h`, earliest first.
     partitions: Vec<Vec<Complex<f64>>>,
 }
 
@@ -159,8 +162,11 @@ impl SpectralFilter {
 /// Frequency-domain delay line: the spectra of the most recent input blocks.
 #[derive(Clone, Debug)]
 pub struct Fdl {
+    /// Ring of the most recent input spectra.
     spectra: Vec<Vec<Complex<f64>>>,
+    /// Slot of the newest spectrum (the ring runs backwards, so `head + p` is `p` blocks ago).
     head: usize,
+    /// Spectra pushed so far, capped at the ring size (older slots are still zero).
     count: usize,
 }
 
@@ -239,8 +245,11 @@ impl Fdl {
 /// owns one per worker.
 #[derive(Debug)]
 pub struct OutputScratch {
+    /// The inverse transform for this block size.
     fft: RealFft,
+    /// Output spectrum being accumulated.
     spec: Vec<Complex<f64>>,
+    /// Time-domain result of the inverse transform (`2 × block` samples).
     time: Vec<f64>,
 }
 
@@ -261,11 +270,15 @@ impl OutputScratch {
 /// into blocks, transforms each one and keeps the spectra in an [`Fdl`].
 #[derive(Debug)]
 pub struct BlockEngine {
+    /// Input block size in samples.
     block: usize,
     /// `[previous block | current block]`; the current block fills from `block + filled`.
     frame: Vec<f64>,
+    /// Samples of the current block received so far.
     filled: usize,
+    /// Scratch for single-threaded output.
     scratch: OutputScratch,
+    /// Input spectra of the last `depth` blocks.
     fdl: Fdl,
 }
 
@@ -344,6 +357,8 @@ impl BlockEngine {
         Self::output_into(&self.fdl, filter, scratch, out);
     }
 
+    /// Accumulate `fdl` against `filter`, transform back and append the valid (second) half
+    /// of the block to `out` (overlap-save).
     fn output_into(
         fdl: &Fdl,
         filter: &SpectralFilter,
@@ -374,9 +389,13 @@ pub fn choose_block(taps: usize) -> usize {
 /// A streaming single-channel convolver (room correction, or any long FIR).
 #[derive(Debug)]
 pub struct Convolver {
+    /// The FDL and block gatherer.
     engine: BlockEngine,
+    /// The filter in the frequency domain.
     filter: Arc<SpectralFilter>,
+    /// Input samples pushed since the last reset.
     input_samples: u64,
+    /// Output samples produced since the last reset (to trim the flush to the exact length).
     output_samples: u64,
 }
 

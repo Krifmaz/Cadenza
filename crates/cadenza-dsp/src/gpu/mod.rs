@@ -663,10 +663,15 @@ fn probe_wgpu(device: usize, precision: GpuPrecision) -> Result<Backend, GpuErro
 /// It keeps the last `partitions` input blocks, so a device failure mid-stream moves the
 /// stream to a CPU convolver with its history replayed – no gap, no glitch, logged once.
 pub struct PhaseConvolver {
+    /// The device core, until it fails.
     gpu: Option<Box<dyn PolyphaseBlockConvolver + Send>>,
+    /// The CPU convolver that took over after a device failure.
     cpu: Option<CpuConvolver>,
+    /// The filter in the frequency domain (to build the CPU fallback).
     filter: Arc<SpectralFilter>,
+    /// The last `partitions` input blocks, replayed into the CPU fallback.
     history: std::collections::VecDeque<Vec<f64>>,
+    /// Device label captured at construction (the core is gone after a failure).
     label: String,
 }
 

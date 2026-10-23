@@ -22,6 +22,7 @@ pub struct ClockSync {
 }
 
 impl ClockSync {
+    /// Most recent pings kept; the offset comes from the one with the shortest round trip.
     const KEEP: usize = 16;
 
     /// A ping sent at local `t0`, answered at remote `server`, received at local `t3`.
@@ -52,6 +53,7 @@ impl ClockSync {
 /// `(position, time)` reports.
 #[derive(Clone, Debug, Default)]
 pub struct Timeline {
+    /// `(stream position, clock ns)` reports, oldest first.
     points: VecDeque<(u64, i64)>,
 }
 
@@ -74,6 +76,7 @@ impl Anchor {
 }
 
 impl Timeline {
+    /// Most reports kept for the fit.
     const KEEP: usize = 64;
     /// One report per 100 ms is kept, so the fit spans about six seconds.
     const MIN_GAP_NS: i64 = 100_000_000;
@@ -168,8 +171,11 @@ pub enum Correction {
 /// The follower's control loop.
 #[derive(Clone, Debug)]
 pub struct Follower {
+    /// Stream rate in frames per second (to turn a jump into frames).
     rate: f64,
+    /// Integral term of the controller, clamped to ±20 ms·s.
     integral: f64,
+    /// Smoothed error in seconds, once there is one.
     filtered: Option<f64>,
     /// Beyond this many seconds of error, jump instead of steering.
     pub jump_s: f64,
@@ -225,6 +231,7 @@ impl Follower {
 
 /// Variable-ratio resampler for interleaved PCM at ratios near 1.
 pub struct Resampler {
+    /// Interleaved channel count.
     channels: usize,
     /// Kernel, `PHASES + 1` rows of `TAPS`.
     kernel: Vec<f64>,
@@ -236,10 +243,14 @@ pub struct Resampler {
     consumed: f64,
 }
 
+/// Taps of the windowed-sinc interpolation kernel.
 const TAPS: usize = 48;
+/// Taps on either side of the interpolation point.
 const HALF: usize = TAPS / 2;
+/// Fractional positions the kernel is tabulated at (linearly interpolated in between).
 const PHASES: usize = 512;
 
+/// Modified Bessel function of the first kind, order 0 (for the Kaiser window).
 fn bessel_i0(x: f64) -> f64 {
     let (mut sum, mut term) = (1.0, 1.0);
     for k in 1..50 {
@@ -315,6 +326,7 @@ impl Resampler {
         self.trim();
     }
 
+    /// Drop input history the next output's kernel no longer reaches.
     fn trim(&mut self) {
         let base = self.t.floor() as usize;
         let drop = base

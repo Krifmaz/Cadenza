@@ -139,6 +139,8 @@ impl FilterDesign {
         )
     }
 
+    /// The stopband the design actually reaches: the fixed figure of the 3-term cosine
+    /// window, the requested one for adjustable windows.
     fn effective_stopband_db(&self) -> f64 {
         match self.window {
             Window::Cosine3 => COSINE3_ATTENUATION_DB,
@@ -224,6 +226,7 @@ impl FilterDesign {
     }
 }
 
+/// Greatest common divisor (Euclid), used to reduce a rate ratio to `L / M`.
 fn gcd(a: u32, b: u32) -> u32 {
     if b == 0 {
         a
@@ -435,6 +438,7 @@ pub fn response(
     }
 }
 
+/// Round `x` to `digits` decimal places (for stable labels and cache keys).
 fn round(x: f64, digits: i32) -> f64 {
     let s = 10f64.powi(digits);
     (x * s).round() / s

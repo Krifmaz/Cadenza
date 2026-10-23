@@ -150,16 +150,20 @@ pub enum PipelineError {
 /// One channel of the room-convolution stage: a [`BlockConvolver`] (CPU engine, or the
 /// CUDA engine when the backend has one) behind a small block adapter that gathers whole
 /// blocks from the stream and keeps the flush/truncate semantics of
-/// [`Convolver::push`] / [`Convolver::flush`].
+/// [`Convolver::push`](crate::convolution::Convolver::push) / [`Convolver::flush`](crate::convolution::Convolver::flush).
 struct ChannelConvolver {
+    /// The block engine (CPU, or GPU with CPU fallback).
     engine: Box<dyn BlockConvolver + Send>,
+    /// Engine block size in samples.
     block: usize,
     /// Input samples not yet forming a whole block.
     pending: Vec<f64>,
+    /// Output of one engine block (reused).
     out_block: Vec<f64>,
 }
 
 impl ChannelConvolver {
+    /// Wrap `engine`, which works in blocks of `block` samples.
     fn new(engine: Box<dyn BlockConvolver + Send>, block: usize) -> Self {
         Self {
             engine,
@@ -196,20 +200,26 @@ impl ChannelConvolver {
         self.reset();
     }
 
+    /// Drop pending input and clear the engine's history.
     fn reset(&mut self) {
         self.pending.clear();
         self.engine.reset();
     }
 }
 
+/// Room or headphone convolution, one engine per channel.
 struct ConvolutionStage {
+    /// One convolver per channel.
     convolvers: Vec<ChannelConvolver>,
+    /// De-interleaved input, one buffer per channel (reused).
     split: Vec<Vec<f64>>,
     /// `true` when at least one channel runs on the GPU engine.
     on_gpu: bool,
 }
 
 impl ConvolutionStage {
+    /// Build the stage for `spec`: load the impulse response, resample it to the stream rate
+    /// and create a CPU or GPU engine per channel.
     fn new(
         spec: &ConvolutionSpec,
         channels: usize,
@@ -255,10 +265,13 @@ impl ConvolutionStage {
         })
     }
 
+    /// The engines' block size (they all share one).
     fn block(&self) -> usize {
         self.convolvers[0].block
     }
 
+    /// Convolve interleaved input and return the interleaved output that is ready; with
+    /// `flush` every pending sample comes out too.
     fn run(&mut self, interleaved: &[f64], flush: bool) -> Vec<f64> {
         let ch = self.convolvers.len();
         let frames = interleaved.len() / ch;
@@ -296,6 +309,7 @@ impl ConvolutionStage {
         joined
     }
 
+    /// Clear every channel's history.
     fn reset(&mut self) {
         self.convolvers.iter_mut().for_each(ChannelConvolver::reset);
     }
@@ -303,10 +317,15 @@ impl ConvolutionStage {
 
 /// The running chain for one input format.
 pub struct Pipeline {
+    /// The input format this chain was built for.
     input: InputFormat,
+    /// The configuration this chain was built from.
     config: PipelineConfig,
+    /// Volume (gain and mute) at the head of the chain.
     volume: Volume,
+    /// Parametric EQ, if any band is active.
     eq: Option<Equalizer>,
+    /// Room / headphone convolution, if configured.
     convolution: Option<ConvolutionStage>,
     /// Crossfeed / HRTF (stereo only).
     headphone: Option<crate::headphone::HeadphoneStage>,
@@ -315,12 +334,17 @@ pub struct Pipeline {
     matrix: Option<MatrixStage>,
     /// Channel count after the matrix (= the input's without one).
     out_channels: usize,
+    /// Sample-rate converter, if the output rate differs from the input.
     resampler: Option<Resampler>,
+    /// Headroom gain, true-peak meter and soft clipper, if configured.
     headroom: Option<Headroom>,
     /// Present in DSD output mode: replaces the quantiser.
     dsd: Option<DsdStage>,
+    /// PCM output quantiser with dither and noise shaping.
     quantizer: Quantizer,
+    /// Output sample rate in Hz.
     output_rate: u32,
+    /// Working buffer the chain runs in (reused).
     scratch: Vec<f64>,
     /// Where the convolution engines run (CUDA or CPU), decided once per configuration.
     gpu: GpuBackend,
@@ -670,6 +694,8 @@ impl Pipeline {
         self.quantizer.reset();
     }
 
+    /// Run `pcm` through every stage and return the quantised device samples; `flush`
+    /// pushes out the filter tails at the end of a stream.
     fn run(&mut self, pcm: &[f64], flush: bool) -> Vec<i32> {
         self.scratch.clear();
         self.scratch.extend_from_slice(pcm);
@@ -716,6 +742,7 @@ impl Pipeline {
         }
     }
 
+    /// The label of the resampling filter in use (designer or catalogue).
     fn filter_label(&self) -> String {
         match &self.config.filter_design {
             Some(d) => d.label(),

@@ -53,12 +53,15 @@ pub struct Band {
     pub slope_db: u32,
 }
 
+/// Serde default for [`Band::q`]: a moderate bell width.
 fn default_q() -> f64 {
     1.0
 }
+/// Serde default for [`Band::enabled`]: bands are on unless the stored preset says otherwise.
 fn default_true() -> bool {
     true
 }
+/// Serde default for [`Band::slope_db`]: a single 12 dB/octave section.
 fn default_slope() -> u32 {
     12
 }
@@ -199,12 +202,14 @@ impl Coefficients {
 /// One biquad with per-channel state.
 #[derive(Clone, Debug)]
 struct Biquad {
+    /// The section's normalised coefficients (shared by every channel).
     c: Coefficients,
     /// `(z1, z2)` per channel.
     state: Vec<(f64, f64)>,
 }
 
 impl Biquad {
+    /// Run one sample `x` of channel `ch` through the section and return the output.
     #[inline]
     fn tick(&mut self, ch: usize, x: f64) -> f64 {
         let (z1, z2) = self.state[ch];
@@ -227,9 +232,13 @@ impl Biquad {
 /// A cascade of enabled bands for one stream format.
 #[derive(Clone, Debug)]
 pub struct Equalizer {
+    /// Stream sample rate in Hz the coefficients were designed for.
     rate: f64,
+    /// Interleaved channel count (one filter state per channel per stage).
     channels: usize,
+    /// Every configured band, enabled or not, capped at [`MAX_BANDS`].
     bands: Vec<Band>,
+    /// The biquads actually run, in order: enabled bands expanded into their sections.
     stages: Vec<Biquad>,
 }
 

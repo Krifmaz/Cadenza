@@ -16,15 +16,22 @@ use std::time::{Duration, Instant};
 /// How far ahead of now a new stream is scheduled to start: enough for every endpoint to
 /// fill its jitter buffer and device queue.
 const START_DELAY: Duration = Duration::from_millis(700);
+/// How often every member's clock is pinged while playing.
 const PING_EVERY: Duration = Duration::from_millis(200);
+/// How often the followers get an updated leader timeline.
 const SCHEDULE_EVERY: Duration = Duration::from_millis(250);
 
 /// See the module documentation.
 pub struct GroupOutput {
+    /// The endpoints; the first one is the clock leader.
     members: Vec<EndpointOutput>,
+    /// `endpoint://a+b+c` as configured, for logs and the status.
     label: String,
+    /// Our clock: every timestamp sent and measured is relative to it.
     epoch: Instant,
+    /// Format of the open stream, if any.
     format: Option<OutputFormat>,
+    /// The leader's fitted timeline (stream position against our clock).
     timeline: Timeline,
     /// The start schedule (our clock) of the current stream, once sent.
     start: Option<Anchor>,
@@ -32,8 +39,11 @@ pub struct GroupOutput {
     following: bool,
     /// The start schedule still describes the stream (no pause since).
     start_valid: bool,
+    /// When the members were last pinged.
     last_ping: Instant,
+    /// When the followers last got a schedule.
     last_schedule: Instant,
+    /// Id of the latest ping round.
     ping_id: u64,
 }
 
@@ -90,10 +100,12 @@ impl GroupOutput {
         })
     }
 
+    /// Nanoseconds on our clock.
     fn now_ns(&self) -> i64 {
         self.epoch.elapsed().as_nanos() as i64
     }
 
+    /// Send one clock ping to every member.
     fn ping_all(&mut self) {
         self.ping_id += 1;
         for m in &self.members {
@@ -122,6 +134,7 @@ impl GroupOutput {
         }
     }
 
+    /// Nominal nanoseconds per frame at the stream rate (48 kHz before a stream opens).
     fn nominal_ns(&self) -> f64 {
         1e9 / self.format.map_or(48000, |f| f.rate) as f64
     }

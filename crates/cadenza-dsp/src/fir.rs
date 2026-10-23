@@ -235,6 +235,8 @@ impl FirSpec {
     }
 }
 
+/// Inverse hyperbolic cosine, clamped to 0 below its domain (used by the Dolph–Chebyshev
+/// window).
 fn acosh(x: f64) -> f64 {
     if x < 1.0 {
         0.0
@@ -693,6 +695,7 @@ impl FilterKind {
         Self::new(Family::Sinc, phase, apodizing, taps)
     }
 
+    /// Short code for the phase and apodizing flag, used in cache file names.
     fn phase_token(&self) -> &'static str {
         match (self.phase, self.apodizing) {
             (Phase::Linear, false) => "l",
@@ -882,6 +885,7 @@ impl FilterKind {
     }
 }
 
+/// Greatest common divisor (Euclid), used to reduce a rate ratio to `L / M`.
 fn gcd(a: u32, b: u32) -> u32 {
     if b == 0 {
         a
@@ -913,6 +917,7 @@ pub fn taps_label(taps: usize) -> String {
     }
 }
 
+/// Parse a tap count with an optional binary suffix: `64k` is 65 536, `2m` is 2 097 152.
 fn parse_taps(s: &str) -> Option<usize> {
     if let Some(n) = s.strip_suffix('m') {
         n.parse::<usize>().ok().map(|n| n << 20)

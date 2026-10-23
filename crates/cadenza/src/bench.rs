@@ -102,6 +102,7 @@ impl BenchRow {
     }
 }
 
+/// The compute label for the CPU rows, with the available hardware threads.
 fn threads_label() -> String {
     format!(
         "CPU ({} threads)",
@@ -111,6 +112,7 @@ fn threads_label() -> String {
     )
 }
 
+/// One table row from a benchmark result.
 fn from_result(kind: &str, compute: String, detail: String, r: &BenchResult) -> BenchRow {
     BenchRow {
         kind: kind.into(),

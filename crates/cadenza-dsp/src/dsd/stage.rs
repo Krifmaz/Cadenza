@@ -25,21 +25,34 @@ pub fn short_stage_factor(rate: DsdRate) -> u32 {
 
 /// The running DSD output stage.
 pub struct DsdStage {
+    /// The configuration this stage was built from.
     config: DsdConfig,
     /// The modulator that actually runs (`config.modulator`, or its fallback above
     /// [`DsdModulator::max_rate`]).
     kind: DsdModulator,
+    /// Interleaved PCM channel count.
     channels: usize,
+    /// PCM rate at the stage input.
     pcm_rate: u32,
+    /// DSD bit rate at the output.
     dsd_rate: u32,
+    /// Linear gain applied before the modulators (headroom for their stable input range).
     gain: f64,
+    /// PCM upsampler to the modulator rate, when the input is below it.
     interpolator: Option<ShortInterpolator>,
+    /// One sigma-delta modulator per channel.
     modulators: Vec<SigmaDelta>,
+    /// The noise transfer function every modulator shares.
     ntf: Arc<Ntf>,
+    /// Packs the modulators' bits into device words (native or DoP).
     packer: Packer,
+    /// De-interleaved, gain-scaled input (reused).
     planar: Vec<Vec<f64>>,
+    /// Per-channel input at the modulator rate (reused).
     upsampled: Vec<Vec<f64>>,
+    /// Per-channel modulator output bytes (reused).
     bits: Vec<Vec<u8>>,
+    /// PCM frames pushed since the last reset.
     frames_in: u64,
 }
 

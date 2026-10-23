@@ -229,6 +229,7 @@ fn render(args: &cli::RenderArgs) -> i32 {
     }
 }
 
+/// Apply the command line's overrides on top of the loaded configuration.
 fn apply_overrides(config: &mut Config, o: &Overrides) {
     if o.bitperfect {
         config.dsp.bit_perfect = true;
@@ -343,6 +344,7 @@ fn parse_rate(s: &str) -> Option<u32> {
     (hz > 0.0).then_some(hz.round() as u32)
 }
 
+/// `cadenza bench`: time the configured (or given) filters and print the table.
 #[allow(clippy::too_many_arguments)]
 fn bench(
     config: &Config,
@@ -406,6 +408,7 @@ fn bench(
     Ok(())
 }
 
+/// `cadenza devices`: list every output device and what it supports.
 fn devices() {
     println!(
         "{:<9} {:<40} {:<32} RATES / BITS · CHANNELS · DSD · MODE",
@@ -455,6 +458,8 @@ fn devices() {
     );
 }
 
+/// `cadenza serve`: run the engine, the web UI and API, and the configured receivers until
+/// interrupted.
 fn serve(config: Config, path: std::path::PathBuf) -> anyhow::Result<()> {
     let runtime = tokio::runtime::Runtime::new()?;
     // The engine and the configured receivers, for the life of the process.

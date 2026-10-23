@@ -119,6 +119,7 @@ struct DstLayout {
     frames: u64,
     /// First sub-chunk after `FRTE`, and the end of the `DST ` chunk.
     first: u64,
+    /// End of the `DST ` chunk.
     end: u64,
 }
 
@@ -171,41 +172,52 @@ pub enum DsdDecodeError {
     Dsp(#[from] cadenza_dsp::dsd::DsdError),
 }
 
+/// A format error with `msg`.
 fn bad(msg: impl Into<String>) -> DsdDecodeError {
     DsdDecodeError::Format(msg.into())
 }
 
+/// Read exactly `n` bytes into a new buffer.
 fn read_exact<R: Read>(r: &mut R, n: usize) -> io::Result<Vec<u8>> {
     let mut v = vec![0u8; n];
     r.read_exact(&mut v)?;
     Ok(v)
 }
+/// Little-endian `u32` at the start of `b`.
 fn u32le(b: &[u8]) -> u32 {
     u32::from_le_bytes(b[..4].try_into().unwrap())
 }
+/// Little-endian `u64` at the start of `b`.
 fn u64le(b: &[u8]) -> u64 {
     u64::from_le_bytes(b[..8].try_into().unwrap())
 }
+/// Big-endian `u16` at the start of `b`.
 fn u16be(b: &[u8]) -> u16 {
     u16::from_be_bytes(b[..2].try_into().unwrap())
 }
+/// Big-endian `u32` at the start of `b`.
 fn u32be(b: &[u8]) -> u32 {
     u32::from_be_bytes(b[..4].try_into().unwrap())
 }
+/// Big-endian `u64` at the start of `b`.
 fn u64be(b: &[u8]) -> u64 {
     u64::from_be_bytes(b[..8].try_into().unwrap())
 }
 
 /// A raw 1-bit reader over any seekable byte source.
 pub struct DsdReader<R: Read + Seek> {
+    /// The byte source (file, HTTP stream, disc image).
     src: R,
+    /// Format, rate, channels and layout parsed from the header.
     info: DsdInfo,
     /// Next frame (bit index per channel) to deliver; always a multiple of 8.
     pos: u64,
     /// Where the source's cursor is (seeks are only issued when it has to move, because
     /// an HTTP source reopens its connection on every seek).
     file_pos: u64,
+    /// DST decoding state, for DST-compressed DSDIFF files.
     dst: Option<Box<DstState>>,
+    /// SACD track state, for disc images.
     sacd: Option<Box<SacdState>>,
     /// First frame of the range played (a CUE track); `pos` counts from here.
     origin: u64,
@@ -213,14 +225,17 @@ pub struct DsdReader<R: Read + Seek> {
 
 /// An SACD track being read.
 struct SacdState {
+    /// Reads and decodes the track's frames from the image.
     track: super::sacd::TrackReader,
     /// The frame in `frame`, if any.
     current: Option<u32>,
+    /// The current frame's bytes (byte-interleaved).
     frame: Vec<u8>,
 }
 
 /// DST decoding state: the frames found so far and the last one decoded.
 struct DstState {
+    /// The DST frame decoder.
     decoder: super::dst::DstDecoder,
     /// `(data offset, length)` of the `DSTF` chunks found so far, in order.
     found: Vec<(u64, u32)>,
@@ -233,7 +248,9 @@ struct DstState {
     index_at_data: Option<bool>,
     /// The frame in `frame` (byte-interleaved), if any.
     current: Option<u64>,
+    /// The decoded frame `current` (byte-interleaved).
     frame: Vec<u8>,
+    /// Buffer for the compressed frame being read (reused).
     raw: Vec<u8>,
 }
 
@@ -335,6 +352,7 @@ impl<R: Read + Seek> DsdReader<R> {
         self.pos
     }
 
+    /// Seek the source to `offset` unless it is already there.
     fn ensure_at(&mut self, offset: u64) -> io::Result<()> {
         if self.file_pos != offset {
             self.src.seek(SeekFrom::Start(offset))?;
@@ -343,6 +361,7 @@ impl<R: Read + Seek> DsdReader<R> {
         Ok(())
     }
 
+    /// Read up to `buf.len()` bytes at `offset`; returns how many were read (short at EOF).
     fn read_at(&mut self, offset: u64, buf: &mut [u8]) -> io::Result<usize> {
         self.ensure_at(offset)?;
         let got = read_fully(&mut self.src, buf)?;
@@ -424,6 +443,7 @@ impl<R: Read + Seek> DsdReader<R> {
         Ok(true)
     }
 
+    /// Fill `planar` with `want` bytes per channel from the SACD track's frames.
     fn read_sacd(&mut self, want: usize, planar: &mut [Vec<u8>]) -> Result<(), DsdDecodeError> {
         let ch = self.info.channels as usize;
         let frame_bytes = super::dst::bits_per_frame(self.info.rate) / 8;
@@ -457,6 +477,7 @@ impl<R: Read + Seek> DsdReader<R> {
         Ok(())
     }
 
+    /// Fill `planar` with `want` bytes per channel, decoding DST frames as needed.
     fn read_dst(&mut self, want: usize, planar: &mut [Vec<u8>]) -> Result<(), DsdDecodeError> {
         let ch = self.info.channels as usize;
         let frame_bytes = super::dst::bits_per_frame(self.info.rate) / 8;
@@ -562,6 +583,7 @@ impl<R: Read + Seek> DsdReader<R> {
     }
 }
 
+/// Read until `buf` is full or the source ends; returns the bytes read.
 fn read_fully<R: Read>(r: &mut R, buf: &mut [u8]) -> io::Result<usize> {
     let mut got = 0;
     while got < buf.len() {
@@ -575,6 +597,7 @@ fn read_fully<R: Read>(r: &mut R, buf: &mut [u8]) -> io::Result<usize> {
     Ok(got)
 }
 
+/// Parse a DSF header (after the `DSD ` magic): format chunk, data chunk, ID3 tags.
 fn parse_dsf<R: Read + Seek>(src: &mut R) -> Result<DsdInfo, DsdDecodeError> {
     // "DSD " already consumed.
     let head = read_exact(src, 24)?;
@@ -637,6 +660,8 @@ fn parse_dsf<R: Read + Seek>(src: &mut R) -> Result<DsdInfo, DsdDecodeError> {
     })
 }
 
+/// Parse a DSDIFF header (after the `FRM8` magic): properties, sound data or DST chunk,
+/// tags; a `DSTI` index found on the way goes into `index`.
 fn parse_dff<R: Read + Seek>(
     src: &mut R,
     index: &mut Option<Vec<(u64, u32)>>,
@@ -842,10 +867,12 @@ fn read_id3<R: Read + Seek>(src: &mut R, at: u64) -> Result<Tags, DsdDecodeError
     Ok(tags)
 }
 
+/// An ID3v2 "syncsafe" integer (7 bits per byte).
 fn syncsafe(b: &[u8]) -> u32 {
     ((b[0] as u32) << 21) | ((b[1] as u32) << 14) | ((b[2] as u32) << 7) | b[3] as u32
 }
 
+/// Decode an ID3v2 text frame body: an encoding byte, then the text in that encoding.
 fn decode_id3_text(b: &[u8]) -> String {
     let (enc, data) = (b[0], &b[1..]);
     let s = match enc {
@@ -877,9 +904,13 @@ fn decode_id3_text(b: &[u8]) -> String {
 
 /// A decoder for one DSD track with the same shape as [`super::Decoder`].
 pub struct DsdDecoder {
+    /// Raw 1-bit reader of the track.
     reader: DsdReader<Box<dyn ReadSeek>>,
+    /// DSD → PCM decimator.
     converter: DsdToPcm,
+    /// PCM output rate.
     pcm_rate: u32,
+    /// The reader reached the end of the track.
     finished: bool,
     /// Frames pushed into the converter since the last reset.
     pushed: u64,
@@ -926,6 +957,7 @@ impl DsdDecoder {
         Self::from_dsd_reader(DsdReader::new(src)?)
     }
 
+    /// Wrap a reader with a converter to its natural PCM rate.
     fn from_dsd_reader(reader: DsdReader<Box<dyn ReadSeek>>) -> Result<Self, DsdDecodeError> {
         let pcm_rate = DsdToPcm::natural_pcm_rate(reader.info().rate);
         let converter = DsdToPcm::new(
@@ -1141,6 +1173,7 @@ pub fn write_dsf(
     f.flush()
 }
 
+/// An ID3v2.4 tag with title, artist and album (for [`write_dsf`]).
 fn build_id3(tags: &Tags) -> Vec<u8> {
     let mut frames = Vec::new();
     for (id, v) in [
@@ -1220,6 +1253,7 @@ pub fn write_dff_dst(
     })
 }
 
+/// One DSDIFF chunk: id, big-endian `u64` length, body.
 fn dff_chunk(id: &[u8; 4], body: &[u8]) -> Vec<u8> {
     let mut v = id.to_vec();
     v.extend_from_slice(&(body.len() as u64).to_be_bytes());

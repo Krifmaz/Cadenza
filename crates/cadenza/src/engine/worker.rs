@@ -24,7 +24,9 @@ use std::time::{Duration, Instant};
 /// Bit-perfect DSD pass-through: the source's 1-bit stream packed for the device, nothing
 /// else in between.
 struct Passthrough {
+    /// Packs the planar DSD bytes into device words (DoP or native).
     packer: Packer,
+    /// The signal path reported for this chain.
     path: SignalPath,
 }
 
@@ -49,6 +51,7 @@ impl Chain {
         }
     }
 
+    /// Run decoded PCM through the pipeline (a pass-through chain takes no PCM).
     fn process_pcm(&mut self, pcm: &[f64]) -> Vec<i32> {
         match self {
             Chain::Pipeline(p) => p.process(pcm),
@@ -56,6 +59,7 @@ impl Chain {
         }
     }
 
+    /// Pack DSD bits for a pass-through output (a pipeline chain takes no DSD).
     fn process_dsd(&mut self, planar: &[Vec<u8>]) -> Vec<i32> {
         match self {
             Chain::Passthrough(p) => {
@@ -68,6 +72,8 @@ impl Chain {
         }
     }
 
+    /// Push out what the chain still holds at the end of the stream (filter tails, partial
+    /// words).
     fn flush(&mut self) -> Vec<i32> {
         match self {
             Chain::Pipeline(p) => p.flush(),
@@ -80,6 +86,7 @@ impl Chain {
         }
     }
 
+    /// Clear the chain's history (after a seek or a stop).
     fn reset(&mut self) {
         match self {
             Chain::Pipeline(p) => p.reset(),
@@ -87,12 +94,14 @@ impl Chain {
         }
     }
 
+    /// Apply a new volume without rebuilding the chain.
     fn set_volume(&mut self, v: Volume) {
         if let Chain::Pipeline(p) = self {
             p.set_volume(v);
         }
     }
 
+    /// Processing latency of the chain in seconds.
     fn latency_seconds(&self) -> f64 {
         match self {
             Chain::Pipeline(p) => p.latency_seconds(),
@@ -100,6 +109,7 @@ impl Chain {
         }
     }
 
+    /// The current signal path for the status.
     fn signal_path(&self) -> SignalPath {
         match self {
             Chain::Pipeline(p) => p.signal_path(),
@@ -107,6 +117,7 @@ impl Chain {
         }
     }
 
+    /// `true` for DSD pass-through.
     fn is_passthrough(&self) -> bool {
         matches!(self, Chain::Passthrough(_))
     }
@@ -117,46 +128,74 @@ const PREFETCH_SECONDS: f64 = 10.0;
 
 /// One decoded chunk.
 enum Chunk {
+    /// Interleaved PCM in `[-1, 1]`.
     Pcm(Vec<f64>),
+    /// Planar DSD bytes, one buffer per channel.
     Dsd(Vec<Vec<u8>>),
 }
 
+/// State of the playback thread: the queue, the decoder, the chain and the device.
 struct Worker {
+    /// Commands from the engine handle.
     rx: Receiver<Command>,
+    /// Status and event channels shared with the handle.
     shared: Arc<Shared>,
+    /// Current settings.
     settings: Settings,
+    /// Where designed filter coefficients are cached.
     cache: CoefficientCache,
+    /// Pace the null output in real time (otherwise it runs as fast as it can).
     realtime: bool,
+    /// Saves changed settings, when the host gave a way to.
     persist: Option<super::PersistFn>,
 
+    /// The play queue.
     queue: Vec<Track>,
+    /// Index in `queue` of the current track.
     index: Option<usize>,
+    /// Transport state.
     state: PlayState,
+    /// Volume as applied to the pipeline.
     volume: Volume,
 
+    /// Decoder of the current track.
     decoder: Option<TrackDecoder>,
     /// `(rate, bits, channels, dsd)` of the current track, and its label.
     info: Option<TrackInfo>,
+    /// The next track's decoder, opened ahead for gapless playback: `(queue index, decoder)`.
     prefetched: Option<(usize, TrackDecoder)>,
+    /// What the decoded audio runs through.
     chain: Option<Chain>,
+    /// The open device, if any.
     output: Option<Box<dyn Output>>,
+    /// Name of the open device (for the status).
     output_name: String,
+    /// Format the device was opened with.
     output_format: Option<OutputFormat>,
+    /// Rates the device reports it can open.
     output_rates: Vec<u32>,
+    /// DSD formats the device reports it can take.
     output_dsd: DsdCaps,
+    /// Whether the device is held exclusively.
     output_exclusive: bool,
     /// Where to pick up after the device went away mid-track (play resumes there).
     resume_at: Option<f64>,
     /// `(path, impulse)` so the file is only parsed once.
     convolution: Option<(String, Arc<ConvolutionSpec>)>,
 
+    /// Last playback error, shown in the status.
     error: Option<String>,
+    /// Tracks that finished or were stopped (lets clients tell a new run from the old one).
     runs_finished: u64,
     /// Seconds of the current track actually played (for play reporting).
     played: f64,
+    /// Decoder position at the previous chunk (to count `played`).
     last_pos: f64,
+    /// Whether the current track has been reported as played.
     play_reported: bool,
+    /// When the status was last published.
     last_publish: Instant,
+    /// The status changed since it was last published.
     dirty: bool,
     /// Settings changed by a volume drag, saved once the dragging settles.
     save_at: Option<Instant>,
@@ -165,6 +204,9 @@ struct Worker {
     no_drain: bool,
 }
 
+/// The playback thread's body: handle commands (all that are waiting at once), pump audio
+/// while playing, publish the status when it changed or every 500 ms, and close the
+/// device on shutdown.
 pub(super) fn run(
     rx: Receiver<Command>,
     shared: Arc<Shared>,
@@ -265,6 +307,7 @@ pub(super) fn run(
 impl Worker {
     // ----- commands -------------------------------------------------------------------
 
+    /// Apply one command from the handle.
     fn handle(&mut self, cmd: Command) {
         log::debug!("command {cmd:?}");
         self.dirty = true;
@@ -436,6 +479,8 @@ impl Worker {
         }
     }
 
+    /// Swap in new settings: update in place what can be (volume, EQ), and rebuild the chain
+    /// or reopen the device when the change needs it.
     fn update_settings(&mut self, new: Settings) {
         let old = self.settings.clone();
         self.settings = new;
@@ -496,6 +541,7 @@ impl Worker {
         self.persist_settings();
     }
 
+    /// Hand the settings to the host's persistence callback.
     fn persist_settings(&self) {
         if let Some(p) = &self.persist {
             p(&self.settings);
@@ -504,6 +550,8 @@ impl Worker {
 
     // ----- transport ------------------------------------------------------------------
 
+    /// Start queue entry `i` at `position` seconds: open its decoder (or take the prefetched
+    /// one), build the chain and start playing.
     fn start_index(&mut self, i: usize, position: f64) {
         // Starting from silence: open the device afresh, so one that was unplugged and
         // plugged in again (or whose driver changed) is found. Track changes keep it.
@@ -562,6 +610,7 @@ impl Worker {
         }
     }
 
+    /// Unpause the device and continue playing.
     fn resume(&mut self) {
         if let Some(o) = &mut self.output {
             if let Err(e) = o.pause(false) {
@@ -571,6 +620,7 @@ impl Worker {
         self.state = PlayState::Playing;
     }
 
+    /// Stop: drop the decoders and the chain; with `drain` the device plays out what it holds.
     fn stop_playback(&mut self, drain: bool) {
         self.decoder = None;
         self.info = None;
@@ -598,6 +648,7 @@ impl Worker {
         self.dirty = true;
     }
 
+    /// Jump `delta` entries in the queue (stays put past either end).
     fn skip(&mut self, delta: i64) {
         let Some(cur) = self.index else { return };
         let target = cur as i64 + delta;
@@ -616,6 +667,7 @@ impl Worker {
         }
     }
 
+    /// Seek the current track to `t` seconds and clear the chain's history.
     fn seek(&mut self, t: f64) {
         let Some(d) = &mut self.decoder else { return };
         match d.seek(t) {
@@ -634,6 +686,7 @@ impl Worker {
 
     // ----- the chain ------------------------------------------------------------------
 
+    /// Open the configured device if none is open; the error is the reason it failed.
     fn ensure_output(&mut self) -> Result<(), String> {
         if self.output.is_some() {
             return Ok(());
@@ -700,6 +753,7 @@ impl Worker {
         (got_rate == rate).then_some((rate, packing))
     }
 
+    /// The configured convolution impulse, parsed once per path; `None` when off or unreadable.
     fn load_convolution(&mut self) -> Option<Arc<ConvolutionSpec>> {
         let path = self.settings.dsp.convolution.trim().to_string();
         if path.is_empty() {
@@ -959,6 +1013,8 @@ impl Worker {
         Ok(())
     }
 
+    /// Write output frames to the device. If the device went away, playback stops, the
+    /// device is let go, and the next play picks up from the current position.
     fn write_out(&mut self, frames: &[i32]) {
         if frames.is_empty() {
             return;
@@ -988,6 +1044,8 @@ impl Worker {
 
     // ----- playback -------------------------------------------------------------------
 
+    /// Decode one chunk, run it through the chain and write it out; at the end of a track,
+    /// move on to the next one.
     fn pump(&mut self) {
         let Some(decoder) = &mut self.decoder else {
             self.state = PlayState::Stopped;
@@ -1055,6 +1113,7 @@ impl Worker {
         }
     }
 
+    /// Open the next queue entry's decoder ahead of time for gapless playback.
     fn maybe_prefetch(&mut self) {
         let Some(i) = self.index else { return };
         if self.prefetched.is_some() || i + 1 >= self.queue.len() {
@@ -1078,6 +1137,7 @@ impl Worker {
         }
     }
 
+    /// The prefetched decoder, if it is for queue entry `i`.
     fn take_prefetched(&mut self, i: usize) -> Option<TrackDecoder> {
         match self.prefetched.take() {
             Some((j, d)) if j == i => Some(d),
@@ -1147,6 +1207,8 @@ impl Worker {
 
     // ----- status ---------------------------------------------------------------------
 
+    /// Playback position in seconds as heard: the decoder position minus the chain latency
+    /// and what the device still has queued.
     fn position(&self) -> f64 {
         let Some(d) = &self.decoder else { return 0.0 };
         let mut pos = d.position_seconds();
@@ -1159,16 +1221,19 @@ impl Worker {
         pos.max(0.0)
     }
 
+    /// Record and log a playback error.
     fn fail(&mut self, msg: String) {
         log::error!("{msg}");
         self.error = Some(msg);
         self.dirty = true;
     }
 
+    /// Send an event to the handle's subscribers (dropped when nobody listens).
     fn emit(&self, e: Event) {
         let _ = self.shared.events.send(e);
     }
 
+    /// Snapshot the state into a [`Status`], store it for polling and broadcast it.
     fn publish(&mut self) {
         self.dirty = false;
         self.last_publish = Instant::now();

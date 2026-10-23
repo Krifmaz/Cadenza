@@ -11,9 +11,13 @@ use std::sync::{Arc, Mutex};
 
 /// A running engine plus, when connected, its Encore link.
 pub struct EmbeddedPlayer {
+    /// Directory holding `config.toml` and the caches.
     dir: PathBuf,
+    /// Name the player registers with in Encore.
     device_name: String,
+    /// The playback engine.
     engine: Engine,
+    /// The Encore connection, when configured.
     link: Mutex<Option<Arc<EncoreLink>>>,
 }
 
@@ -54,6 +58,7 @@ impl EmbeddedPlayer {
         })
     }
 
+    /// `config.toml` inside `dir`.
     fn config_path_in(dir: &Path) -> PathBuf {
         dir.join("config.toml")
     }

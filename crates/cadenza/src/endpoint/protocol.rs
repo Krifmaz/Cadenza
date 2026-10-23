@@ -158,34 +158,53 @@ pub enum Message {
     Schedule(Schedule),
 }
 
+/// Message type byte of [`Message::Hello`].
 const T_HELLO: u8 = 0x01;
+/// Message type byte of [`Message::Caps`].
 const T_CAPS: u8 = 0x02;
+/// Message type byte of [`Message::Open`].
 const T_OPEN: u8 = 0x03;
+/// Message type byte of [`Message::Opened`].
 const T_OPENED: u8 = 0x04;
+/// Message type byte of [`Message::Frames`].
 const T_FRAMES: u8 = 0x05;
+/// Message type byte of [`Message::Ack`].
 const T_ACK: u8 = 0x06;
+/// Message type byte of [`Message::Pause`].
 const T_PAUSE: u8 = 0x07;
+/// Message type byte of [`Message::Discard`].
 const T_DISCARD: u8 = 0x08;
+/// Message type byte of [`Message::Drain`].
 const T_DRAIN: u8 = 0x09;
+/// Message type byte of [`Message::Drained`].
 const T_DRAINED: u8 = 0x0A;
+/// Message type byte of [`Message::Close`].
 const T_CLOSE: u8 = 0x0B;
+/// Message type byte of [`Message::Error`].
 const T_ERROR: u8 = 0x0C;
+/// Message type byte of [`Message::Sync`].
 const T_SYNC: u8 = 0x0D;
+/// Message type byte of [`Message::SyncReply`].
 const T_SYNC_REPLY: u8 = 0x0E;
+/// Message type byte of [`Message::Schedule`].
 const T_SCHEDULE: u8 = 0x0F;
 
+/// An `InvalidData` error for a malformed message.
 fn bad(msg: impl Into<String>) -> io::Error {
     io::Error::new(io::ErrorKind::InvalidData, msg.into())
 }
 
+/// Serialise a JSON payload.
 fn json<T: Serialize>(v: &T) -> io::Result<Vec<u8>> {
     serde_json::to_vec(v).map_err(|e| bad(e.to_string()))
 }
 
+/// Parse a JSON payload.
 fn from_json<T: for<'de> Deserialize<'de>>(b: &[u8]) -> io::Result<T> {
     serde_json::from_slice(b).map_err(|e| bad(e.to_string()))
 }
 
+/// The little-endian `u64` at byte `at` of a payload.
 fn u64_at(b: &[u8], at: usize) -> io::Result<u64> {
     b.get(at..at + 8)
         .map(|s| u64::from_le_bytes(s.try_into().unwrap()))

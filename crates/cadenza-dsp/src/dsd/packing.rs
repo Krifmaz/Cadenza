@@ -64,10 +64,15 @@ pub fn native_word(bytes: [u8; 4]) -> i32 {
 /// Streaming packer: planar bytes in, device words out.
 #[derive(Clone, Debug)]
 pub struct Packer {
+    /// How DSD bytes are laid out in device words.
     packing: DsdPacking,
+    /// Interleaved channel count (at least 1).
     channels: usize,
+    /// Index into `DOP_MARKERS` of the next DoP word's marker (alternates every frame).
     marker: usize,
+    /// Per-channel DSD bytes not yet packed into a whole word.
     pending: Vec<Vec<u8>>,
+    /// Device frames written so far.
     frames: u64,
 }
 
