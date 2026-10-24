@@ -287,6 +287,9 @@ pub fn heartbeat_state_as(client: &Client, s: &Status, embedded: bool) -> Value 
         "position": s.position,
         "duration": s.duration,
         "volume": s.volume_linear,
+        // the computer's own output volume (Encore's "Device volume"); null when its mixer
+        // cannot be reached, and Encore then leaves that slider out
+        "system_volume": crate::os_volume::get(),
         "index": s.index,
         "queue": s.queue.iter().map(slim_track).collect::<Vec<_>>(),
         "signal": {

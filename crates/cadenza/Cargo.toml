@@ -14,7 +14,7 @@ name = "cadenza"
 path = "src/main.rs"
 
 [features]
-default = ["cpal"]
+default = ["cpal", "os-volume"]
 # Shared-mode output through the OS mixer on every platform.
 cpal = ["dep:cpal"]
 # Direct `hw:` ALSA devices (Linux): exclusive, exact rate and format.
@@ -32,6 +32,9 @@ pipewire = ["dep:pipewire"]
 loopback = ["dep:windows", "dep:windows-core"]
 # System-wide input on macOS 14.2+: Core Audio process taps (one app, or all but Cadenza).
 tap = ["dep:objc2", "dep:objc2-foundation", "dep:objc2-core-foundation", "dep:objc2-core-audio", "dep:objc2-core-audio-types", "dep:libc"]
+# The system output volume on Windows (`os_volume`: Encore's "Device volume"); Linux and
+# macOS reach their mixers without extra crates, so there it changes nothing.
+os-volume = ["dep:windows", "dep:windows-core"]
 # CUDA offload in cadenza-dsp (NVIDIA driver >= 525 at run time, no toolkit to build).
 cuda = ["cadenza-dsp/cuda"]
 # Portable GPU offload in cadenza-dsp: Vulkan / Metal / DX12 (AMD, Intel, Apple, NVIDIA).
@@ -76,7 +79,7 @@ coreaudio-sys = { version = "0.2", optional = true }
 
 [target.'cfg(windows)'.dependencies]
 windows-core = { version = "0.62", optional = true }
-windows = { version = "0.62", optional = true, features = ["Win32_Foundation", "Win32_Media_Audio", "Win32_System_Com", "Win32_System_Com_StructuredStorage", "Win32_System_Variant", "Win32_System_Threading", "Win32_System_Diagnostics_ToolHelp", "Win32_Security"] }
+windows = { version = "0.62", optional = true, features = ["Win32_Foundation", "Win32_Media_Audio", "Win32_Media_Audio_Endpoints", "Win32_System_Com", "Win32_System_Com_StructuredStorage", "Win32_System_Variant", "Win32_System_Threading", "Win32_System_Diagnostics_ToolHelp", "Win32_Security"] }
 windows-sys = { version = "0.61", optional = true, features = ["Win32_Foundation", "Win32_System_Com", "Win32_System_Registry", "Win32_UI_WindowsAndMessaging"] }
 wasapi = { version = "0.26", optional = true }
 

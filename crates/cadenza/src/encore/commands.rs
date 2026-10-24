@@ -98,6 +98,15 @@ pub fn run(client: &Client, engine: &Engine, cmd: &Value) {
         }
         "enqueue" => engine.send(Command::Enqueue(tracks(client, cmd))),
         "play_next" => engine.send(Command::PlayNext(tracks(client, cmd))),
+        // the computer's own output volume, 0..1 (os_volume); the engine's stays as it is
+        "system_volume" => match value.and_then(as_f64) {
+            Some(v) => {
+                if let Err(e) = crate::os_volume::set(v) {
+                    log::warn!("Encore: {e}");
+                }
+            }
+            None => log::warn!("Encore: system_volume needs a numeric value"),
+        },
         "engine" => {
             if let Some(set) = cmd.get("set").and_then(Value::as_object) {
                 apply_engine_settings(engine, set);

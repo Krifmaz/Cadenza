@@ -13,6 +13,7 @@ pub mod encore;
 pub mod endpoint;
 pub mod engine;
 pub mod limit;
+pub mod os_volume;
 pub mod output;
 pub mod render;
 pub mod room;
