@@ -14,7 +14,17 @@
 //! driver documents (`xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx`) and Cadenza probes the
 //! endpoint with it; when the driver accepts it, the device lists `native dsd_u32_le`
 //! (Windows is little-endian, so the words are written as `DSD_U32_LE` bytes).
+//!
+//! **Format negotiation.** Drivers differ in the containers they take (see
+//! [`super::wasapi_formats`]): PCM is opened with the first layout of
+//! [`exclusive_candidates`] the driver accepts, and [`Output::open`] reports the bit
+//! depth actually used so the engine produces matching words. When exclusive mode is
+//! refused outright, PCM falls back to an event-driven *shared* stream of 32-bit float
+//! with `AUTOCONVERTPCM`, so Windows resamples and mixes it like any other app: not
+//! bit-perfect, but the track plays instead of failing with "format not supported".
+//! DSD never falls back (the mixer would turn DoP into noise).
 
+use super::wasapi_formats::{encode, exclusive_candidates, SampleLayout};
 use super::{DeviceInfo, DsdCaps, Encoding, Output, OutputError, OutputFormat, STANDARD_RATES};
 use cadenza_dsp::dsd::packing::words_to_bytes;
 use cadenza_dsp::dsd::{DsdPacking, DsdRate, NativeFormat};
@@ -37,16 +47,27 @@ pub struct WasapiOutput {
     native: bool,
 }
 
+/// An initialised WASAPI render stream and the bytes waiting to go into it.
 struct Stream {
+    /// The audio client the stream was initialised on.
     client: AudioClient,
+    /// Hands out the device buffer to fill.
     render: AudioRenderClient,
+    /// Signalled by the device whenever buffer space frees up.
     event: Handle,
-    wave: WaveFormat,
-    /// Frames per period (= the exclusive-mode buffer size).
+    /// How each sample is laid out in the device buffer.
+    layout: SampleLayout,
+    /// `true` for the shared-mode fallback (Windows mixer), `false` for exclusive.
+    shared: bool,
+    /// Exclusive: frames per period (= the buffer size). Shared: the whole buffer size.
     period_frames: usize,
+    /// Bytes per interleaved frame in `layout`.
     bytes_per_frame: usize,
+    /// Encoded bytes not yet handed to the device.
     pending: VecDeque<u8>,
+    /// The device clock is running (the buffer was primed once).
     started: bool,
+    /// Held by [`Output::pause`].
     paused: bool,
 }
 
@@ -94,18 +115,18 @@ fn dsd_guid() -> Option<GUID> {
         .and_then(|s| parse_guid(&s))
 }
 
-/// 16-bit samples travel in 16-bit words; 24-bit in 32-bit words with 24 valid bits.
-/// DoP is 24-bit PCM; native DSD is 32-bit words with the driver's subformat GUID.
-fn wave_format(format: OutputFormat) -> Option<WaveFormat> {
-    let (store, valid) = match format.bits {
-        16 => (16, 16),
-        24 => (32, 24),
-        _ => (32, 32),
+/// The wave format for `format` in `layout`: integer layouts as given, float as 32-bit
+/// IEEE. DoP is 24-bit PCM; native DSD is 32-bit words with the driver's subformat GUID
+/// (`None` when no GUID is configured).
+fn wave_format(format: OutputFormat, layout: SampleLayout) -> Option<WaveFormat> {
+    let (store, valid, kind) = match layout {
+        SampleLayout::Int { store, valid } => (store, valid, SampleType::Int),
+        SampleLayout::Float32 => (32, 32, SampleType::Float),
     };
     let mut wave = WaveFormat::new(
-        store,
-        valid,
-        &SampleType::Int,
+        store as usize,
+        valid as usize,
+        &kind,
         format.rate as usize,
         format.channels as usize,
         None,
@@ -120,8 +141,132 @@ fn wave_format(format: OutputFormat) -> Option<WaveFormat> {
     Some(wave)
 }
 
+/// The exclusive-mode layouts to try for `format`: every container of its bit depth for
+/// PCM (24-bit: 32-bit words first, then packed), the one fixed layout for DSD.
+fn layouts_for(format: OutputFormat) -> Vec<SampleLayout> {
+    if format.is_dsd() {
+        return vec![SampleLayout::int_for_bits(format.bits)];
+    }
+    exclusive_candidates(format.bits)
+        .into_iter()
+        .filter(|l| l.valid_bits() == Some(format.bits))
+        .collect()
+}
+
+/// Whether the endpoint takes `format` in exclusive mode in any container of its depth.
 fn client_supports(client: &AudioClient, format: OutputFormat) -> bool {
-    wave_format(format).is_some_and(|w| client.is_supported_exclusive_with_quirks(&w).is_ok())
+    layouts_for(format).into_iter().any(|l| {
+        wave_format(format, l)
+            .is_some_and(|w| client.is_supported_exclusive_with_quirks(&w).is_ok())
+    })
+}
+
+/// Open `format` in exclusive mode in `layout`: `None` when the driver refuses the
+/// format, `Some(Err)` when it accepts it but initialising the stream fails (device in
+/// use, exclusive mode disabled …).
+fn open_exclusive(
+    device: &Device,
+    format: OutputFormat,
+    layout: SampleLayout,
+) -> Option<Result<Stream, OutputError>> {
+    // A client whose Initialize failed cannot be reused, so every attempt gets a new one.
+    let mut client = device.get_iaudioclient().map_err(err).ok()?;
+    let wanted = wave_format(format, layout)?;
+    let wave = client.is_supported_exclusive_with_quirks(&wanted).ok()?;
+    Some((|| {
+        // Three default periods (~30 ms) keeps USB DACs happy; HDA devices want 128-byte
+        // alignment.
+        let (default_period, _min) = client.get_device_period().map_err(err)?;
+        let period = client
+            .calculate_aligned_period_near(3 * default_period, Some(128), &wave)
+            .map_err(err)?;
+        client
+            .initialize_client(
+                &wave,
+                &Direction::Render,
+                &StreamMode::EventsExclusive { period_hns: period },
+            )
+            .map_err(|e| OutputError::Backend(format!("initialize exclusive stream: {e}")))?;
+        finish_stream(client, &wave, layout, false)
+    })())
+}
+
+/// Open `format` as a shared-mode float stream the Windows mixer converts
+/// (`AUTOCONVERTPCM`: any rate and channel count the engine sends is resampled to the
+/// mix format), for endpoints where exclusive mode is not available.
+fn open_shared(device: &Device, format: OutputFormat) -> Result<Stream, OutputError> {
+    let mut client = device.get_iaudioclient().map_err(err)?;
+    let layout = SampleLayout::Float32;
+    let wave = wave_format(format, layout)
+        .ok_or_else(|| OutputError::Backend("no shared wave format".into()))?;
+    let (default_period, _min) = client.get_device_period().map_err(err)?;
+    client
+        .initialize_client(
+            &wave,
+            &Direction::Render,
+            &StreamMode::EventsShared {
+                autoconvert: true,
+                // Ten default periods (~100 ms) of headroom against scheduling hiccups.
+                buffer_duration_hns: 10 * default_period,
+            },
+        )
+        .map_err(|e| OutputError::Backend(format!("initialize shared stream: {e}")))?;
+    finish_stream(client, &wave, layout, true)
+}
+
+/// Fetch the event, render client and buffer size of an initialised `client`.
+fn finish_stream(
+    client: AudioClient,
+    wave: &WaveFormat,
+    layout: SampleLayout,
+    shared: bool,
+) -> Result<Stream, OutputError> {
+    let event = client.set_get_eventhandle().map_err(err)?;
+    let render = client.get_audiorenderclient().map_err(err)?;
+    let period_frames = client.get_buffer_size().map_err(err)? as usize;
+    Ok(Stream {
+        client,
+        render,
+        event,
+        layout,
+        shared,
+        period_frames,
+        bytes_per_frame: wave.get_blockalign() as usize,
+        pending: VecDeque::new(),
+        started: false,
+        paused: false,
+    })
+}
+
+impl Stream {
+    /// Shared mode: move as much of `pending` into the device buffer as fits, waiting for
+    /// the device whenever the buffer is full, until less than one frame is left.
+    fn feed_shared(&mut self) -> Result<(), OutputError> {
+        let bpf = self.bytes_per_frame.max(1);
+        while self.pending.len() >= bpf {
+            let free = self.client.get_available_space_in_frames().map_err(err)? as usize;
+            let n = (self.pending.len() / bpf).min(free);
+            if n == 0 {
+                // Full: start the clock if this is the first fill, then wait for room.
+                self.start_once()?;
+                self.event.wait_for_event(2000).map_err(err)?;
+                continue;
+            }
+            self.render
+                .write_to_device_from_deque(n, &mut self.pending, None)
+                .map_err(err)?;
+        }
+        Ok(())
+    }
+
+    /// Start the device clock unless it is running already.
+    fn start_once(&mut self) -> Result<(), OutputError> {
+        if !self.started {
+            self.client.start_stream().map_err(err)?;
+            self.started = true;
+        }
+        Ok(())
+    }
 }
 
 /// DSD capabilities of an endpoint: DoP wherever 24-bit PCM reaches `f_dsd/16`, native
@@ -219,57 +364,86 @@ pub fn list_devices() -> Vec<DeviceInfo> {
 }
 
 impl Output for WasapiOutput {
+    /// `wasapi exclusive · Speakers`, or `wasapi shared · …` while the fallback is open.
     fn name(&self) -> String {
-        format!("wasapi exclusive · {}", self.device_name)
+        let mode = if self.exclusive() {
+            "exclusive"
+        } else {
+            "shared"
+        };
+        format!("wasapi {mode} · {}", self.device_name)
     }
 
+    /// Open `format`. PCM tries every exclusive layout of [`exclusive_candidates`] (which
+    /// may change the bit depth; the returned format says which) and then the shared
+    /// fallback; DSD only opens exactly as asked.
     fn open(&mut self, format: OutputFormat) -> Result<OutputFormat, OutputError> {
         self.close();
         let unsupported = || OutputError::Unsupported {
             device: self.device_name.clone(),
             format,
         };
-        let mut client = self.device.get_iaudioclient().map_err(err)?;
-        let wanted = wave_format(format).ok_or_else(unsupported)?;
-        let wave = client
-            .is_supported_exclusive_with_quirks(&wanted)
-            .map_err(|_| unsupported())?;
-        // Three default periods (~30 ms) keeps USB DACs happy; HDA devices want 128-byte alignment.
-        let (default_period, _min) = client.get_device_period().map_err(err)?;
-        let period = client
-            .calculate_aligned_period_near(3 * default_period, Some(128), &wave)
-            .map_err(err)?;
-        client
-            .initialize_client(
-                &wave,
-                &Direction::Render,
-                &StreamMode::EventsExclusive { period_hns: period },
-            )
-            .map_err(|e| OutputError::Backend(format!("initialize exclusive stream: {e}")))?;
-        let event = client.set_get_eventhandle().map_err(err)?;
-        let render = client.get_audiorenderclient().map_err(err)?;
-        let period_frames = client.get_buffer_size().map_err(err)? as usize;
-        let bytes_per_frame = wave.get_blockalign() as usize;
-        self.stream = Some(Stream {
-            client,
-            render,
-            event,
-            wave,
-            period_frames,
-            bytes_per_frame,
-            pending: VecDeque::new(),
-            started: false,
-            paused: false,
-        });
-        self.format = Some(format);
+        let layouts = if format.is_dsd() {
+            layouts_for(format)
+        } else {
+            exclusive_candidates(format.bits)
+        };
+        // The first exclusive initialisation error, reported if nothing else opens.
+        let mut init_err = None;
+        let mut opened = None;
+        for layout in layouts {
+            let fmt = match layout.valid_bits() {
+                Some(bits) if !format.is_dsd() => OutputFormat { bits, ..format },
+                _ => format,
+            };
+            match open_exclusive(&self.device, fmt, layout) {
+                Some(Ok(stream)) => {
+                    opened = Some((stream, fmt));
+                    break;
+                }
+                Some(Err(e)) => {
+                    log::warn!("{}: exclusive {fmt} ({layout:?}): {e}", self.device_name);
+                    init_err.get_or_insert(e);
+                }
+                None => log::debug!("{}: exclusive {fmt} ({layout:?}) refused", self.device_name),
+            }
+        }
+        if opened.is_none() && !format.is_dsd() {
+            // No exclusive layout worked: let the Windows mixer convert instead of failing.
+            match open_shared(&self.device, format) {
+                Ok(stream) => {
+                    log::warn!(
+                        "{}: exclusive mode refused {format}; playing through the Windows \
+                         mixer (shared mode, not bit-perfect)",
+                        self.device_name
+                    );
+                    opened = Some((stream, format));
+                }
+                Err(e) => {
+                    log::warn!("{}: shared {format}: {e}", self.device_name);
+                    init_err.get_or_insert(e);
+                }
+            }
+        }
+        let Some((stream, got)) = opened else {
+            return Err(init_err.unwrap_or_else(unsupported));
+        };
+        if got.bits != format.bits {
+            log::info!(
+                "{}: {format} refused in exclusive mode; opened {got}",
+                self.device_name
+            );
+        }
+        self.stream = Some(stream);
+        self.format = Some(got);
         self.native = matches!(
-            format.encoding,
+            got.encoding,
             Encoding::Dsd {
                 packing: DsdPacking::Native,
                 ..
             }
         );
-        Ok(format)
+        Ok(got)
     }
 
     fn supports(&self, rate: u32, bits: u32) -> bool {
@@ -296,8 +470,10 @@ impl Output for WasapiOutput {
         client_supports(&client, *format)
     }
 
+    /// Exclusive unless the open stream is the shared fallback (before opening: the
+    /// backend's intent, exclusive).
     fn exclusive(&self) -> bool {
-        true
+        !self.stream.as_ref().is_some_and(|s| s.shared)
     }
 
     fn write(&mut self, frames: &[i32]) -> Result<(), OutputError> {
@@ -305,7 +481,6 @@ impl Output for WasapiOutput {
             .format
             .ok_or_else(|| OutputError::Backend("wasapi stream not open".into()))?;
         let s = self.stream.as_mut().unwrap();
-        let store = s.wave.get_bitspersample();
         if self.native {
             s.pending.extend(words_to_bytes(
                 frames,
@@ -313,14 +488,11 @@ impl Output for WasapiOutput {
                 NativeFormat::U32Le,
             ));
         } else {
-            for &v in frames {
-                match store {
-                    16 => s.pending.extend((v as i16).to_le_bytes()),
-                    // 24 valid bits in a 32-bit container must be left-justified (MSB aligned).
-                    _ if fmt.bits == 24 => s.pending.extend((v << 8).to_le_bytes()),
-                    _ => s.pending.extend(v.to_le_bytes()),
-                }
-            }
+            encode(frames, fmt.bits, s.layout, &mut s.pending);
+        }
+        if s.shared {
+            // The shared buffer takes any number of frames; it blocks only when full.
+            return s.feed_shared();
         }
         let period_bytes = s.period_frames * s.bytes_per_frame;
         while s.pending.len() >= period_bytes {
@@ -354,6 +526,22 @@ impl Output for WasapiOutput {
 
     fn drain(&mut self) -> Result<(), OutputError> {
         if let Some(s) = &mut self.stream {
+            if s.shared {
+                s.feed_shared()?;
+                if s.client.get_current_padding().map_err(err)? > 0 {
+                    s.start_once()?;
+                }
+                // Wait (at most ~2 s per event) until the mixer has taken everything.
+                while s.started && s.client.get_current_padding().map_err(err)? > 0 {
+                    s.event.wait_for_event(2000).map_err(err)?;
+                }
+                if s.started {
+                    s.client.stop_stream().map_err(err)?;
+                    s.client.reset_stream().map_err(err)?;
+                    s.started = false;
+                }
+                return Ok(());
+            }
             if !s.pending.is_empty() {
                 let period_bytes = s.period_frames * s.bytes_per_frame;
                 // DSD silence is 0x69, PCM silence is 0.
@@ -412,7 +600,16 @@ impl Output for WasapiOutput {
     fn queued_frames(&self) -> usize {
         self.stream
             .as_ref()
-            .map(|s| s.pending.len() / s.bytes_per_frame.max(1) + s.period_frames)
+            .map(|s| {
+                // Exclusive: one full period is always in the device. Shared: what the
+                // mixer still holds.
+                let in_device = if s.shared {
+                    s.client.get_current_padding().unwrap_or(0) as usize
+                } else {
+                    s.period_frames
+                };
+                s.pending.len() / s.bytes_per_frame.max(1) + in_device
+            })
             .unwrap_or(0)
     }
 

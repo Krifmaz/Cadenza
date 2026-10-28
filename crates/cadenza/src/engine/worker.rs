@@ -172,6 +172,10 @@ struct Worker {
     output_name: String,
     /// Format the device was opened with.
     output_format: Option<OutputFormat>,
+    /// Format that was asked for when the device was last opened. It differs from
+    /// `output_format` when the device took another bit depth (or a shared stream);
+    /// remembering it stops the next track of the same format reopening the device.
+    output_wanted: Option<OutputFormat>,
     /// Rates the device reports it can open.
     output_rates: Vec<u32>,
     /// DSD formats the device reports it can take.
@@ -235,6 +239,7 @@ pub(super) fn run(
         output: None,
         output_name: String::new(),
         output_format: None,
+        output_wanted: None,
         output_rates: Vec::new(),
         output_dsd: DsdCaps::NONE,
         output_exclusive: false,
@@ -1000,15 +1005,25 @@ impl Worker {
         Ok(())
     }
 
-    /// Open the output in `wanted` unless it already is.
+    /// Open the output in `wanted` unless it already is (or already holds what the device
+    /// gave for that request).
     fn open_output(&mut self, wanted: OutputFormat) -> Result<(), String> {
         let out = self.output.as_mut().ok_or("no output")?;
-        if self.output_format != Some(wanted) {
+        let open_as_wanted = self.output_format == Some(wanted)
+            || (self.output_format.is_some() && self.output_wanted == Some(wanted));
+        if !open_as_wanted {
             if self.output_format.is_some() && !self.no_drain {
                 let _ = out.drain();
             }
             let got = out.open(wanted).map_err(|e| e.to_string())?;
+            if got != wanted {
+                log::info!("{} opened {got} for {wanted}", out.name());
+            }
             self.output_format = Some(got);
+            self.output_wanted = Some(wanted);
+            // A backend may fall back to a shared stream, which changes both.
+            self.output_name = out.name();
+            self.output_exclusive = out.exclusive();
         }
         Ok(())
     }

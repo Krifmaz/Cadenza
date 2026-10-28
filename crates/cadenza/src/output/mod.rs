@@ -25,6 +25,9 @@ pub mod coreaudio_backend;
 pub mod cpal_backend;
 #[cfg(all(feature = "wasapi", windows))]
 pub mod wasapi_backend;
+// The WASAPI format ladder and sample packing are plain Rust, tested on every platform.
+#[cfg(any(test, all(feature = "wasapi", windows)))]
+pub mod wasapi_formats;
 
 use cadenza_dsp::dsd::{DsdPacking, DsdRate, NativeFormat};
 use serde::{Deserialize, Serialize};
