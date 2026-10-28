@@ -981,7 +981,7 @@ impl Worker {
         let got = self.output_format.unwrap();
 
         let convolution = self.load_convolution();
-        let config = pipeline_config(
+        let mut config = pipeline_config(
             &s,
             self.volume,
             convolution,
@@ -990,6 +990,17 @@ impl Worker {
             dsd,
             self.output_name.clone(),
         );
+        if config.bit_perfect && !got.is_dsd() && got.rate != input.rate {
+            // The device only took another rate (a shared-mode mixer at 48 kHz, say): the
+            // bit-perfect path would play at the wrong speed, so resample to it instead.
+            log::warn!(
+                "{} plays at {} Hz only; resampling {} Hz (not bit-perfect)",
+                self.output_name,
+                got.rate,
+                input.rate
+            );
+            config.bit_perfect = false;
+        }
         let pipeline =
             Pipeline::new(input, config, &self.cache).map_err(|e: PipelineError| e.to_string())?;
         if pipeline.channels() as u32 != got.channels {

@@ -4,6 +4,14 @@
 //! than ~0.5 s is queued, which is how the engine gets paced by the device clock.
 //! Samples are handed to cpal as `f32` (the mixer converts anyway) unless the device offers
 //! an integer format matching the requested depth.
+//!
+//! **The mix format.** cpal opens WASAPI in shared mode without `AUTOCONVERTPCM`, so on
+//! Windows the only stream it can open is the endpoint's mix format: typically 48 kHz with
+//! the speaker layout's channel count. A 44.1 kHz track then has no config at its rate
+//! (that was "format not supported by Speaker (Realtek(R) Audio): 24-bit 44.1 kHz 2ch").
+//! Instead of failing, [`Output::open`] falls back to the device's default config: it
+//! reports the device rate in the returned format, so the engine resamples to it, and
+//! maps the engine's channels onto the device's in the callback.
 
 use super::{DeviceInfo, DsdCaps, Output, OutputError, OutputFormat, STANDARD_RATES};
 use cpal::traits::{DeviceTrait, HostTrait, StreamTrait};
@@ -14,6 +22,10 @@ use std::time::Duration;
 
 /// Samples shared between the writer and cpal's callback.
 struct Ring {
+    /// Channels per frame in `queue` (what the engine writes).
+    src_channels: usize,
+    /// Channels per frame the device stream was opened with.
+    dev_channels: usize,
     /// Interleaved `f32` samples waiting for the callback.
     queue: VecDeque<f32>,
     /// While set, the callback plays silence and keeps the queue.
@@ -68,6 +80,8 @@ impl CpalOutput {
             stream: None,
             ring: Arc::new((
                 Mutex::new(Ring {
+                    src_channels: 2,
+                    dev_channels: 2,
                     queue: VecDeque::new(),
                     paused: false,
                     underruns: 0,
@@ -81,9 +95,20 @@ impl CpalOutput {
     /// The device's best config range covering `rate`: `f32` first, then the widest integer
     /// format.
     fn supported(&self, rate: u32) -> Option<cpal::SupportedStreamConfigRange> {
+        self.supported_with(rate, None)
+    }
+
+    /// Like [`Self::supported`], limited to configs with exactly `channels` channels when
+    /// given.
+    fn supported_with(
+        &self,
+        rate: u32,
+        channels: Option<u16>,
+    ) -> Option<cpal::SupportedStreamConfigRange> {
         let mut best: Option<cpal::SupportedStreamConfigRange> = None;
         for cfg in self.device.supported_output_configs().ok()? {
-            if cfg.min_sample_rate().0 <= rate && rate <= cfg.max_sample_rate().0 {
+            let channels_ok = channels.is_none_or(|c| cfg.channels() == c);
+            if channels_ok && cfg.min_sample_rate().0 <= rate && rate <= cfg.max_sample_rate().0 {
                 // Prefer f32, then the widest integer format.
                 let rank = |f: SampleFormat| match f {
                     SampleFormat::F32 => 3,
@@ -154,17 +179,43 @@ impl Output for CpalOutput {
                 format,
             });
         }
-        let range = self
-            .supported(format.rate)
-            .ok_or(OutputError::Unsupported {
-                device: self.device_name.clone(),
-                format,
-            })?;
-        let sample_format = range.sample_format();
+        // The exact rate and channel count if the device takes them, otherwise its own
+        // default (mix) format: the engine resamples to that rate and `fill` maps channels.
+        let (sample_format, dev_rate, dev_channels) =
+            match self.supported_with(format.rate, Some(format.channels as u16)) {
+                Some(range) => (range.sample_format(), format.rate, format.channels as u16),
+                None => {
+                    let def = self.device.default_output_config().map_err(|e| {
+                        log::warn!("{}: no default config: {e}", self.device_name);
+                        OutputError::Unsupported {
+                            device: self.device_name.clone(),
+                            format,
+                        }
+                    })?;
+                    log::warn!(
+                        "{}: {format} not offered; opening the device's own {} Hz {}ch {:?}",
+                        self.device_name,
+                        def.sample_rate().0,
+                        def.channels(),
+                        def.sample_format()
+                    );
+                    (def.sample_format(), def.sample_rate().0, def.channels())
+                }
+            };
         let config = StreamConfig {
-            channels: format.channels as u16,
-            sample_rate: SampleRate(format.rate),
+            channels: dev_channels,
+            sample_rate: SampleRate(dev_rate),
             buffer_size: cpal::BufferSize::Default,
+        };
+        {
+            let mut ring = self.ring.0.lock().unwrap();
+            ring.src_channels = format.channels.max(1) as usize;
+            ring.dev_channels = dev_channels.max(1) as usize;
+        }
+        // What the engine must produce: the device's rate, the engine's own channels.
+        let format = OutputFormat {
+            rate: dev_rate,
+            ..format
         };
         let ring = Arc::clone(&self.ring);
         let scale = 1.0 / (1u64 << (format.bits - 1)) as f32;
@@ -279,6 +330,8 @@ impl Output for CpalOutput {
 }
 
 /// The device callback: copy from the ring, converting with `conv`; silence on underrun.
+/// When the device has other channels than the engine writes, frames are remapped (see
+/// [`map_frame`]).
 fn fill<T: Copy + Default>(
     ring: &Arc<(Mutex<Ring>, Condvar)>,
     out: &mut [T],
@@ -288,6 +341,25 @@ fn fill<T: Copy + Default>(
     let mut r = lock.lock().unwrap();
     if r.paused {
         out.fill(T::default());
+        return;
+    }
+    let (src, dev) = (r.src_channels, r.dev_channels);
+    if src != dev {
+        let mut frame = vec![0f32; src];
+        for o in out.chunks_mut(dev) {
+            if r.queue.len() < src {
+                r.underruns += 1;
+                o.fill(T::default());
+                continue;
+            }
+            for v in frame.iter_mut() {
+                *v = r.queue.pop_front().unwrap_or(0.0);
+            }
+            for (c, slot) in o.iter_mut().enumerate() {
+                *slot = conv(map_frame(&frame, c));
+            }
+        }
+        cv.notify_all();
         return;
     }
     for o in out.iter_mut() {
@@ -300,4 +372,35 @@ fn fill<T: Copy + Default>(
         }
     }
     cv.notify_all();
+}
+
+/// Device channel `c` of an engine frame `frame`: mono goes to the first two channels,
+/// otherwise channels map one to one and device channels the engine does not have are
+/// silent (stereo on a 5.1/7.1 mix plays on front left/right).
+fn map_frame(frame: &[f32], c: usize) -> f32 {
+    match frame.len() {
+        1 if c < 2 => frame[0],
+        _ => frame.get(c).copied().unwrap_or(0.0),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::map_frame;
+
+    #[test]
+    fn frames_map_onto_other_channel_counts() {
+        // Stereo onto 5.1: front left/right, the rest silent.
+        let st = [0.25, -0.5];
+        let six: Vec<f32> = (0..6).map(|c| map_frame(&st, c)).collect();
+        assert_eq!(six, [0.25, -0.5, 0.0, 0.0, 0.0, 0.0]);
+        // Mono onto stereo: both sides.
+        assert_eq!([map_frame(&[0.1], 0), map_frame(&[0.1], 1)], [0.1, 0.1]);
+        // 5.1 onto stereo: front left/right only.
+        let surround = [1.0, 2.0, 3.0, 4.0, 5.0, 6.0];
+        assert_eq!(
+            [map_frame(&surround, 0), map_frame(&surround, 1)],
+            [1.0, 2.0]
+        );
+    }
 }
