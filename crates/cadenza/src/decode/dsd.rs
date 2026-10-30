@@ -318,7 +318,7 @@ impl<R: Read + Seek> DsdReader<R> {
             frames: t.frames as u64 * super::dst::bits_per_frame(sacd::RATE) as u64,
             tags: Tags {
                 title: t.title.clone().or_else(|| Some(format!("Track {number}"))),
-                artist: t.performer.clone().or(disc.artist.clone()),
+                artist: t.performer.or_else(|| disc.artist.clone()),
                 album: disc.title.clone(),
             },
             lsb_first: false,
@@ -1589,7 +1589,7 @@ mod tests {
         }
         let path = d.join("tone.dsf");
         write_dsf(&path, rate, &planar, true, &Tags::default()).unwrap();
-        let mut dec = DsdDecoder::open(&Source::Path { path: path.clone() }).unwrap();
+        let mut dec = DsdDecoder::open(&Source::Path { path }).unwrap();
         assert_eq!(dec.pcm_rate(), 352_800);
         assert_eq!(dec.info().codec, "DSF");
         assert_eq!(dec.pcm_input_format().rate, 352_800);

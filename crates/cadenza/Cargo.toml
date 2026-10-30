@@ -40,6 +40,9 @@ cuda = ["cadenza-dsp/cuda"]
 # Portable GPU offload in cadenza-dsp: Vulkan / Metal / DX12 (AMD, Intel, Apple, NVIDIA).
 wgpu = ["cadenza-dsp/wgpu"]
 
+[lints]
+workspace = true
+
 [dependencies]
 cadenza-dsp = { path = "../cadenza-dsp" }
 serde.workspace = true

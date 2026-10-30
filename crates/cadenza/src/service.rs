@@ -45,7 +45,7 @@ pub fn start(config: &Config, path: PathBuf) -> Services {
             persist: Some(persist),
         },
     );
-    let (sc, sp) = (shared.clone(), path.clone());
+    let (sc, sp) = (shared, path);
     crate::encore::set_persist(move |enc: &crate::config::EncoreConfig| {
         let mut c = sc.lock().unwrap_or_else(|e| e.into_inner());
         c.encore = enc.clone();

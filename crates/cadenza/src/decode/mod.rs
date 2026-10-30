@@ -373,7 +373,7 @@ pub fn expand(source: &Source) -> Option<Result<Vec<Entry>, String>> {
                     artist: t
                         .performer
                         .clone()
-                        .or(disc.artist.clone())
+                        .or_else(|| disc.artist.clone())
                         .unwrap_or_default(),
                     album: disc.title.clone().unwrap_or_default(),
                     duration: Some(t.frames as f64 / 75.0),
@@ -500,7 +500,7 @@ mod tests {
         std::fs::create_dir_all(&dir).unwrap();
         let path = dir.join("t.wav");
         let ints = write_wav(&path, 44100, 24, 20_000);
-        let mut d = Decoder::open(&Source::Path { path: path.clone() }).unwrap();
+        let mut d = Decoder::open(&Source::Path { path }).unwrap();
         let info = d.info().clone();
         assert_eq!(
             (info.codec.as_str(), info.rate, info.bits, info.channels),

@@ -491,7 +491,7 @@ mod tests {
         let mut s = Settings::default();
         s.output.backend = "null".into();
         let engine = Engine::start(
-            s.clone(),
+            s,
             crate::engine::EngineOptions {
                 cache: cadenza_dsp::CoefficientCache::disabled(),
                 realtime: false,

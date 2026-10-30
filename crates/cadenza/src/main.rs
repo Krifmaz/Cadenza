@@ -464,10 +464,7 @@ fn serve(config: Config, path: std::path::PathBuf) -> anyhow::Result<()> {
     let runtime = tokio::runtime::Runtime::new()?;
     // The engine and the configured receivers, for the life of the process.
     let services = cadenza::service::start(&config, path);
-    runtime.block_on(cadenza::api::serve(
-        &config.server.listen,
-        services.engine.clone(),
-    ))
+    runtime.block_on(cadenza::api::serve(&config.server.listen, services.engine))
 }
 
 #[cfg(test)]

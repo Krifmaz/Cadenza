@@ -327,7 +327,7 @@ async fn system_set(
     if cfg.enabled && cfg.mode == crate::system::SystemMode::App && cfg.app.trim().is_empty() {
         return Err(bad("pick an application to capture"));
     }
-    let engine = st.engine.clone();
+    let engine = st.engine;
     crate::system::set_config(engine, &cfg);
     Ok(Json(crate::system::status()))
 }
@@ -338,7 +338,7 @@ async fn encore_set(
     State(st): State<AppState>,
     Json(cfg): Json<crate::config::EncoreConfig>,
 ) -> Result<Json<Value>, ApiError> {
-    crate::encore::set_config(st.engine.clone(), &cfg);
+    crate::encore::set_config(st.engine, &cfg);
     Ok(Json(crate::encore::status()))
 }
 
@@ -949,7 +949,7 @@ mod tests {
         let mut bad = s.clone();
         bad.dsp.headroom_db = Some(3.0);
         assert!(validate(&bad).is_err());
-        let mut bad = s.clone();
+        let mut bad = s;
         bad.matrix.enabled = true;
         bad.matrix.preset = "7.1-nonsense".into();
         assert!(validate(&bad).unwrap_err().contains("preset"));

@@ -715,7 +715,7 @@ pub(crate) mod encode {
         let pseg_lens = o
             .ptable_segments
             .clone()
-            .unwrap_or(o.filter_segments.clone());
+            .unwrap_or_else(|| o.filter_segments.clone());
         let npseg = pseg_lens.len() + 1;
         let starts = |lens: &[usize]| -> Vec<usize> {
             let mut s = vec![0];

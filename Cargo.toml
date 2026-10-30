@@ -24,6 +24,14 @@ rayon = "1.12"
 
 # Long multi-million-tap filter designs and the FFT heavy lifting are much nicer
 # with optimisations on, even while running the test-suite.
+# Lints on top of clippy's defaults that catch wasted copies: a String or Vec copied with to_string/to_owned
+# where clone (or nothing) would do, and to_string through an extra reference (the slow, generic path).
+# CI runs clippy with -D warnings, so they cannot creep back in. redundant_clone and needless_collect are
+# nursery lints with false positives, so they are run by hand now and then instead.
+[workspace.lints.clippy]
+implicit_clone = "warn"
+inefficient_to_string = "warn"
+
 [profile.dev]
 opt-level = 1
 

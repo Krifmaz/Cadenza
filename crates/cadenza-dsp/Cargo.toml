@@ -19,6 +19,9 @@ cuda = ["dep:cudarc", "dep:libloading"]
 # has it, double-f32 (two f32 per value, about 48 bits) elsewhere. Needs Rust 1.87.
 wgpu = ["dep:wgpu", "dep:pollster", "dep:naga"]
 
+[lints]
+workspace = true
+
 [dependencies]
 rustfft.workspace = true
 realfft.workspace = true

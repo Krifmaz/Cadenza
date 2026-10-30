@@ -503,7 +503,7 @@ impl Worker {
         let mut chain_changed = old_dsp != dsp || old.matrix != self.settings.matrix;
         // Only the EQ moved (a band dragged on the page): retune it in place, no rebuild.
         let eq_only = chain_changed && !output_changed && old.matrix == self.settings.matrix && {
-            let mut a = old_dsp.clone();
+            let mut a = old_dsp;
             a.eq = dsp.eq.clone();
             a.eq_enabled = dsp.eq_enabled;
             a == dsp
